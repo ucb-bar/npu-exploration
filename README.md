@@ -38,7 +38,26 @@ migration is mechanical.
 
 ## Status
 
-Step 3 of 10. Toolchain verified and the fp8 64×64 golden established on spike; the target contract
-resolves. No backend yet.
+**The bridge works.** One command takes a described matmul all the way to hardware:
+
+```bash
+cd <chipyard-root> && source ./env.sh
+python app/mxgemm_bringup/build_fp8_64x64.py
+```
+
+```
+operands  A[64][64] B[64][64]  scales A2x64 B2x64   <- matmul_fp8_64x64.h
+oracle    spike (spike_mx_gemmini_functional, derived_from_rtl=False)
+OUT Y0    64x64 bf16 patterns, first row[:4]=[49151, 48576, 49524, 49017]
+METRIC    {'cycles': 279, 'cycle_window_mx_gemmini_region': 1}
+selfcheck fp8 WS matmul test PASSED (no mismatches).
+```
+
+That is emit C → compile an ELF → run on spike → parse results, and it reproduces the hand-written
+reference test bit-exactly. merlin also discovers and loads the backend
+(`get_backend("mx_gemmini_rocket")`).
+
+Next: PyTorch as the front end, so the operands come from a model instead of a test header.
+Cycle-accurate (Verilator) is deferred — it is not on the path to the software bridge.
 
 See [`planning/npu_exploration_bridge_plan.md`](planning/npu_exploration_bridge_plan.md).

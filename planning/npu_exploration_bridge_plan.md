@@ -1,6 +1,7 @@
 # npu-exploration: PyTorch → MxGemmini(Rocket) bridge plan
 
-**Created** 2026-09-01 · **Status** Step 1 (this file) done; nothing implemented yet.
+**Created** 2026-09-01 · **Status** Steps 1–5 done — **the software bridge works end to end on
+spike** (§9). Next: PyTorch as the front end. Cycle-accurate deferred at the user's direction.
 
 Goal: an end-to-end exploration platform in `generators/gemmini/npu-exploration/` where a model is
 defined in PyTorch, compiled down to Rocket-hosted MxGemmini RoCC instructions, and run — first on
@@ -259,7 +260,7 @@ for the MMIO endpoint. Neither blocks the Rocket path — functs 23–29 *are* e
 | 2 | Verify toolchain: `$RISCV`, `spike`, `libgemmini.so`; build + run `matmul_tiled_fp8_64x64` under spike to establish the golden | a recorded PASS | **DONE** 2026-09-01 — see §6 |
 | 3 | Skeleton dirs + `target_contract.yaml`; confirm `target_registry.resolve("mx_gemmini_rocket")` finds it via `MERLIN_TARGET_PATH` | resolvable OOT package | **DONE** 2026-09-01 — see §7 |
 | 4 | `mxgemm_emit.py` — emit C for one fixed 64×64×64 mxfp8 tile, **reimplemented from `matmul_tiled_fp8_64x64.c`** (Rocket-native, PASSing). Structure informed by `mxgemm_lib.hpp` but written fresh; no radiance include or path | C that compiles | **DONE** 2026-09-01 — see §8 |
-| 5 | `transport_rocket.py` + `runtime/` harness; emitted C reproduces the Step-2 golden bit-exactly | **the bridge** | |
+| 5 | **RE-SCOPED** (user: cycle-accurate not needed yet): runner + OUT/METRIC/DONE protocol + backend registration, so merlin can drive it. The RTL transport moved to step 10 | **the bridge** | **DONE** 2026-09-01 — see §9 |
 | 6 | `runner.py` — spike invocation, OUT/METRIC/DONE parsing, wire to merlin's capsule grading | graded capsule | |
 | 7 | Drive from `merlin/contract/capsules/mx_gemmini/isa/M0_mxfp8_single_tile` etc. — reuse the existing MX capsules | capsules PASS | |
 | 8 | `app/` — PyTorch `nn.Linear` mxfp8 → capsule → spike, vs a PyTorch golden | PyTorch↔HW bridge closed | |
@@ -480,7 +481,88 @@ half-width `mx_chunk_id` drain) and the `runtime/` harness packaging. The numeri
 meant to prove is already met on the spike transport; what remains is the second transport and the
 packaging, plus a `sim/` wrapper for the build recipe in §6.1.
 
-## 9. Open questions
+## 9. Step 5 (re-scoped) — merlin can drive it (2026-09-01)
+
+**Re-ordered on user direction:** the original Step 5 was the second transport (accumulator mvout for
+the real `MxGemminiRocketConfig`). That serves *cycle-accurate* runs, which the user does not need
+yet — "I don't care about cycle accurate yet". The software bridge needs reproducibility and merlin
+drivability instead, so those were done first and the RTL transport deferred.
+
+One command now runs the whole path:
+
+```
+$ python app/mxgemm_bringup/build_fp8_64x64.py
+operands  A[64][64] B[64][64]  scales A2x64 B2x64   <- matmul_fp8_64x64.h
+oracle    spike (spike_mx_gemmini_functional, derived_from_rtl=False)
+OUT Y0    64x64 bf16 patterns, first row[:4]=[49151, 48576, 49524, 49017]
+METRIC    {'cycles': 279, 'cycle_window_mx_gemmini_region': 1}
+selfcheck fp8 WS matmul test PASSED (no mismatches).
+```
+
+### 9.1 What was added
+
+- **`backend/runner.py`** — toolchain resolution, `compile_command_buffer`, `run_elf`,
+  `parse_output`, `run_command_buffer`, `available()`. Mirrors `targets/gemmini/backend/gemmini.py`.
+  Compile flags mirror `bareMetalC/Makefile` CFLAGS_BAREMETAL exactly, include order included.
+  `libgemmini_so()` **prefers the in-tree build over `$RISCV/lib`**, because the installed copy goes
+  stale silently (§6.3).
+- **OUT/METRIC/DONE in the emitter** — merlin's shared console protocol
+  (`runtime/backends/base.parse_console`): `OUT <name> <rows> <cols> v...` / `METRIC <name> <int>` /
+  `DONE`, plus a cycle window around the accelerator region. The self-check is kept and is now
+  emitted only when the cb carries a golden.
+  Values are BF16 **bit patterns**, undecoded — grading against merlin's float reference needs a
+  bf16 decode plus the profile tolerance, which belongs to the capsule step.
+- **`backend/__init__.py`** — package init that self-registers
+  `BackendInfo("mx_gemmini_rocket", TargetClass.NPU, BackendKind.KERNEL, __name__)`. Registration is
+  best-effort (try/except ImportError) so the package still works standalone with no merlin present.
+- **Contract**: the `plugin: {backend: backend}` block, now that `backend/` exists.
+
+**Verified**: `get_backend("mx_gemmini_rocket")` returns
+`merlin._oot_backends.mx_gemmini_rocket`, with `_LOAD_FAILURES` empty.
+
+### 9.2 Package layout — relative imports are required
+
+merlin's `_load_oot_backend` imports a plugin **directory** as
+`merlin._oot_backends.<name>` with `submodule_search_locations` set to it. Siblings must therefore
+use **relative** imports (`from .mxgemm_emit import ...`), exactly as the gemmini backend's
+`__init__` docstring explains. Callers import the package (`sys.path` gets the *target root*, then
+`import backend`), never the package interior.
+
+### 9.3 `sim/` — the split with the backend
+
+The *runner* belongs in the backend, because spike / Verilator / FireSim all execute the **same ELF**
+and dispatching to one is a few lines per substrate (merlin's `gemmini.py` has the spike and
+verilator branches side by side). So `run_elf(elf, simulator=...)` stays in `backend/runner.py`.
+
+`sim/` owns what **produces and manages** a substrate, which is a genuinely different concern —
+slow, config-managed, not codegen:
+
+- Verilator model builds from `MxGemminiRocketConfig` (chipyard elaboration) — the first
+  RTL-certified tier; below it a number is not a hardware claim (`citable_tier: rtl`).
+- FPGA / FireSim bitstream builds.
+- **Hardware provenance**: which RTL revision a result came from. merlin's convention is one registry
+  of pinned 40-char shas verified by CONTENT, not branch name (`contract/hardware_pins.yaml`) — a
+  result attributed to the wrong device is worse than no result, because it gets cited. The contract
+  declares `rtl_sim_config: MxGemminiRocketConfig`; a pin says *which build of it*.
+
+Adding a substrate = a build recipe in `sim/` plus a small branch in `run_elf`. Empty for now
+because spike is a functional model (`derived_from_rtl: false`) and carries no hardware claim.
+
+### 9.4 merlin limitation found: `backend_for()` ignores `MERLIN_TARGET_PATH`
+
+`resolve()` honors the search path and returns the correct `contract_path`, but
+`targetgen.rtl.facts.target_contract_path()` does **not** — it builds
+`out/artifacts/targets/<name>/contracts/target_contract.yaml` from `target_base(target)` regardless.
+So for any OOT target, `backend_for(name)` fails to read the contract and **silently** degrades to
+the generic `'simulator'` (the `except (OSError, YAMLError)` swallows it). Ours declares
+`default_backend: baremetal` and still reports `simulator`.
+
+- **Not blocking today**: our flow calls the backend package directly and never goes through
+  `backend_for`. It will matter when merlin's lowering pipeline drives the target (Step 7+).
+- **Workaround**: `MERLIN_TARGET_CONTRACT=<path>` is honored by `target_contract_path`.
+- **Not fixed here** — we do not fork the merlin submodule. Worth reporting upstream.
+
+## 10. Open questions
 
 - **Q1 — `radiance-kernels/` tracking. RESOLVED 2026-09-01:** no dependency. Not a submodule, not
   tracked, no build path into it. Read for ideas while authoring; cite in comments where an idea came
@@ -498,7 +580,7 @@ packaging, plus a `sim/` wrapper for the build recipe in §6.1.
   datapath, or whether the MX ops need the hand-authored route the radiance `hand_v0/dialect.py`
   took. Deferred to Step 3; does not block Steps 4–5, which emit C directly from a command buffer.
 
-## 10. Long-term direction: one config artifact, two consumers
+## 11. Long-term direction: one config artifact, two consumers
 
 **User, 2026-09-01:** eventually software emits a **JSON of configurations** that drives *both*
 compilation *and* hardware generation. The §4 table is the near-term stand-in for that.
@@ -523,7 +605,7 @@ Implications to keep in view while building Steps 3–5, so we do not have to un
 
 Not in scope for Steps 1–10. Recorded so the contract is authored in a shape that can be generated.
 
-## 11. Related plans
+## 12. Related plans
 
 `../planning/mxgemmini_rocket_standalone_plan.md` (the RTL-side V1/V2/V3 output-mode work this
 consumes), `../planning/fp8_bubble_and_perf_plan.md`, `../planning/acc_raw_debug.md`.

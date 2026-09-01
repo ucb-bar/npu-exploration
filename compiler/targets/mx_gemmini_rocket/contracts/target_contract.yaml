@@ -35,10 +35,11 @@ family: tensor_resident                 # [COMPILE] same compiler-level model as
 # [ABI] Real RoCC custom instructions, unlike the MMIO sibling. Determines how the backend emits.
 endpoint_kind: inline_asm_insn
 
-# NOTE: no `plugin:` block yet. The schema requires every plugin reference to resolve to a file
-# inside this package, and backend/ does not exist until Step 4 — declaring `backend: backend` now
-# would be an unresolvable pointer, which load_target treats as an error rather than ignoring.
-# Added in Step 4 together with the module it names.
+# [COMPILE] The package's extension points. `backend` is the one load-bearing seam: merlin imports
+# this directory as merlin._oot_backends.mx_gemmini_rocket and the package __init__ self-registers,
+# so the core carries no name -> module map. Path is relative to the package root.
+plugin:
+  backend: backend
 
 # --- The ABI encoding surface RTL discovery cannot ground -------------------------------------
 encoding:
