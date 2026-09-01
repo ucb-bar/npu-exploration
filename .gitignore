@@ -1,5 +1,5 @@
 out/
-.venv/
 radiance-kernels/
+.venv/
 __pycache__/
 *.pyc

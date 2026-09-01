@@ -171,7 +171,10 @@ def run_elf(elf: str | Path, simulator: str = "spike", timeout: int = 600) -> st
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = f"{so.parent}:{env.get('LD_LIBRARY_PATH', '')}"
     cmd = [str(spike_path()), f"--extlib={so}", "--extension=gemmini", str(elf)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    # errors="replace": a kernel that runs wild prints raw bytes, and a UnicodeDecodeError
+    # traceback hides that. Decode lossily so the caller sees the garbage and can diagnose it.
+    proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
+                          timeout=timeout, env=env)
     if proc.returncode != 0:
         raise MxRunnerError(
             f"spike exited {proc.returncode}:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")

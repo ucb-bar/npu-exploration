@@ -9,12 +9,17 @@ Every layer of the stack lives in this one repo, split by directory.
 |---|---|---|
 | `app/` | L1 — model | PyTorch models, quantization, experiment definitions |
 | `compiler/` | L2 — compiler | `targets/mx_gemmini_rocket/` — the out-of-tree merlin target (contract + backend) |
-| `runtime/` | L3 — runtime | C harness, output protocol, include glue |
-| `sim/` | L4 — simulation | spike (`libgemmini`) runner; later Verilator / FireSim |
+| `sim/` | L3 — substrates | reserved for RTL simulation and FPGA emulation (the spike runner lives in the backend) |
 | `merlin/` | framework | compiler framework, git submodule, **unforked** |
 | `radiance-kernels/` | reference | read-only; **not a dependency** (see below) |
 | `planning/` | — | plans and design decisions |
-| `out/` | — | runs and artifacts |
+| `out/`, `.venv/` | — | build artifacts and the Python environment (both gitignored) |
+
+External references, outside this repo:
+
+- `../software/gemmini-rocc-tests/` — the **baremetal C reference**: `include/gemmini.h` (the MX
+  intrinsics this target emits) and the hand-written MX tests, buildable with `build_spike.sh`.
+- `../software/libgemmini/` — the spike functional model of the MX datapath.
 
 ## Getting started
 
@@ -38,26 +43,35 @@ migration is mechanical.
 
 ## Status
 
-**The bridge works.** One command takes a described matmul all the way to hardware:
+**PyTorch → ELF → spike works.** One command takes a layer defined in PyTorch all the way to
+hardware:
 
 ```bash
-cd <chipyard-root> && source ./env.sh
-python app/mxgemm_bringup/build_fp8_64x64.py
+cd <chipyard-root> && source ./env.sh          # sets $RISCV
+.venv/bin/python app/torch_linear/run_linear.py
 ```
 
 ```
-operands  A[64][64] B[64][64]  scales A2x64 B2x64   <- matmul_fp8_64x64.h
-oracle    spike (spike_mx_gemmini_functional, derived_from_rtl=False)
-OUT Y0    64x64 bf16 patterns, first row[:4]=[49151, 48576, 49524, 49017]
-METRIC    {'cycles': 279, 'cycle_window_mx_gemmini_region': 1}
-selfcheck fp8 WS matmul test PASSED (no mismatches).
+model     nn.Linear(64 -> 64, bias=False), input [64][64]
+quantize  mxfp8 e4m3 + E8M0 block scales (group 32, peak code 2^2)
+elf       out/build/torch_linear/mx_gemmini_rocket.elf  (27016 bytes)
+spike     Y0 (64, 64) bf16   METRIC {'cycles': 282, ...}
+          finite 4096/4096   range [-2.062, 1.875]
 ```
 
-That is emit C → compile an ELF → run on spike → parse results, and it reproduces the hand-written
-reference test bit-exactly. merlin also discovers and loads the backend
-(`get_backend("mx_gemmini_rocket")`).
+Arbitrary shapes (M, K, N independently) — `--m 32 --k 128 --n 96` works. The front end's job is to
+*produce the ELF*; **spike is the reference** for what the hardware computes, so nothing here tries
+to predict the numbers.
 
-Next: PyTorch as the front end, so the operands come from a model instead of a test header.
-Cycle-accurate (Verilator) is deferred — it is not on the path to the software bridge.
+merlin also discovers and loads the backend (`get_backend("mx_gemmini_rocket")`).
+
+Next: more layer types, then whole models. Cycle-accurate (Verilator) is deferred — not on the path
+to the software bridge.
+
+> **No automated correctness gate.** The emitter was written from
+> `../software/gemmini-rocc-tests/bareMetalC/matmul_tiled_fp8_64x64.c` and verified bit-exact
+> against it, but that check was a bring-up scaffold and has been removed along with the rest of the
+> baremetal-C mapping. Today's runs only confirm outputs are *finite*. To re-check correctness after
+> changing the emitter, build and run that reference test directly (`build_spike.sh`) and compare.
 
 See [`planning/npu_exploration_bridge_plan.md`](planning/npu_exploration_bridge_plan.md).

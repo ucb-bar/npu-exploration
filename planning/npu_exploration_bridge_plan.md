@@ -1,7 +1,7 @@
 # npu-exploration: PyTorch → MxGemmini(Rocket) bridge plan
 
-**Created** 2026-09-01 · **Status** Steps 1–5 done — **the software bridge works end to end on
-spike** (§9). Next: PyTorch as the front end. Cycle-accurate deferred at the user's direction.
+**Created** 2026-09-01 · **Status** **PyTorch → ELF → spike works, arbitrary shapes** (§10).
+Cycle-accurate (Verilator) deferred at the user's direction.
 
 Goal: an end-to-end exploration platform in `generators/gemmini/npu-exploration/` where a model is
 defined in PyTorch, compiled down to Rocket-hosted MxGemmini RoCC instructions, and run — first on
@@ -464,7 +464,7 @@ reads the same side-channel).
 target's own V1/V2/V3 output modes vary at exactly that point; labelled as an invention in the
 module so it is not mistaken for convention.
 
-### 8.3 Deliberate non-correction, needs a non-square shape to settle
+### 8.3 Deliberate non-correction — **RESOLVED in §10.2**, it was three real bugs
 
 The reference walks B with the **same row stride it uses for A** (`j*DIM*M + k*DIM`) — reading B as
 if laid out `[N][K]` though it is declared `[K][N]`. At M == N == K = 64 that is dimensionally
@@ -562,7 +562,127 @@ the generic `'simulator'` (the `except (OSError, YAMLError)` swallows it). Ours 
 - **Workaround**: `MERLIN_TARGET_CONTRACT=<path>` is honored by `target_contract_path`.
 - **Not fixed here** — we do not fork the merlin submodule. Worth reporting upstream.
 
-## 10. Open questions
+## 10. PyTorch front end (2026-09-01)
+
+**Scope, per the user:** "I am not expecting the pytorch to give me the right output. I already have
+spike for that. All I need is pytorch to generate the elf that is executable by spike." So the front
+end's job is to *produce an ELF*, not to predict numbers. No golden is baked, no reference gating —
+spike is the truth. An earlier draft of the runner script had a whole compare-and-verdict apparatus;
+it was removed.
+
+```
+$ .venv/bin/python app/torch_linear/run_linear.py
+model     nn.Linear(64 -> 64, bias=False), input [64][64]
+quantize  mxfp8 e4m3 + E8M0 block scales (group 32, peak code 2^2)
+elf       out/build/torch_linear/mx_gemmini_rocket.elf  (27016 bytes)
+spike     Y0 (64, 64) bf16   METRIC {'cycles': 282, ...}
+          finite 4096/4096   range [-2.062, 1.875]
+```
+
+New files: `app/mxquant.py` (float -> MX codes + E8M0 scales, transcribed from
+`software/libgemmini/mx_fp_math.h`), `app/mxcb.py` (the cb builder, shared with the bring-up
+experiment), `app/torch_linear/run_linear.py`. Environment: `.venv/` in this repo, torch 2.14.0+cpu
++ numpy (gitignored).
+
+### 10.1 The datapath's intermediate accumulator has a 4-bit exponent
+
+The first PyTorch run returned **all NaN** (4096/4096 = `0x7FC0`). Root cause, and it is a real
+hardware constraint worth knowing:
+
+Inside a 16-deep column pass the MX accumulator is narrow — `gemmini.cc`: `prod_e = 4`,
+`acc_e[] = {4 x15, 8}`. `fp_quantize_rne_scalar` returns **±INFINITY** above its `emax`
+(`mx_fp_math.h:167`, `emax = bias = 7`, so ~2^8 = 256), and `fp_add_exact` turns mixed-sign
+infinities into **NaN** (`:180`). The result is an all-NaN tile, not a degraded one.
+
+**Textbook OCP MX scaling overflows this immediately.** The spec says to normalize each block so its
+max uses the full element range (±448 for e4m3); two such operands multiply to ~200,000, ~800x over.
+
+Bound: 16 accumulated products of codes of magnitude <= C need `16*C^2 <= 256`, so **C <= 4**.
+`mxquant.TARGET_CODE_EXP = 2` implements it. Corroboration: the shipped `matmul_fp8_64x64.h`
+operands independently top out near ±4. Precision cost is small — e4m3 keeps 3 mantissa bits at every
+exponent, so relative precision is unchanged; only within-block dynamic range shrinks.
+
+### 10.2 Non-square shapes — three bugs, all invisible at M == N == K
+
+Testing shapes beyond 64x64x64 crashed spike (it printed raw bytes; `run_elf` now decodes with
+`errors="replace"` so that surfaces as garbage output rather than a `UnicodeDecodeError` traceback).
+
+This is the §8.3 ambiguity, resolved. The answer was **derivable from the spike model all along** —
+`gemmini.cc`'s own indexing in the LOOP_WS MX kernel:
+
+```
+A_t = A_sp + (i * TK + k_outer) * DIM     ->  A slot = i*tiles_K + k
+B_t = B_sp + (k_outer * TJ + j) * DIM     ->  B slot = k*tiles_J + j
+```
+
+Three defects, inherited from reproducing the reference test verbatim:
+
+| # | was | correct | invisible when |
+|---|---|---|---|
+| 1 | both operands strided by M | A strides by **K**, B by **N** | M == N == K |
+| 2 | B slot `j*tiles_K + k` | `k*tiles_J + j` | tiles_J == tiles_K |
+| 3 | `out_cols = M/4` | `N/4` (output is [M][N]) | M == N |
+
+Verified after the fix — square case still **bit-exact**, and:
+
+| shape (M,K,N) | cycles | finite |
+|---|---|---|
+| 64,64,64 | 282 | 4096/4096 |
+| 32,64,64 | 205 | 2048/2048 |
+| 128,64,64 | 394 | 8192/8192 |
+| 64,64,128 | 352 | 8192/8192 |
+| 64,128,64 | 468 | 4096/4096 |
+| 32,128,96 | 467 | 3072/3072 |
+
+Cycle counts scale sensibly with each dimension, which is a further sanity signal.
+
+**Method note worth keeping:** reproducing a working reference verbatim got the bridge running fast,
+but embedded three coincidences as if they were facts. The fix came from the *model's* indexing, not
+the test's. Prefer deriving from the executable semantics over copying a passing example.
+
+## 11. Cleanup — the repo is now only the PyTorch → ELF → spike path (2026-09-01)
+
+**User:** "clean up everything that is not needed. all the debug and baremetal c mapping that
+doesn't involve the pytorch -> merlin -> elf -> spike path", with the note that
+`../software/gemmini-rocc-tests/` **continues to be the baremetal C reference**. So the reference
+stays where it belongs — outside this repo — and our in-repo copy of the mapping is gone.
+
+Removed:
+
+- `app/mxgemm_bringup/` — the fp8 64x64 experiment and its C-header operand parser.
+- `runtime/` — an empty placeholder; its role was absorbed into `backend/runner.py` (§9.3).
+- `out/build/` debris from debugging (`dbg`, `dbg2`, `sweep*`), and all `__pycache__`.
+- Emitter: `_emit_check` and the whole baked-golden / self-check branch — its only consumer was the
+  bring-up kernel. `generate_driver` now always emits the OUT/METRIC/DONE report and returns 0.
+- `mxquant`: `mx_reference_matmul`, `bf16_bits`, `_bf16_round`, `FP8_E4M3_MAX`. The reference model
+  earned its keep once (it empirically settled the B layout, §10.2) but spike is the reference on the
+  live path. `bf16_bits_to_float` stays — it decodes the device's OUT values.
+
+What remains, all of it load-bearing:
+
+```
+app/mxquant.py                 float -> MX codes + E8M0 scales
+app/mxcb.py                    operands -> command buffer
+app/torch_linear/run_linear.py PyTorch -> ELF -> spike
+compiler/targets/mx_gemmini_rocket/{contracts/target_contract.yaml,backend/{__init__,mxgemm_emit,runner}.py}
+sim/                           reserved for RTL sim + FPGA emulation
+```
+
+Re-verified after the cut: 64x64x64 and 32x128x96 both build and run, finite.
+
+### 11.1 What the cleanup costs — no automated correctness gate
+
+The deleted bring-up was the only **bit-exact** check: it reproduced
+`matmul_tiled_fp8_64x64.c`'s golden exactly, which is how the three shape bugs in §10.2 were caught
+as regressions rather than shipped. The live path now confirms only that outputs are *finite*.
+
+This is an accepted trade, not an oversight — the reference test still exists at
+`../software/gemmini-rocc-tests/bareMetalC/matmul_tiled_fp8_64x64.c` and can be built and run with
+`build_spike.sh`. But after an emitter change, **that comparison is now manual**. If an automated
+gate is wanted later, the cheapest form is a snapshot of the emitted C plus the known-good OUT
+values for one shape — no baremetal-C mapping required.
+
+## 12. Open questions
 
 - **Q1 — `radiance-kernels/` tracking. RESOLVED 2026-09-01:** no dependency. Not a submodule, not
   tracked, no build path into it. Read for ideas while authoring; cite in comments where an idea came
@@ -580,7 +700,7 @@ the generic `'simulator'` (the `except (OSError, YAMLError)` swallows it). Ours 
   datapath, or whether the MX ops need the hand-authored route the radiance `hand_v0/dialect.py`
   took. Deferred to Step 3; does not block Steps 4–5, which emit C directly from a command buffer.
 
-## 11. Long-term direction: one config artifact, two consumers
+## 13. Long-term direction: one config artifact, two consumers
 
 **User, 2026-09-01:** eventually software emits a **JSON of configurations** that drives *both*
 compilation *and* hardware generation. The §4 table is the near-term stand-in for that.
@@ -605,7 +725,7 @@ Implications to keep in view while building Steps 3–5, so we do not have to un
 
 Not in scope for Steps 1–10. Recorded so the contract is authored in a shape that can be generated.
 
-## 12. Related plans
+## 14. Related plans
 
 `../planning/mxgemmini_rocket_standalone_plan.md` (the RTL-side V1/V2/V3 output-mode work this
 consumes), `../planning/fp8_bubble_and_perf_plan.md`, `../planning/acc_raw_debug.md`.
