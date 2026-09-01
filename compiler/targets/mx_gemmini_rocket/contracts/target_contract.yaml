@@ -1,0 +1,226 @@
+# MX-Gemmini on a Rocket host — merlin target contract (prototype).
+#
+# The MX (microscaling) Gemmini datapath driven as a REAL RoCC accelerator from a Rocket scalar
+# host, functionally modelled by software/libgemmini and elaborated as MxGemminiRocketConfig.
+#
+# This is a THIRD endpoint for a datapath merlin already knows in two other forms; keeping them
+# distinct is the point of the separate name:
+#   * `gemmini`     (merlin in-tree)  — int8 systolic mesh, RoCC, Rocket host.
+#   * `mx_gemmini`  (capsule_bench)   — the SAME MX datapath, but MMIO/command-buffer driven from a
+#                                       Muon SIMT host (radiance). Its only decodable word is the
+#                                       composed RoCC trigger; everything else is MMIO data.
+#   * `mx_gemmini_rocket` (THIS)      — the same MX datapath, real RoCC instructions, scalar host.
+#
+# The MMIO variant and this one share their entire command vocabulary — same funct codes, same
+# rs1/rs2 packing, same programming sequence. They differ only in TRANSPORT (three MMIO stores vs
+# one custom instruction) and in how scales/LUTs/outputs are moved. See
+# planning/npu_exploration_bridge_plan.md section 2.
+#
+# ---------------------------------------------------------------------------------------------
+# PROVENANCE TAGS. Every field below carries one, because the long-term direction is that a single
+# JSON config artifact drives BOTH compilation and hardware generation (plan section 8). Tagging now
+# makes that migration mechanical rather than archaeological.
+#
+#   [RTL]     A projection of a fact the RTL already determines. THE JSON WILL OWN THESE. Today
+#             several are written down twice (Scala + a C header) and kept in sync by hand.
+#   [ABI]     A fact the RTL cannot ground — a convention of the software/ISA surface. Reviewed by a
+#             human against the header that defines it; the JSON may carry it but cannot derive it.
+#   [COMPILE] A compile-side-only choice. Never migrates; it is merlin's opinion, not the hardware's.
+# ---------------------------------------------------------------------------------------------
+
+name: mx_gemmini_rocket                 # [COMPILE] resolution key; distinct from the MMIO `mx_gemmini`
+version: 0.1
+family: tensor_resident                 # [COMPILE] same compiler-level model as `gemmini`
+
+# [ABI] Real RoCC custom instructions, unlike the MMIO sibling. Determines how the backend emits.
+endpoint_kind: inline_asm_insn
+
+# NOTE: no `plugin:` block yet. The schema requires every plugin reference to resolve to a file
+# inside this package, and backend/ does not exist until Step 4 — declaring `backend: backend` now
+# would be an unresolvable pointer, which load_target treats as an error rather than ignoring.
+# Added in Step 4 together with the module it names.
+
+# --- The ABI encoding surface RTL discovery cannot ground -------------------------------------
+encoding:
+  # [ABI] gemmini-rocc-tests/include/gemmini_params.h:9 `#define ADDR_LEN 32`. The RoCC
+  # scratchpad/accumulator address field width. Header-cross-checkable.
+  addr_len: 32
+  # [ABI] gemmini-rocc-tests/include/gemmini_params.h:7 `#define XCUSTOM_ACC 3` -> RISC-V custom3,
+  # major opcode 0x7B. NOTE: software/libgemmini/README.md says "custom-2"; that is a documentation
+  # error — the header, the RTL slot, and merlin's own mmio_abi.py all agree on custom-3 / 0x7B.
+  # The opcode itself is DERIVED from the slot, never baked.
+  rocc_custom_slot: 3
+
+  # [ABI] RTL funct CODE -> the compiler's shared op class. Codes are RTL-derived; the vocabulary is
+  # human-owned. Each name is exactly its gemmini.h `#define k_<NAME> <code>` spelling. This is the
+  # reviewed cache of the codes this target's backend actually emits.
+  semantic_class:
+    0: CONFIG                    # gemmini.h:31
+    2: MVIN                      # :33
+    3: MVOUT                     # :34
+    7: FLUSH                     # :38
+    8: LOOP_WS                   # :40   — the MX matmul reuses this
+    9: LOOP_WS_CONFIG_BOUNDS     # :41
+    # --- MX extension (funct 23-29). software/libgemmini/README.md documents the semantics;
+    # gemmini.h:59-66 defines the codes. Spelled here exactly as the header spells them.
+    23: MVOUT_SPAD               # :59  (placeholder / no-op in spike)
+    24: LOOP_WS_CONFIG_SPAD_AB   # :60  — also MARKS the next LOOP_WS as the MX variant
+    25: LOOP_WS_CONFIG_SPAD_C    # :61
+    26: CONFIG_SCALE_MEM         # :62  — macro `gemmini_mxquant_config_mvout`; the README calls this
+                                 #        MXQUANT_CONFIG_MVOUT, the header does not. Header wins.
+    27: MX_LOAD_SCALES           # :63  — DRAM -> mx_scale_{a,b}_mem
+    28: MX_READ_SMEM             # :64  — MX shared mem -> DRAM
+    29: MX_LOAD_LUT              # :65  — DRAM -> mx_lut_{a,b,c} (FP6 E3M2 path)
+
+  # [ABI] CONFIG (funct 0) refined by rs1[1:0]. Names are gemmini.h-derived.
+  config_subtype: {0: CONFIG_EX, 1: CONFIG_LD, 2: CONFIG_ST}
+
+  # [ABI] The MX format fields `gemmini_extended3_config_ex` packs into previously-unused rs1 bits.
+  # Documented in software/libgemmini/README.md ("CONFIG_EX changes"). This is the one encoding the
+  # int8 `gemmini` contract has no analogue for, and the reason a separate contract exists at all.
+  config_ex_mx_fields:
+    uselut:  {bit: 5,        meaning: "1 -> FP6 LUT path"}
+    act_fmt: {bits: [11, 10], meaning: "A-side format: 0=FP8 E4M3, 1=FP6 E3M2 (LUT), 2=FP4 E2M1"}
+    wgt_fmt: {bits: [13, 12], meaning: "B-side format, same encoding"}
+    out_fmt: {bits: [15, 14], meaning: "0=FP8 packed, 1=FP6 LUT indices, 2=FP4 packed, 3=BF16"}
+
+# --- Datapath ---------------------------------------------------------------------------------
+# [RTL] All of these are determined by GemminiMxFPConfigs.standaloneMxFPConfig / MxRequantizer.scala.
+# Mesh geometry and capacities are ALSO CIRCT-extractable facts; consumers should prefer the fact
+# bundle. Recorded here as the reviewed cache, and flagged as JSON-owned.
+compute_units:
+  - name: mx_systolic_mesh
+    kind: systolic
+    # dtypes REFERENCE merlin/schemas/quant_formats.registry.yaml by name — never redefined here.
+    dtypes: [mxfp8, mxfp6, mxfp4]
+    ops: [matmul]
+    # [RTL] one E8M0 exponent per 32-element K group (MxRequantizer.scala block scale, bias 127).
+    # NOTE: `scaling` takes a SCALE KIND from compute_units' vocabulary (block_affine | block_e8m0 |
+    # kquant_superblock | none | nvfp4_block | per_channel | per_group | per_tensor), NOT a
+    # quant_formats registry format name. `e8m0` is a registered FORMAT and is rejected here; the
+    # kind is `block_e8m0`. (The schema prose says "scaling REFERENCES the registry by name", which
+    # is misleading — the validator at compute_units.py:187 is the authority.)
+    scaling: block_e8m0
+    # [RTL] bf16 accumulate (accType = MxFloat(8,8,4)). There is NO int32 accumulate in this datapath
+    # — the single largest divergence from the int8 `gemmini` contract.
+    accumulate:
+      - {in: mxfp8, weight: mxfp8, acc: bf16}
+      - {in: mxfp6, weight: mxfp6, acc: bf16}
+      - {in: mxfp4, weight: mxfp4, acc: bf16}
+    # OPAQUE reference to this target's own requant lowering (E8M0 block-exponent projection, plus a
+    # 4-bit LUT index path for FP6). Merlin does not model that arithmetic.
+    requant: {ref: mx_gemmini.e8m0_block_requant}
+    semantic_capabilities:
+      # Rank 2 only. The int8 gemmini declares ranks [2, 4] because its RTL funct table carries
+      # LOOP_CONV_WS (15) + configs (16-21); the MX command set does NOT extend the conv path, so a
+      # rank-4 region is NOT acceleratable here. Declaring [2,4] would put conv capsules in the ARR
+      # denominator that this datapath cannot run.
+      - {family: contraction, dtypes: [mxfp8, mxfp6, mxfp4], ranks: [2]}
+      # The E8M0 requant IS the datapath's own scaling, applied on readout — so an elementwise map
+      # exists only fused behind a contraction, never standalone.
+      - {family: elementwise_map, dtypes: [mxfp8, mxfp6, mxfp4], composed_with: [contraction]}
+      - {family: movement, dtypes: [mxfp8, mxfp6, mxfp4]}
+
+# [RTL] Address windows the software must agree with. These are the clearest example of the
+# duplication the JSON config is meant to end: each value below is currently written in BOTH
+# ConfigsFP.scala AND gemmini-rocc-tests/include/gemmini_mx_rocket.h, kept in sync by hand.
+address_windows:
+  scale_mem:
+    base: 0x20000000        # ConfigsFP.scala:338 scale_mem.baseAddr == gemmini_mx_rocket.h:10
+    weight_scales_offset: 0x0000   # gemmini_mx_rocket.h:11 (B side)
+    act_scales_offset: 0x2000      # gemmini_mx_rocket.h:12 (A side)
+  lut_regmap:
+    base: 0x20010000        # ConfigsFP.scala:339 mx_mmio_base == gemmini_mx_rocket.h:17
+    port_weight: 0x0100     # gemmini_mx_rocket.h:18  (LUT0)
+    port_act_in: 0x0500     # :19 (LUT1)
+    port_act_out: 0x0900    # :20 (LUT2)
+    go_offset: 0x0300       # :21 — whole-table commit trigger
+    table_shape: {entries: 64, bits_per_entry: 96}
+
+# [COMPILE] Empty by intent, exactly as the `gemmini` contract does it: op/layout support is not
+# pre-declared. Mesh geometry and capacities are CIRCT-extracted facts read from the fact bundle;
+# supported ops follow from the backend, verified against the oracle. Present for schema compliance.
+capabilities: {}
+
+memory_model:
+  resident: true            # [RTL] weight-stationary resident tile
+  accumulators: true        # [RTL] but bf16, not i32 — see compute_units.accumulate
+
+# --- Execution / grading ----------------------------------------------------------------------
+runner:
+  suite: mx-gemmini-rocket-capsule-bench   # [COMPILE]
+  dtype: mxfp8_bf16                        # [COMPILE] the Step 5-7 bring-up dtype
+  # [COMPILE] which substrate serves which tier. Verilator is the first RTL-certified tier; spike is
+  # a hand-written functional model and is BOOTSTRAP ONLY.
+  tier_sim: {L1: spike, L2: verilator}
+  sim_via: chipyard
+
+runtime:
+  backends: [spike_mx_gemmini, verilator]  # [COMPILE]
+  default_backend: baremetal               # [COMPILE]
+  # [RTL] The chipyard config that elaborates this target. Same config the RTL facts must be
+  # introspected from, so sim and codegen stay coherent.
+  rtl_sim_config: MxGemminiRocketConfig    # chipyard/GemminiConfigs.scala:49
+  #   -> wraps GemminiMxFPConfigs.standaloneMxFPConfig (ConfigsFP.scala:330), whose own comment reads:
+  #      "Faithful standalone twin of the Radiance MX flow (WithRadianceMxGemmini): same functional
+  #       params, but internal scratchpad + MMIO requant path instead of shared SRAM."
+
+# [COMPILE] Which substrate may produce which number. Declared because two substrates both emit
+# `cycles` and only one is authoritative.
+measurement:
+  cycles_from: spike
+  cycles_tier: functional
+  citable_tier: rtl          # below this a number is not a hardware claim
+  speed_of_light: mesh_macs_per_cycle
+
+oracle_ladder:
+  level_0: {name: merlin_reference_and_command_buffer_sim, derived_from_rtl: false}
+  level_1: {name: spike_mx_gemmini_functional, derived_from_rtl: false}
+  level_2: {name: mx_gemmini_verilator_rtl, derived_from_rtl: true}
+
+# [COMPILE] The bring-up scope this contract currently claims. Deliberately narrow.
+prototype_scope:
+  workload: mxfp8_tiled_matmul_64x64
+  operand_dtype: mxfp8
+  output_dtype: bf16
+  epilogue: none
+  golden: >-
+    software/gemmini-rocc-tests/bareMetalC/matmul_tiled_fp8_64x64.c on
+    spike --extension=gemmini, verified PASS 2026-09-01 (plan section 6).
+
+compiler_obligations:
+  - must_prove_rhs_immutable_for_residency
+  - must_tile_to_mesh_shape
+  - must_respect_scratchpad_capacity
+  # MX-specific, and the ones that make this contract not just `gemmini` with different dtypes:
+  - must_align_k_to_block_scale_group      # K a multiple of 32 (the E8M0 group)
+  - must_supply_block_scales_for_operands  # every operand tile needs its E8M0 stream
+  - must_load_lut_before_fp6_compute       # the FP6 path is LUT-indexed; an unloaded LUT is silent
+
+hardware_promises:
+  - weight_stationary_resident_array
+  - block_scaled_microscaling_operands
+  - bf16_accumulate
+  - fused_e8m0_requant_on_readout
+
+runtime_promises:
+  - command_buffer
+  - metrics
+
+legality:
+  - contraction K must be a multiple of 32 (the E8M0 block-scale group)
+  - M and N must be whole multiples of the PE tile
+  - resident_pack requires rhs.mutable == false
+  - fp6 operands require a loaded LUT on the corresponding port
+
+certification:
+  status: uncertified
+confidence: low
+requires_human_review: true
+
+notes: >-
+  Step 3 skeleton. Declares the ABI/encoding surface and the datapath, nothing more: no backend, no
+  dialect plan, no certification. Spike is a functional bootstrap model (derived_from_rtl: false);
+  only Verilator counts as RTL-certified. The datapath facts here duplicate values that live in
+  ConfigsFP.scala and gemmini_mx_rocket.h — see the [RTL] tags and plan section 8 for the intended
+  single-source-of-truth migration.
