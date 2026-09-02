@@ -27,6 +27,7 @@ REPO = Path(__file__).resolve().parents[1]
 
 #: The intermediate dtype between chained stages: the requantizer's FP8 write-back.
 INTERMEDIATE_DTYPE = "f8E4M3FN"
+SPEC_INPUT = "x"
 
 #: W-side block-scale target for the `weight` seam, from app/chain_2gemm/run_chain.py.
 #: Chosen there by measurement, not derivation -- see mxquant.CHAIN_EXP_SHIFT for why the
@@ -117,34 +118,66 @@ def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weigh
     a_codes = a_scales = None
     x_np = spec.x.numpy().astype(np.float32)
 
-    for i, st in enumerate(spec.stages):
-        last = (i == n_stages - 1)
-        out_name = "Y0" if last else f"T{i}"
-        lhs_name = "X" if i == 0 else f"T{i-1}"
-        w_np = st.weight.numpy().astype(np.float32)          # [K][N]
+    # A straight matmul chain keeps intermediates in the requantizer's codes+scales form (the
+    # `--seam` question). Any graph with a host stage or a computed B operand carries values as
+    # float instead: they must come back to the host anyway, so bf16 out + host re-quantize is both
+    # simpler and avoids the requant range seam entirely.
+    requant_chain = spec.is_chain and len(spec.stages) > 1
+    mnk = spec.stage_mnk()
+    vals: dict[str, "np.ndarray"] = {SPEC_INPUT: x_np}
+    carried: dict[str, tuple] = {}            # stage name -> (a_codes, a_scales) when requant-chained
+    prev = SPEC_INPUT
+    final = spec.stages[-1].name
 
-        # Operands. Stage 0 quantizes the model input; later stages inherit the
-        # previous stage's requantizer output, already in codes+scales form.
-        if i == 0:
-            ops = q.quantize_matmul_operands(x_np, w_np)
-        else:
-            w_exp = (RESCALE_SEAM_TARGET_EXP if seam == "rescale"
-                     else WEIGHT_SEAM_TARGET_EXP)
+    def operand(ref: str) -> "np.ndarray":
+        base, tr = (ref[:-2], True) if ref.endswith(".T") else (ref, False)
+        v = vals[base]
+        return np.ascontiguousarray(v.T) if tr else v
+
+    for i, st in enumerate(spec.stages):
+        last = (st.name == final)
+
+        if not st.on_mesh:                    # ---- host stage: the mesh cannot do it ----
+            vals[st.name] = np.asarray(st.fn(operand(st.src or prev)), dtype=np.float32)
+            tel.log("host", f"{i} ({st.name}) {vals[st.name].shape}"
+                            + (f"  {st.note}" if st.note else ""))
+            stage_records.append({"stage": i, "name": st.name, "where": "host",
+                                  "note": st.note})
+            prev = st.name
+            continue
+
+        m_, k_, n_ = mnk[st.name]
+        out_name = "Y0" if last else f"T{i}"
+        lhs_ref = st.lhs or prev
+        lhs_name = "X" if lhs_ref == SPEC_INPUT else f"A{i}"
+
+        # Operands. In a requant chain, a later stage inherits the previous stage's requantizer
+        # output already in codes+scales form; otherwise both operands are quantized from float.
+        if requant_chain and i > 0:
+            a_codes, a_scales = carried[prev]
+            w_exp = (RESCALE_SEAM_TARGET_EXP if seam == "rescale" else WEIGHT_SEAM_TARGET_EXP)
+            w_np = st.weight.numpy().astype(np.float32)
             wc, ws = q.quantize_rows(np.ascontiguousarray(w_np.T), target_exp=w_exp)
             ops = {"a_codes": a_codes, "a_scales": a_scales,
                    "b_codes": np.ascontiguousarray(wc.T), "b_scales": ws}
+        else:
+            b_np = (st.weight.numpy().astype(np.float32) if st.weight is not None
+                    else operand(st.rhs))
+            ops = q.quantize_matmul_operands(operand(lhs_ref), b_np)
 
+        # A mesh stage commits through the requantizer only when a later stage will consume it in
+        # that form; everything else reads back as bf16.
+        emit_fp8 = requant_chain and not last
         iface = mxiface.matmul_interface_mlir(
-            spec.m, st.n, st.k,
-            out_dtype="bf16" if last else INTERMEDIATE_DTYPE,
+            m_, n_, k_, out_dtype=INTERMEDIATE_DTYPE if emit_fp8 else "bf16",
             lhs=lhs_name, weight=f"W{i}", out=out_name)
         cb = mxiface.to_command_buffer(iface, ops)
         stage_dir = workdir / f"stage{i}"
 
         if build_only:
             elf = mx.compile_command_buffer(cb, stage_dir)
-            tel.log("compile", f"stage {i} ({st.name}) {spec.m}x{st.n}x{st.k} -> "
-                               f"{'bf16' if last else 'fp8'}  {elf} ({elf.stat().st_size} B)")
+            tel.log("compile", f"stage {i} ({st.name}) {m_}x{n_}x{k_} -> "
+                               f"{'fp8' if emit_fp8 else 'bf16'}  {elf} ({elf.stat().st_size} B)")
             if not last:
                 tel.log("done", "build-only: later stages need the intermediate, stopping")
             stage_records.append({"stage": i, "name": st.name, "elf": str(elf)})
@@ -152,9 +185,9 @@ def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weigh
 
         res = mx.run_command_buffer(cb, workdir=stage_dir, simulator=simulator)
         cycles = res["metrics"].get("cycles")
-        stage_records.append({"stage": i, "name": st.name,
-                              "m": spec.m, "k": st.k, "n": st.n,
-                              "out_dtype": "bf16" if last else INTERMEDIATE_DTYPE,
+        stage_records.append({"stage": i, "name": st.name, "where": "mesh",
+                              "m": m_, "k": k_, "n": n_,
+                              "out_dtype": INTERMEDIATE_DTYPE if emit_fp8 else "bf16",
                               "metrics": res["metrics"], "elf": res["elf"]})
 
         if artifacts:
@@ -166,26 +199,27 @@ def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weigh
             for key, val in ops.items():
                 saved[f"s{i}_{key}"] = np.asarray(val)
 
-        if last:
-            bits = np.array(res["outputs"][out_name], dtype=np.uint16)
-            hw = torch.from_numpy(q.bf16_bits_to_float(bits).copy())
-            if artifacts:
-                saved["Y0_bits"] = bits
-            tel.log("stage", f"{i} ({st.name}) {spec.m}x{st.n}x{st.k} -> bf16   "
-                             f"cycles {cycles}")
-        else:
+        if emit_fp8:
             codes = np.array(res["outputs"][out_name], dtype=np.uint8)
             scales = np.array(res["outputs"][f"{out_name}_scales"], dtype=np.uint8)
             if seam == "rescale":
-                a_codes, a_scales = q.rescale_for_next_gemm(codes, scales)
+                carried[st.name] = q.rescale_for_next_gemm(codes, scales)
             else:
-                a_codes, a_scales = codes, np.ascontiguousarray(scales.T)
+                carried[st.name] = (codes, np.ascontiguousarray(scales.T))
             if artifacts:
                 saved[f"{out_name}_codes"], saved[f"{out_name}_scales"] = codes, scales
-            peak = float(np.abs(q.fp8_e4m3_decode(a_codes)).max())
-            tel.log("stage", f"{i} ({st.name}) {spec.m}x{st.n}x{st.k} -> fp8   "
-                             f"cycles {cycles}  peak code {peak:.4g}  "
-                             f"E8M0 {scales.min()}..{scales.max()}")
+            peak = float(np.abs(q.fp8_e4m3_decode(carried[st.name][0])).max())
+            tel.log("stage", f"{i} ({st.name}) {m_}x{n_}x{k_} -> fp8   cycles {cycles}  "
+                             f"peak code {peak:.4g}  E8M0 {scales.min()}..{scales.max()}")
+        else:
+            bits = np.array(res["outputs"][out_name], dtype=np.uint16)
+            vals[st.name] = q.bf16_bits_to_float(bits).copy()
+            if last:
+                hw = torch.from_numpy(vals[st.name])
+                if artifacts:
+                    saved["Y0_bits"] = bits
+            tel.log("stage", f"{i} ({st.name}) {m_}x{n_}x{k_} -> bf16   cycles {cycles}")
+        prev = st.name
 
     if build_only:
         return {"metrics": None, "run_dir": None, "stages": stage_records}
@@ -203,7 +237,9 @@ def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weigh
                      f"cycles {metrics['total_cycles']}")
 
     # --- (4) record -------------------------------------------------------------------
-    shape_tag = "x".join([str(spec.m), str(spec.stages[0].k)] + [str(s.n) for s in spec.stages])
+    _mesh = spec.mesh_stages
+    shape_tag = "x".join([str(spec.m), str(mnk[_mesh[0].name][1])]
+                         + [str(mnk[s.name][2]) for s in _mesh])
     run_id = make_run_id(spec.name, shape_tag)
     artifact_paths = {"workdir": str(workdir)}
     if artifacts:
@@ -216,7 +252,9 @@ def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weigh
         results_dir=results_dir, run_id=run_id,
         run_config={
             "kernel": spec.name, "stages": n_stages, "seam": seam if n_stages > 1 else None,
-            "m": spec.m, "dims": [spec.stages[0].k] + [s.n for s in spec.stages],
+            "m": spec.m,
+            "dims": [mnk[_mesh[0].name][1]] + [mnk[s.name][2] for s in _mesh],
+            "mesh_stages": len(_mesh), "host_stages": len(spec.stages) - len(_mesh),
             "operand_format": "mxfp8_e4m3", "output_dtype": "bf16",
             "intermediate_dtype": INTERMEDIATE_DTYPE if n_stages > 1 else None,
             "block_scale_group": q.BLOCK, "target_code_exp": q.TARGET_CODE_EXP,

@@ -1,94 +1,203 @@
-"""What we hand the pipeline: a kernel, or a chain of them.
+"""What we hand the pipeline: a kernel — a small dataflow graph of stages.
 
-The unit is a ``Stage`` — one weight-stationary MX matmul, which is exactly what
-the backend lowers (``mxgemm_emit._plan`` accepts one RES_PACK + one matmul + one
-COMMIT and raises otherwise). A model is therefore an ORDERED LIST of stages,
-each its own command buffer, with the intermediate carried between them. That is
-the same shape ``app/chain_2gemm/run_chain.py`` uses; we are generalizing it, not
-inventing a second scheme.
+The mesh unit is a ``Stage``: one weight-stationary MX matmul, which is exactly what the backend
+lowers (``mxgemm_emit._plan`` accepts one RES_PACK + one matmul + one COMMIT and raises otherwise).
+A kernel is an ORDERED LIST of stages, each its own command buffer, with values carried between
+them.
 
-Deliberately declarative rather than a graph tracer: ``from_module`` reads an
-``nn.Linear`` / ``nn.Sequential`` and produces stages. Anything it cannot express
-raises, instead of silently lowering something different from what PyTorch would
-compute.
+Two things beyond a straight chain, both needed by attention:
+
+* **operands can reference earlier stages**, not just resident weights — ``S = Q @ K^T`` and
+  ``O = P @ V`` both contract two computed values. An operand is a name: ``"x"`` (the model input),
+  a stage name, or either with a ``".T"`` suffix.
+* **:class:`HostStage` runs on the Rocket host, not the mesh** — softmax is a row max, a row sum and
+  a divide, and there is no reduction hardware. The target contract declares one compute unit,
+  ``mx_systolic_mesh``, ``ops: [matmul]``; `merlin_iface` has no softmax op either. Marking these
+  explicitly is what lets the report say which cycles were the accelerator's and which were not.
+
+Deliberately declarative rather than a graph tracer: ``from_module`` reads an ``nn.Linear`` /
+``nn.Sequential`` and produces stages. Anything it cannot express raises, instead of silently
+lowering something different from what PyTorch would compute.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable, Union
 
+import numpy as np
 import torch
 from torch import nn
+
+#: The model input's operand name.
+INPUT = "x"
+
+
+def _split_ref(ref: str) -> tuple[str, bool]:
+    """``"K.T"`` -> ``("K", True)``."""
+    return (ref[:-2], True) if ref.endswith(".T") else (ref, False)
 
 
 @dataclass
 class Stage:
-    """One MX matmul: ``[M][K] @ weight[K][N]``."""
+    """One MX matmul on the mesh: ``lhs[M][K] @ rhs[K][N]``.
+
+    Exactly one of ``weight`` / ``rhs`` is set. ``weight`` is the common case (a resident weight,
+    [K][N] fp32); ``rhs`` names an earlier stage when the B operand is itself computed.
+    ``lhs`` defaults to the previous stage's output, so a straight chain needs neither.
+    """
 
     name: str
-    weight: torch.Tensor          # [K][N], fp32 — the B operand as the device wants it
+    weight: torch.Tensor | None = None
+    lhs: str | None = None
+    rhs: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.weight is None) == (self.rhs is None):
+            raise ValueError(f"stage {self.name!r}: set exactly one of weight= or rhs=")
 
     @property
-    def k(self) -> int:
-        return int(self.weight.shape[0])
+    def on_mesh(self) -> bool:
+        return True
+
+
+@dataclass
+class HostStage:
+    """A stage the mesh cannot do, run on the host. ``fn`` maps float32 [M][N] -> float32."""
+
+    name: str
+    fn: Callable[[np.ndarray], np.ndarray]
+    src: str | None = None
+    note: str = ""
 
     @property
-    def n(self) -> int:
-        return int(self.weight.shape[1])
+    def on_mesh(self) -> bool:
+        return False
+
+
+AnyStage = Union[Stage, HostStage]
 
 
 @dataclass
 class KernelSpec:
-    """A kernel (one stage) or a chain of kernels (several), plus its FP32 reference."""
+    """A kernel: an input, a list of stages, and its FP32 reference."""
 
     name: str
-    x: torch.Tensor               # [M][K] fp32 input
-    stages: list[Stage] = field(default_factory=list)
+    x: torch.Tensor                       # [M][K] fp32
+    stages: list[AnyStage] = field(default_factory=list)
 
     @property
     def m(self) -> int:
         return int(self.x.shape[0])
 
-    def reference(self) -> torch.Tensor:
-        """The FP32 answer for the WHOLE chain — no quantization anywhere."""
-        y = self.x
-        for st in self.stages:
-            y = y @ st.weight
-        return y
+    @property
+    def mesh_stages(self) -> list[Stage]:
+        return [s for s in self.stages if s.on_mesh]
 
+    @property
+    def is_chain(self) -> bool:
+        """True when this is a straight matmul chain — every stage a matmul against a resident
+        weight, consuming the previous output. Only then can intermediates stay in the
+        requantizer's codes+scales form; anything else round-trips through float on the host."""
+        return all(isinstance(s, Stage) and s.weight is not None and s.rhs is None
+                   and (s.lhs is None or s.lhs == (INPUT if i == 0 else self.stages[i - 1].name))
+                   for i, s in enumerate(self.stages))
+
+    # --- shape resolution ----------------------------------------------------------------------
+    def shapes(self) -> dict[str, tuple[int, int]]:
+        """Output shape of every stage (and ``x``), by walking the graph in order."""
+        out: dict[str, tuple[int, int]] = {INPUT: tuple(int(v) for v in self.x.shape)}
+        prev = INPUT
+        for st in self.stages:
+            if isinstance(st, HostStage):
+                out[st.name] = out[_split_ref(st.src or prev)[0]]
+            else:
+                lhs, lt = _split_ref(st.lhs or prev)
+                a = out[lhs][::-1] if lt else out[lhs]
+                if st.weight is not None:
+                    b = tuple(int(v) for v in st.weight.shape)
+                else:
+                    rhs, rt = _split_ref(st.rhs)
+                    b = out[rhs][::-1] if rt else out[rhs]
+                out[st.name] = (a[0], b[1])
+            prev = st.name
+        return out
+
+    def stage_mnk(self) -> dict[str, tuple[int, int, int]]:
+        """``(M, K, N)`` for each MESH stage."""
+        sh = self.shapes()
+        mnk: dict[str, tuple[int, int, int]] = {}
+        prev = INPUT
+        for st in self.stages:
+            if isinstance(st, Stage):
+                lhs, lt = _split_ref(st.lhs or prev)
+                a = sh[lhs][::-1] if lt else sh[lhs]
+                b = (tuple(int(v) for v in st.weight.shape) if st.weight is not None
+                     else (sh[_split_ref(st.rhs)[0]][::-1] if _split_ref(st.rhs)[1]
+                           else sh[_split_ref(st.rhs)[0]]))
+                mnk[st.name] = (a[0], a[1], b[1])
+            prev = st.name
+        return mnk
+
+    # --- reference -----------------------------------------------------------------------------
+    def reference(self) -> torch.Tensor:
+        """The FP32 answer for the WHOLE graph — no quantization anywhere. Host stages run here
+        exactly as they do on device, so the comparison isolates the mesh's format cost."""
+        vals: dict[str, np.ndarray] = {INPUT: self.x.numpy().astype(np.float32)}
+        prev = INPUT
+        for st in self.stages:
+            if isinstance(st, HostStage):
+                vals[st.name] = st.fn(vals[_split_ref(st.src or prev)[0]])
+            else:
+                lhs, lt = _split_ref(st.lhs or prev)
+                a = vals[lhs].T if lt else vals[lhs]
+                if st.weight is not None:
+                    b = st.weight.numpy().astype(np.float32)
+                else:
+                    rhs, rt = _split_ref(st.rhs)
+                    b = vals[rhs].T if rt else vals[rhs]
+                vals[st.name] = a @ b
+            prev = st.name
+        return torch.from_numpy(np.ascontiguousarray(vals[prev]))
+
+    # --- reporting / legality ------------------------------------------------------------------
     def describe(self) -> str:
-        dims = " -> ".join([str(self.stages[0].k)] + [str(s.n) for s in self.stages])
-        return f"{self.name}: [{self.m}][{self.stages[0].k}] through {dims}"
+        mnk = self.stage_mnk()
+        n_host = len(self.stages) - len(self.mesh_stages)
+        chain = " -> ".join(f"{s.name}[{mnk[s.name][0]}x{mnk[s.name][2]}x{mnk[s.name][1]}]"
+                            if isinstance(s, Stage) else f"{s.name}(host)"
+                            for s in self.stages)
+        return (f"{self.name}: [{self.m}][{self.x.shape[1]}]  {chain}"
+                f"   ({len(self.mesh_stages)} mesh, {n_host} host)")
 
     def validate(self, dim: int = 16, block: int = 32) -> list[str]:
         """Shape legality, checked BEFORE any build so failures are cheap and named.
 
-        Mirrors ``mxgemm_emit._validate``; duplicated here only to fail early with a
-        message naming the stage, not to replace it (the backend still enforces).
+        Mirrors ``mxgemm_emit._validate``; duplicated here only to fail early with a message naming
+        the stage, not to replace it (the backend still enforces).
         """
-        errs = []
-        if self.m % dim:
-            errs.append(f"M={self.m} is not a multiple of the PE tile ({dim})")
-        prev_n = None
-        for i, st in enumerate(self.stages):
-            if prev_n is not None and st.k != prev_n:
-                errs.append(f"stage {i} ({st.name}): K={st.k} does not match "
-                            f"previous stage's N={prev_n}")
-            if st.k % block:
-                errs.append(f"stage {i} ({st.name}): K={st.k} is not a multiple of the "
-                            f"block-scale group ({block})")
-            for label, v in (("K", st.k), ("N", st.n)):
-                if v % dim:
-                    errs.append(f"stage {i} ({st.name}): {label}={v} is not a multiple "
-                                f"of the PE tile ({dim})")
-            # Non-final stages commit through the REQUANTIZER (MX output), which emits one
-            # E8M0 code per 32 output columns -- so their N has a stricter constraint than
-            # the final stage's. mxgemm_emit._validate enforces the same rule.
-            if i < len(self.stages) - 1 and st.n % block:
-                errs.append(f"stage {i} ({st.name}): N={st.n} must be a multiple of "
-                            f"{block} because it feeds a following stage through the "
-                            "requantizer (one E8M0 code per 32 output columns)")
-            prev_n = st.n
+        errs: list[str] = []
+        try:
+            mnk = self.stage_mnk()
+        except KeyError as exc:
+            return [f"unresolved operand reference {exc}"]
+        requant_chain = self.is_chain
+        mesh = self.mesh_stages
+        for i, st in enumerate(mesh):
+            m, k, n = mnk[st.name]
+            if m % dim:
+                errs.append(f"stage {st.name}: M={m} is not a multiple of the PE tile ({dim})")
+            if k % block:
+                errs.append(f"stage {st.name}: K={k} is not a multiple of the block-scale "
+                            f"group ({block})")
+            if n % dim:
+                errs.append(f"stage {st.name}: N={n} is not a multiple of the PE tile ({dim})")
+            # A non-final stage in a REQUANT chain commits through the requantizer, which emits one
+            # E8M0 code per 32 output columns. Graphs that carry values as float on the host do not
+            # take that path, so the stricter rule does not apply to them.
+            if requant_chain and i < len(mesh) - 1 and n % block:
+                errs.append(f"stage {st.name}: N={n} must be a multiple of {block} because it "
+                            "feeds a following stage through the requantizer")
         return errs
 
 
@@ -97,20 +206,18 @@ class KernelSpec:
 def from_module(module: nn.Module, x: torch.Tensor, *, name: str = "module") -> KernelSpec:
     """Turn an ``nn.Linear`` or a ``nn.Sequential`` of them into a KernelSpec.
 
-    ``nn.Linear`` stores weight as [out_features][in_features] = [N][K] and computes
-    ``x @ Wᵀ``, so each stage's B operand is ``W.T`` -> [K][N].
+    ``nn.Linear`` stores weight as [out_features][in_features] = [N][K] and computes ``x @ Wᵀ``,
+    so each stage's B operand is ``W.T`` -> [K][N].
 
-    Raises on anything not expressible on this datapath today rather than quietly
-    approximating it:
+    Raises on anything not expressible on this datapath today rather than quietly approximating it:
 
     * ``bias`` — would need a COMMIT epilogue, which the backend explicitly refuses
       (*"the E8M0 requant IS this datapath's scaling"*).
-    * activations (ReLU, GELU, ...) — same reason. Chained stages already round-trip
-      through the host, so a host-side activation is a plausible next step, but it
-      would change what the device is being credited with, so it is not silently done.
+    * activations (ReLU, GELU, ...) — same reason. They could be added as a
+      :class:`HostStage`, but that credits the host with work, so it is not silently done.
     """
     layers = list(module) if isinstance(module, nn.Sequential) else [module]
-    stages: list[Stage] = []
+    stages: list[AnyStage] = []
     for i, layer in enumerate(layers):
         if not isinstance(layer, nn.Linear):
             raise ValueError(

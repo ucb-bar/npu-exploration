@@ -67,3 +67,43 @@ def _mlp3(*, m: int = 64, k: int = 64, h: int = 64, n: int = 64, seed: int = 0, 
                         nn.Linear(h, n, bias=False))
     x = torch.randn(m, k)
     return from_module(net, x, name="mlp3")
+
+
+@register("attention", "single-head attention: 6 mesh matmuls + host softmax (QK^T, PV)")
+def _attention(*, m: int = 64, k: int = 64, h: int = 64, seed: int = 0, **_) -> KernelSpec:
+    """Q/K/V projections, `S = Q@K^T`, host softmax, `O = P@V`, output projection.
+
+    Two things a straight chain cannot express and this needs: operands that reference earlier
+    stages (`S` contracts Q with K^T; `O` contracts P with V), and a host stage — softmax is a row
+    max, a row sum and a divide, and the mesh has no reduction hardware.
+
+    `m` is the sequence length, `k` d_model, `h` d_head.
+    """
+    import numpy as np
+
+    from .spec import HostStage, Stage
+
+    torch.manual_seed(seed)
+    wq, wk, wv = (nn.Linear(k, h, bias=False) for _ in range(3))
+    wo = nn.Linear(h, k, bias=False)
+    x = torch.randn(m, k)
+    scale = 1.0 / float(np.sqrt(h))
+
+    def softmax_scaled(s: "np.ndarray") -> "np.ndarray":
+        z = s * scale
+        z = z - z.max(axis=-1, keepdims=True)          # max-subtracted for stability
+        e = np.exp(z)
+        return (e / e.sum(axis=-1, keepdims=True)).astype(np.float32)
+
+    def t(layer: nn.Linear) -> torch.Tensor:
+        return layer.weight.detach().T.contiguous().float()
+
+    return KernelSpec(name="attention", x=x.detach().float(), stages=[
+        Stage("Q", weight=t(wq), lhs="x"),
+        Stage("K", weight=t(wk), lhs="x"),
+        Stage("V", weight=t(wv), lhs="x"),
+        Stage("S", lhs="Q", rhs="K.T"),
+        HostStage("P", fn=softmax_scaled, src="S", note="softmax(S/sqrt(d)) — no reduction on mesh"),
+        Stage("O", lhs="P", rhs="V"),
+        Stage("Y", weight=t(wo), lhs="O"),
+    ])

@@ -7,7 +7,7 @@ Every layer of the stack lives in this one repo, split by directory.
 
 | Dir | Layer | Contents |
 |---|---|---|
-| `app/` | L1 — model | PyTorch models, quantization, experiment definitions |
+| `app/` | L1 — model | libraries: MX quantization, and emitting/lowering `merlin_iface` MLIR |
 | `kernels/` | L1 — model | what to run: a kernel is a PyTorch model flattened into matmul stages |
 | `compiler/` | L2 — compiler | `targets/mx_gemmini_rocket/` — the out-of-tree merlin target (contract + backend) |
 | `grade/` | L2 — evaluation | run a kernel, compare against an FP32 reference, record the run |
@@ -83,9 +83,6 @@ merlin's frozen contract grammar — and merlin lowers it to the command buffer.
 grammar the shipped MX capsules use, so a capsule and this front end are interchangeable inputs to
 the backend. merlin also discovers and loads the backend (`get_backend("mx_gemmini_rocket")`).
 
-`app/torch_linear/run_linear.py` and `app/chain_2gemm/run_chain.py` remain as focused bring-up
-references for the ungraded path.
-
 ## Configuring the kernel
 
 ```bash
@@ -99,11 +96,12 @@ references for the ungraded path.
 | `linear` | `nn.Linear(K→N, bias=False)` | 1 |
 | `mlp2` | `nn.Sequential(Linear, Linear)` | 2 |
 | `mlp3` | three stacked `Linear` | 3 |
+| `attention` | single-head attention | 6 mesh + 1 host (softmax) |
 
 | flag | default | meaning |
 |---|---|---|
 | `--kernel` | `linear` | which kernel (`--list`) |
-| `--m --k --h --n` | 64 | batch rows, in_features, hidden, out_features |
+| `--m --k --h --n` | 64 | batch rows, in_features, hidden, out_features (`attention`: seq, d_model, d_head) |
 | `--seed` | 0 | tensor values |
 | `--seam weight\|rescale` | `weight` | how a chained intermediate's scale is made safe |
 | `--tol` | 0.15 | pass threshold on relative Frobenius error vs FP32 |
@@ -119,8 +117,11 @@ stage's `K` equals the previous stage's `N`, and a stage feeding another needs `
 **Adding a kernel** is a few lines in `kernels/registry.py` and no other change — a kernel is *data*,
 not code. `from_module()` accepts `nn.Linear` and `nn.Sequential` of them, and raises on bias or
 activations rather than quietly computing something else: both need a COMMIT epilogue, which the
-backend refuses. That is also why attention is not expressible yet — its two matmuls are fine, but
-softmax is neither a matmul nor an allowed epilogue.
+backend refuses.
+
+Attention **is** expressible: softmax is a `HostStage`, and `S = Q@K^T` / `O = P@V` use operands
+that reference earlier stages rather than resident weights. What a kernel still cannot express is an
+op the *backend* would have to lower differently — a fused epilogue, or a convolution.
 
 ### Chains and the scale seam
 
