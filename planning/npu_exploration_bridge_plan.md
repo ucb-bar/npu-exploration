@@ -933,7 +933,57 @@ matters more than speed here.
 13a is deliberately first and is a *probe*, not a build: it answers the one question that can
 invalidate the rest.
 
-## 14. Open questions
+## 14. A full attention layer runs (2026-09-01)
+
+`app/attention/run_attention.py` — single-head attention, **six GEMMs on the mesh**, everything else
+on the Rocket host:
+
+```
+model  single-head attention  seq=64 d_model=64 d_head=64
+  mesh  Q=X@Wq     64x64x64  cycles   282
+  mesh  K=X@Wk     64x64x64  cycles   282
+  mesh  V=X@Wv     64x64x64  cycles   282
+  mesh  S=Q@K^T    64x64x64  cycles   282
+  host  softmax     rows sum to 1.000000..1.000000
+  mesh  O=P@V      64x64x64  cycles   282
+  mesh  Y=O@Wo     64x64x64  cycles   282
+6 GEMMs on the mesh, 1692 accelerator cycles total
+vs PyTorch fp32 attention:  cos=0.994753  max|d|=0.02089
+```
+
+Also at `seq=32 d_model=128 d_head=64`: cos 0.995496. Softmax, the K transpose and the 1/sqrt(d)
+scale run on the host — §13.2's routing, now real.
+
+**bf16 out at every GEMM sidesteps the §13.3b seam.** Attention needs host work between GEMMs
+anyway, so each intermediate returns regardless; taking bf16 and re-quantizing on the host with a
+chosen block scale means the requantizer's full-range output never meets the narrow accumulator.
+The chained-requant path (§13.3b) is still the one to settle on RTL, but attention does not need it.
+
+### 14.1 Two robustness bugs this exposed
+
+**1. `TARGET_CODE_EXP = 2` had no margin.** A target exponent `e` puts peak codes in
+`[2**e, 2**(e+1))`, so e=2 means peak 8 and `16*C**2 = 1024` — **4x over** the 256 bound, surviving
+only on sign cancellation. It measured clean on numpy data across 4 seeds but produced a NaN on a
+torch-drawn Q projection: **data-dependent**, not a property to build on. Now `TARGET_CODE_EXP = 0`
+(peak < 2, `16*C**2 = 64`, 4x headroom) — which costs almost nothing: mean relative weight error
+2.41e-2 vs 2.32e-2. Attention's cos *improved* 0.993433 -> 0.994753 once the NaN stopped corrupting
+a value.
+
+**2. Non-finite input was silently coded as zero.** `fp8_e4m3_to_code` maps NaN/inf to code 0,
+faithfully mirroring `mx_fp_math.h` — but that meant an upstream accumulator overflow *disappeared*
+at the next quantization step and the run looked clean. `quantize_rows` now refuses non-finite
+input with a message pointing at `TARGET_CODE_EXP`. This is the more important of the two: it was
+converting a loud failure into a silent wrong answer.
+
+### 14.2 Where this leaves op coverage
+
+Attention is 6 matmuls plus host glue, and the glue is hand-written in the app rather than expressed
+in the graph — `merlin_iface` cannot carry softmax (§13.2). So this demonstrates the *hardware* path
+for a real model component, not compiler coverage of one. A model with ops the mesh cannot do still
+needs its non-matmul work hand-placed. Closing that means going up to linalg and merlin's full
+pipeline, which is the same gap noted in §12.4.
+
+## 15. Open questions
 
 - **Q1 — `radiance-kernels/` tracking. RESOLVED 2026-09-01:** no dependency. Not a submodule, not
   tracked, no build path into it. Read for ideas while authoring; cite in comments where an idea came
@@ -951,7 +1001,7 @@ invalidate the rest.
   datapath, or whether the MX ops need the hand-authored route the radiance `hand_v0/dialect.py`
   took. Deferred to Step 3; does not block Steps 4–5, which emit C directly from a command buffer.
 
-## 15. Long-term direction: one config artifact, two consumers
+## 16. Long-term direction: one config artifact, two consumers
 
 **User, 2026-09-01:** eventually software emits a **JSON of configurations** that drives *both*
 compilation *and* hardware generation. The §4 table is the near-term stand-in for that.
@@ -976,7 +1026,7 @@ Implications to keep in view while building Steps 3–5, so we do not have to un
 
 Not in scope for Steps 1–10. Recorded so the contract is authored in a shape that can be generated.
 
-## 16. Related plans
+## 17. Related plans
 
 `../planning/mxgemmini_rocket_standalone_plan.md` (the RTL-side V1/V2/V3 output-mode work this
 consumes), `../planning/fp8_bubble_and_perf_plan.md`, `../planning/acc_raw_debug.md`.

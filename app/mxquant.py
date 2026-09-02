@@ -113,12 +113,15 @@ def e8m0_decode(code: np.ndarray) -> np.ndarray:
 #: produce an all-NaN tile, not a degraded one.
 #:
 #: Bound: 16 accumulated products of codes with magnitude <= C need ``16 * C**2 <= 256``, so
-#: ``C <= 4``. Hence exponent 2. The shipped ``matmul_fp8_64x64.h`` operands independently top out
-#: near ±4, which corroborates it.
+#: ``C <= 4``. A target exponent ``e`` puts the peak in ``[2**e, 2**(e+1))``, so e=1 sits exactly on
+#: that bound and **e=2 is 4x over it** — surviving only on sign cancellation. It measured clean on
+#: numpy data across 4 seeds but produced a NaN on a torch-drawn attention projection, i.e. it is
+#: data-dependent, which is not a property to build on.
 #:
-#: Precision cost is small: e4m3 keeps 3 mantissa bits at every exponent, so *relative* precision is
-#: unchanged; only the within-block dynamic range shrinks (still ~2**11 before subnormals).
-TARGET_CODE_EXP = 2
+#: e=0 (peak < 2, ``16*C**2 = 64``) gives 4x headroom under the bound for almost nothing: measured
+#: mean relative weight error 2.41e-2 vs 2.32e-2 at e=2. e4m3 keeps 3 mantissa bits at every
+#: exponent, so *relative* precision barely moves; only within-block dynamic range shrinks.
+TARGET_CODE_EXP = 0
 
 
 def _shared_exponent(amax: np.ndarray, target_exp: int = TARGET_CODE_EXP) -> np.ndarray:
@@ -144,6 +147,15 @@ def quantize_rows(x: np.ndarray, *,
     r, k = x.shape
     if k % BLOCK:
         raise ValueError(f"K={k} must be a multiple of the block-scale group {BLOCK}")
+    # Fail loudly on non-finite input. fp8_e4m3_to_code maps NaN/inf to code 0 (mirroring
+    # mx_fp_math.h), so quantizing a NaN silently turns it into a zero — an upstream overflow would
+    # disappear here and the run would look clean. Refuse instead.
+    if not np.isfinite(x).all():
+        bad = int((~np.isfinite(x)).sum())
+        raise ValueError(
+            f"{bad} non-finite value(s) in the tensor to quantize — these would be silently coded "
+            "as zero. An earlier GEMM probably overflowed the mesh accumulator; see "
+            "TARGET_CODE_EXP.")
     groups = k // BLOCK
 
     blocks = x.reshape(r, groups, BLOCK)
