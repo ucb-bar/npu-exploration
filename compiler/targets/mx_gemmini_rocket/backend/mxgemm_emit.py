@@ -112,8 +112,27 @@ class MxGemmPlan:
     @property
     def out_cols(self) -> int:
         """Width of the packed output row, in uint64 words. The output is [M][N], so this is N —
-        NOT M. (Identical when M == N, which is why the reference could use either.)"""
-        return self.n // BF16_PER_WORD
+        NOT M. (Identical when M == N, which is why the reference could use either.)
+
+        BF16 packs 4 per uint64; FP8 codes pack 8.
+        """
+        per_word = BF16_PER_WORD if self.out_fmt == "bf16" else 2 * BF16_PER_WORD
+        return self.n // per_word
+
+    @property
+    def out_elem_bytes(self) -> int:
+        return 2 if self.out_fmt == "bf16" else 1
+
+    @property
+    def out_u16_words(self) -> int:
+        """MX shared-memory words to drain — the unit ``MX_READ_SMEM`` (funct 28) counts."""
+        return self.m * self.n * self.out_elem_bytes // 2
+
+    @property
+    def scale_blocks(self) -> int:
+        """E8M0 output scale blocks per row, on the requant path: one per 32 output columns.
+        The requantizer writes ``scale_dram + m * scale_blocks + bi``."""
+        return self.n // BLOCK_SCALE_GROUP
 
 
 # --- Plan derivation ------------------------------------------------------------------------------
@@ -168,11 +187,16 @@ def _plan(cb: dict[str, Any]) -> MxGemmPlan:
         raise MxEmitError(
             f"epilogue {epilogue} unsupported — the E8M0 requant IS this datapath's scaling, and no "
             "additional epilogue is emitted on the BF16 output path")
+    # Output dtype: bf16 (raw accumulator readout) or an MX format (the requantizer's E8M0
+    # write-back path, which is what a CHAINED matmul consumes as its next operand).
     out_dtype = attrs.get("output_dtype") or tensors.get(out, {}).get("dtype", "bf16")
-    if out_dtype != "bf16":
+    out_fmt = "bf16" if out_dtype == "bf16" else DTYPE_TO_FMT.get(out_dtype)
+    if out_fmt is None:
         raise MxEmitError(
-            f"output dtype {out_dtype!r} is the requant path (needs mxquant scale write-back and a "
-            "requant golden); only 'bf16' is emitted at this scope")
+            f"output dtype {out_dtype!r} is neither 'bf16' nor a microscaling format "
+            f"({sorted(DTYPE_TO_FMT)})")
+    if out_fmt in ("fp6", "fp4"):
+        raise MxEmitError(f"requant to {out_fmt} not emitted yet (fp8 and bf16 only)")
 
     geom = dict(DEFAULT_GEOMETRY)
     geom.update({k: v for k, v in (cb.get("params") or {}).items() if k in DEFAULT_GEOMETRY})
@@ -181,7 +205,7 @@ def _plan(cb: dict[str, Any]) -> MxGemmPlan:
         m=m, n=n, k=k_a,
         act_fmt=_dtype_to_fmt(tensors[lhs].get("dtype", ""), f"lhs {lhs!r}"),
         wgt_fmt=_dtype_to_fmt(tensors[weight].get("dtype", ""), f"weight {weight!r}"),
-        out_fmt="bf16",
+        out_fmt=out_fmt,
         lhs=lhs, weight=weight, out=out,
         **geom)
     _validate(plan)
@@ -201,8 +225,12 @@ def _validate(p: MxGemmPlan) -> None:
         raise MxEmitError(
             f"scratchpad overflow: A needs {p.tiles_i * p.tiles_k * p.dim} rows, B starts at "
             f"{p.b_base} of {p.spad_rows}")
-    if p.m % BF16_PER_WORD:
-        raise MxEmitError(f"M={p.m} must be a multiple of {BF16_PER_WORD} to pack the BF16 output")
+    if p.out_fmt == "bf16" and p.n % BF16_PER_WORD:
+        raise MxEmitError(f"N={p.n} must be a multiple of {BF16_PER_WORD} to pack the BF16 output")
+    if p.out_fmt != "bf16" and p.n % BLOCK_SCALE_GROUP:
+        raise MxEmitError(
+            f"N={p.n} must be a multiple of {BLOCK_SCALE_GROUP} on the requant path — the "
+            "requantizer emits one E8M0 code per 32 output columns")
 
 
 def _mx_operands(cb: dict[str, Any], p: MxGemmPlan) -> dict[str, Sequence[Sequence[int]]]:
@@ -275,8 +303,9 @@ class SpikeSmemTransport:
 
     def emit_drain(self, p: MxGemmPlan) -> list[str]:
         return [
-            "  /* Drain the BF16 result out of MX shared memory (funct 28). */",
-            f"  gemmini_mx_read_smem(&C_hw[0][0], {p.spad_dest} * 16, {p.m} * {p.n});",
+            f"  /* Drain the {p.out_fmt} result out of MX shared memory (funct 28); the count is",
+            f"     in u16 words, so {p.out_elem_bytes}-byte elements pack {2 // p.out_elem_bytes} per word. */",
+            f"  gemmini_mx_read_smem(&C_hw[0][0], {p.spad_dest} * 16, {p.out_u16_words});",
         ]
 
 
@@ -339,22 +368,37 @@ def _emit_report(p: MxGemmPlan) -> list[str]:
     """Print the shared merlin console protocol: ``OUT <name> <rows> <cols> v...`` / ``METRIC`` /
     ``DONE`` (``runtime/backends/base.parse_console``).
 
-    Values are BF16 **bit patterns** as integers — the datapath's native output, undecoded. Grading
-    against merlin's float reference needs a bf16 decode plus the profile's tolerance; that belongs
-    to the capsule step, not here. Emitting the raw pattern keeps this lossless either way.
+    BF16 values are reported as **bit patterns**; FP8 as raw **codes**, plus a second OUT line
+    carrying the requantizer's per-row per-32-column E8M0 scale codes. Both are the datapath's
+    native output, undecoded — nothing is lost on the way out.
     """
-    return [
-        "  /* merlin console protocol — parsed by runtime.backends.base.parse_console. */",
-        f'  printf("OUT {p.out} {p.m} {p.n}");',
-        f"  for (int i = 0; i < {p.m}; i++)",
-        f"    for (int j = 0; j < {p.n}; j++)",
-        f"      printf(\" %u\", (unsigned)((C_hw[i][j / {BF16_PER_WORD}]"
-        f" >> ((j % {BF16_PER_WORD}) * 16)) & 0xFFFF));",
-        '  printf("\\n");',
+    tail = [
         '  printf("METRIC cycles %lu\\n", (unsigned long)(c1 - c0));',
         '  printf("METRIC cycle_window_mx_gemmini_region 1\\n");',
         '  printf("DONE\\n");',
     ]
+    if p.out_fmt == "bf16":
+        return [
+            "  /* merlin console protocol — parsed by runtime.backends.base.parse_console. */",
+            f'  printf("OUT {p.out} {p.m} {p.n}");',
+            f"  for (int i = 0; i < {p.m}; i++)",
+            f"    for (int j = 0; j < {p.n}; j++)",
+            f"      printf(\" %u\", (unsigned)((C_hw[i][j / {BF16_PER_WORD}]"
+            f" >> ((j % {BF16_PER_WORD}) * 16)) & 0xFFFF));",
+            '  printf("\\n");',
+        ] + tail
+    return [
+        "  /* merlin console protocol. FP8 requant output: the packed codes, then the E8M0 scale",
+        "     codes the requantizer wrote to DRAM (one per row per 32 output columns). */",
+        "  { const uint8_t *codes = (const uint8_t *)&C_hw[0][0];",
+        f'    printf("OUT {p.out} {p.m} {p.n}");',
+        f"    for (long i = 0; i < {p.m} * {p.n}; i++) printf(\" %u\", (unsigned)codes[i]);",
+        '    printf("\\n"); }',
+        "  { const uint8_t *sc = (const uint8_t *)scale_factors;",
+        f'    printf("OUT {p.out}_scales {p.m} {p.scale_blocks}");',
+        f"    for (long i = 0; i < {p.m} * {p.scale_blocks}; i++) printf(\" %u\", (unsigned)sc[i]);",
+        '    printf("\\n"); }',
+    ] + tail
 
 
 def generate_driver(cb: dict[str, Any], *, transport: Transport | None = None) -> str:
@@ -401,8 +445,10 @@ def generate_driver(cb: dict[str, Any], *, transport: Transport | None = None) -
         "  c0 = read_cycles();",
         *_emit_mvin(p),
         "",
-        "  /* Output row stride, then the requant/scale-memory config (funct 26). */",
-        "  gemmini_config_st(OUT_COLS * sizeof(out_t));",
+        "  /* Output row stride, then the requant/scale-memory config (funct 26). On the requant",
+        "     path the reference uses a single-word store stride; the drain is MX_READ_SMEM. */",
+        ("  gemmini_config_st(OUT_COLS * sizeof(out_t));" if p.out_fmt == "bf16"
+         else "  gemmini_config_st(1 * sizeof(out_t));"),
         f"  gemmini_mxquant_config_mvout((uint64_t)scale_factors, {p.tiles_i}, {p.tiles_j}, "
         f"{p.tiles_k}, 0, 0, 1);",
         "",

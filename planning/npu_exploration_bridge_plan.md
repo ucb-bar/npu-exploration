@@ -835,17 +835,72 @@ new things at once.
 requant path out of scope. That gate has to come down, and with it the FP8 output branch has to be
 emitted for real.
 
+### 13.3b MEASURED: the requant→GEMM2 seam overflows, and the fix (2026-09-01)
+
+Step 13a/13b are **done**. The emitter now supports FP8 requant output (`output_dtype =
+"f8E4M3FN"`), draining the packed codes plus the requantizer's E8M0 scale codes over two `OUT`
+lines. Findings, all on the real path — a real requant GEMM, not an emulation:
+
+**1. The requantizer emits full-range codes.** Dumped from hardware:
+
+```
+codes (64,64)  scales (64,2)
+decoded code magnitude: max=448.0  mean=122.22
+E8M0 scale codes: 122..123
+```
+
+That is the RTL doing exactly what it says — `MxRequantizer.scala:35-40,461-462`:
+`log2_pmax_floor = 8` for FP8, `scale_exponent = max_exp - log2_pmax_floor` — normalize each block's
+max to 2^8, i.e. the full e4m3 range. Spike mirrors it (`scale_exp = max_exp - 8`).
+
+**2. Chaining that straight into GEMM 2 gives 4096/4096 NaN.**
+
+**3. Root cause is the composition, not either half.** The mesh accumulates a 16-deep column at
+**exponent width 4** for 15 of its 16 rows — `ConfigsFP.scala:268-273`:
+
+```scala
+meshProdPrecisionList = Seq.fill(16) {MxFloat(4, 4, 4, true, false)}
+meshAccPrecisionList  = Seq.fill(8) {MxFloat(4,5,..)} ++ Seq.fill(2) {MxFloat(4,6,..)}
+                     ++ Seq.fill(5) {MxFloat(4,7,..)} ++ Seq.fill(1) {MxFloat(8,8,..)}
+```
+
+saturating near 2^8. Spike's `acc_e[16] = {4 x15, 8}` / `prod_e=4, prod_m=3` match the RTL exactly
+(its `acc_m` is RTL `sigWidth - 1`, the hidden-bit convention). So the narrow top-PE accumulator is
+**real RTL, faithfully modelled** — not a spike artifact. Requant targets the format's nominal
+range; the accumulator cannot take that range. Both correct, they do not compose.
+
+**4. Fix: a value-preserving exponent shift between GEMMs.**
+`mxquant.rescale_for_next_gemm` divides each code by `2**6` and adds 6 to its E8M0 scale, so
+`code * 2**(scale-127)` is unchanged. Measured on real requant output:
+
+| shift | peak code | NaN | flushed to 0 | rel err |
+|---|---|---|---|---|
+| 0 | 448.00 | 4096/4096 | — | — |
+| 4 | 28.00 | 341/4096 | 0/4090 | 0 |
+| **6** | **7.00** | **0/4096** | **0/4090** | **0** |
+| 8 | 1.75 | 0/4096 | 7/4090 (0.17%) | 3.3e-1 |
+
+Shift 6 is both safe and **lossless** on real data — e4m3 keeps 3 mantissa bits at every exponent,
+so it is a pure exponent shift and nothing falls subnormal at this magnitude.
+
+**5. The scale layout lines up (risk 2 retired).** The requantizer writes `[row][block]`; the A-side
+scale memory indexes `[group][row]` (`a_off = group * M + row`). They correspond because GEMM 1's N
+equals GEMM 2's K, so `N_blocks == K2/32`. The helper transposes.
+
+**Open decision for the hardware owner.** The software rescale works today and costs nothing
+numerically, but it is a fix-up outside the datapath. The RTL alternative is one constant:
+`log2_pmax_floor` for FP8 (currently 8) is what makes the requantizer target the format max rather
+than a chain-safe operand range. If the requantizer's purpose is to produce the *next* GEMM's
+operands, arguably it should target what the accumulator can accept. Note the per-format values
+(FP4→2, FP6→4, FP8→8, BF16→16) are all `floor(log2(pmax))`, so this is a deliberate
+"normalize to the format max" policy, not an oversight — changing it is a design decision, not a
+bug fix.
+
 ### 13.4 Risks, highest first
 
-1. **The requant scale may overflow GEMM 2.** §10.1: the 16-deep intermediate accumulator has a
-   4-bit exponent and NaNs above ~256, which is why operands are scaled to peak near ±4. For GEMM 1
-   *we* choose the E8M0 scale; for GEMM 2 the **hardware** chooses it, in `mxquant_config_mvout`.
-   If it normalizes `T0` to the full e4m3 range, GEMM 2 returns all-NaN exactly as the first PyTorch
-   run did. **Check this before building anything else** — dump `T0`'s codes and scales after a
-   requant GEMM and see where they land.
-2. **Scale-layout mismatch across the seam.** GEMM 1 emits scales per-row per-**N**-group; GEMM 2
-   wants A-side scales per-row per-**K**-group. Since `N1 == K2` these should coincide, but only if
-   `N1 % 32 == 0`. Verify against the hardware's actual write, not by reasoning.
+1. ~~**The requant scale may overflow GEMM 2.**~~ **CONFIRMED and fixed** — see §13.3b. It does
+   overflow (4096/4096 NaN); `rescale_for_next_gemm` resolves it losslessly.
+2. ~~**Scale-layout mismatch across the seam.**~~ **Retired** — the layouts correspond, §13.3b item 5.
 3. **Scratchpad capacity.** Two resident weights plus the intermediate now share the 16384-row
    scratchpad. `b_base` is currently computed for one weight; the allocator becomes real.
 4. **`_plan` is single-op by construction.** It asserts exactly one RES_PACK / matmul / commit. It
@@ -867,8 +922,9 @@ matters more than speed here.
 
 | # | step | gate |
 |---|---|---|
-| 13a | Probe the requant path: single GEMM, `output_dtype = f8E4M3FN`, dump `T0` codes + scales | codes land within the §10.1 bound; scale layout matches risk 2 |
-| 13b | Lift the `out_fmt != bf16` gate; emit the FP8 requant output branch | matches `matmul_tiled_fp8_64x64_requant.c` on spike |
+| 13a | Probe the requant path: single GEMM, `output_dtype = f8E4M3FN`, dump `T0` codes + scales | **DONE** — codes peak at 448, i.e. OUTSIDE the §10.1 bound; §13.3b |
+| 13b | Lift the `out_fmt != bf16` gate; emit the FP8 requant output branch | **DONE** — codes + E8M0 scales drain over two OUT lines |
+| 13b2 | `rescale_for_next_gemm`: value-preserving exponent shift across the seam | **DONE** — chain 0/4096 NaN, lossless |
 | 13c | Generalize `_plan` to a command *sequence*; real scratchpad allocation for 2 weights | single-GEMM path unchanged (regression) |
 | 13d | Emit the chained 2-GEMM kernel; app emits the 2-GEMM interface MLIR | chain matches two separate runs (§13.5) |
 | 13e | Host softmax in the emitted harness, over `Y0` | rows sum to 1 |

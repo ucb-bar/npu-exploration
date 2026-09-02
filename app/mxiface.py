@@ -24,6 +24,7 @@ MX_ELEM_TYPE = {"fp8": "f8E4M3FN", "fp6": "f6E3M2FN", "fp4": "f4E2M1FN"}
 def matmul_interface_mlir(m: int, n: int, k: int, *,
                           operand_fmt: str = "fp8",
                           out_dtype: str = "bf16",
+                          acc_dtype: str = "bf16",
                           target: str = "mx_gemmini_rocket",
                           lhs: str = "X", weight: str = "W", out: str = "Y0") -> str:
     """One weight-stationary matmul ``A[m][k] @ B[k][n]`` as a merlin_iface module.
@@ -43,11 +44,13 @@ def matmul_interface_mlir(m: int, n: int, k: int, *,
         f': tensor<{m}x{k}x{et}>',
         f'  %{weight}_res = merlin_iface.resident_pack %{weight} {{layout = "packed_rhs"}} '
         f': (tensor<{k}x{n}x{et}>) -> !merlin_iface.resident',
+        # The accumulator is ALWAYS bf16 (the mesh's accumulate type); the commit is what
+        # requantizes, so out_dtype may be an MX format for a chained matmul.
         f'  %acc0 = merlin_iface.matmul %{lhs}, %{weight}_res '
-        f': (tensor<{m}x{k}x{et}>, !merlin_iface.resident) -> !merlin_iface.acc<{out_dtype}>',
+        f': (tensor<{m}x{k}x{et}>, !merlin_iface.resident) -> !merlin_iface.acc<{acc_dtype}>',
         f'  %{out} = merlin_iface.commit %acc0 {{name = "{out}", epilogue = [], '
         f'output_dtype = "{out_dtype}"}} '
-        f': (!merlin_iface.acc<{out_dtype}>) -> tensor<{m}x{n}x{out_dtype}>',
+        f': (!merlin_iface.acc<{acc_dtype}>) -> tensor<{m}x{n}x{out_dtype}>',
         f'  merlin_iface.evict %{weight}_res : (!merlin_iface.resident) -> ()',
         "}",
         "",

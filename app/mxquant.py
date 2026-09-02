@@ -184,3 +184,37 @@ def quantize_matmul_operands(a: np.ndarray, b: np.ndarray, *,
 def bf16_bits_to_float(bits: np.ndarray) -> np.ndarray:
     """Decode the bf16 bit patterns the device reports over OUT back to float32."""
     return (np.asarray(bits, dtype=np.uint16).astype(np.uint32) << 16).view(np.float32)
+
+
+# --- Chaining: rescaling the requantizer's output for a following GEMM -----------------------------
+
+#: Exponent shift applied to requantizer output before it becomes the next GEMM's operand.
+#:
+#: The requantizer normalizes each output block's max to the element format's FULL range — RTL
+#: ``MxRequantizer.scala``: ``scale_exponent = max_exp - log2_pmax_floor``, with
+#: ``log2_pmax_floor = 8`` for FP8 — so codes come back peaking at 448. But the mesh accumulates a
+#: 16-deep column at **exponent width 4** for 15 of its 16 rows
+#: (``ConfigsFP.scala`` ``meshAccPrecisionList``), saturating near 2**8. Feeding requant output
+#: straight into a second GEMM therefore overflows: measured 4096/4096 NaN.
+#:
+#: Both halves are individually correct and standard; they just do not compose. Shifting by 2**6
+#: brings the peak to 7.0 and the chain is clean (measured: shift 0 -> 4096 NaN, 4 -> 341, 6 -> 0).
+CHAIN_EXP_SHIFT = 6
+
+
+def rescale_for_next_gemm(codes: np.ndarray, scales: np.ndarray, *,
+                          shift: int = CHAIN_EXP_SHIFT) -> tuple[np.ndarray, np.ndarray]:
+    """Make requantizer output safe as the next GEMM's A operand, preserving its value.
+
+    Divides every code by ``2**shift`` and adds ``shift`` to the E8M0 scale, so
+    ``code * 2**(scale-127)`` is unchanged. e4m3 keeps 3 mantissa bits at every exponent, so this is
+    a pure exponent shift and is **lossless** until a value falls into the subnormal range.
+
+    ``scales`` arrives as the requantizer writes it, ``[row][block]``; the returned scales are
+    transposed to ``[group][row]``, the layout the A-side scale memory indexes
+    (``a_off = group * M + row``). The two line up because GEMM 1's N equals GEMM 2's K.
+    """
+    codes = np.asarray(codes, dtype=np.uint8)
+    shifted = fp8_e4m3_to_code(fp8_e4m3_decode(codes) / (2.0 ** shift))
+    new_scales = np.clip(np.asarray(scales, dtype=np.int32) + shift, 0, 254).astype(np.uint8)
+    return shifted, np.ascontiguousarray(new_scales.T)
