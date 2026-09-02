@@ -47,17 +47,23 @@ migration is mechanical.
 hardware:
 
 ```bash
-cd <chipyard-root> && source ./env.sh          # sets $RISCV
+cd <chipyard-root> && source ./env.sh                 # sets $RISCV
+export PYTHONPATH=$PWD/merlin/merlin/python           # merlin lowers the MLIR
 .venv/bin/python app/torch_linear/run_linear.py
 ```
 
 ```
 model     nn.Linear(64 -> 64, bias=False), input [64][64]
 quantize  mxfp8 e4m3 + E8M0 block scales (group 32, peak code 2^2)
-elf       out/build/torch_linear/mx_gemmini_rocket.elf  (27016 bytes)
+lower     merlin_iface MLIR -> command buffer (4 commands: RES_PACK, MATMUL_RESIDENT, COMMIT, EVICT)
+elf       out/build/torch_linear/mx_gemmini_rocket.elf  (27024 bytes)
 spike     Y0 (64, 64) bf16   METRIC {'cycles': 282, ...}
           finite 4096/4096   range [-2.062, 1.875]
 ```
+
+The front end emits **`merlin_iface` interface MLIR** — merlin's frozen contract grammar — and
+merlin lowers it to the command buffer. That is the same grammar the shipped MX capsules use, so a
+capsule and this front end are interchangeable inputs to the backend.
 
 Arbitrary shapes (M, K, N independently) — `--m 32 --k 128 --n 96` works. The front end's job is to
 *produce the ELF*; **spike is the reference** for what the hardware computes, so nothing here tries

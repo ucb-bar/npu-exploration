@@ -4,17 +4,31 @@ The front end: models, quantization, and the experiments you actually want to ru
 
 | file | role |
 |---|---|
-| `torch_linear/run_linear.py` | PyTorch `nn.Linear` → ELF → spike |
+| `torch_linear/run_linear.py` | PyTorch `nn.Linear` → MLIR → ELF → spike |
 | `mxquant.py` | float tensors → MX operand codes + E8M0 block scales |
-| `mxcb.py` | operands → a merlin command buffer |
+| `mxiface.py` | matmul → `merlin_iface` interface MLIR, and MLIR → command buffer |
 
 Everything operand- and model-specific lives here. The compiler backend receives a command buffer
 and knows nothing about tensors, models, or files.
 
 ```bash
 cd <chipyard-root> && source ./env.sh
+export PYTHONPATH=$PWD/merlin/merlin/python      # merlin lowers the MLIR
 .venv/bin/python app/torch_linear/run_linear.py --m 32 --k 128 --n 96
 ```
+
+## The MLIR handoff
+
+The front end emits **`merlin_iface`** interface MLIR — merlin's frozen contract grammar
+(`merlin/contract/interface_grammar.md`), the documented input format for an out-of-tree target
+package. merlin's own `parse_interface_mlir` lowers it to the command buffer.
+
+The emitted `.mlir` is written beside the ELF, and it is the same grammar the shipped MX capsules
+use — so a capsule from `merlin/contract/capsules/mx_gemmini/` and this front end are
+**interchangeable inputs** to the backend. Verified: `MB0_mxfp8_linear` builds and runs on spike.
+
+The grammar is deliberately decoupled from xDSL (plain text in, plain text out), so no xDSL is
+needed.
 
 ## Note on quantization scaling
 

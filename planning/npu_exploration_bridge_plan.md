@@ -265,7 +265,9 @@ for the MMIO endpoint. Neither blocks the Rocket path — functs 23–29 *are* e
 | 7 | Drive from `merlin/contract/capsules/mx_gemmini/isa/M0_mxfp8_single_tile` etc. — reuse the existing MX capsules | capsules PASS | |
 | 8 | `app/` — PyTorch `nn.Linear` mxfp8 → capsule → spike, vs a PyTorch golden | PyTorch↔HW bridge closed | |
 | 9 | Scale out: `layers/MB0_mxfp8_linear`, then `model/M0_small_llama_mx` via `compile_model(..., run="mesh")` | whole model | |
-| 10 | Cycle-accurate tier: Verilator `MxGemminiRocketConfig` (L2) | perf numbers | |
+| 10 | **Two chained GEMMs + softmax** — the classifier head. Breaks the one-weight / one-matmul / all-on-mesh assumptions. Full breakdown in §13 | a 2-layer MLP on spike | **NEXT** |
+| 11 | Wire the capsules' goldens — restores the correctness gate lost in §11.1 | capsules PASS | |
+| 12 | Cycle-accurate tier: Verilator `MxGemminiRocketConfig` (L2) | perf numbers | deferred |
 
 Steps 4–5 are the load-bearing ones. Everything after reuses merlin machinery that already works for
 int8 Gemmini.
@@ -682,7 +684,200 @@ This is an accepted trade, not an oversight — the reference test still exists 
 gate is wanted later, the cheapest form is a snapshot of the emitted C plus the known-good OUT
 values for one shape — no baremetal-C mapping required.
 
-## 12. Open questions
+## 12. MLIR front end — merlin is now on the path (2026-09-01)
+
+**Question that prompted it:** "is this still using merlin at all?" — answer at the time: **no**.
+The `merlin` entry in `sys.modules` was an empty namespace package, resolved from the *directory
+name* `npu-exploration/merlin/`; `__file__` was `None` and zero submodules loaded. Both merlin
+touchpoints (`register(BackendInfo(...))`, `parse_console`) were `try/except ImportError` taking
+their local fallbacks. We were conforming to merlin's *conventions* while importing none of its code.
+
+**Chosen scope (user):** MLIR in, C out — front end only. Not MLIR-to-machine-code.
+
+### 12.1 `merlin_iface` is the documented OOT handoff
+
+`merlin/contract/interface_grammar.md` — the frozen, versioned contract grammar:
+
+> "the frozen, versioned input format the experiment ABI hands to an out-of-tree target-backend
+> package. A package's job is to consume an `*.interface.mlir` file written in this grammar and
+> produce (a) a `command_buffer.json` and (b) lowered LLVM/RoCC"
+>
+> "It is **decoupled from xDSL**: producers emit plain text; consumers parse plain text."
+
+So consuming interface MLIR is exactly what an OOT package is *supposed* to do — this is using
+merlin as designed, not bending it. Reference reader:
+`merlin.targetgen.contract.interface_emit.parse_interface_mlir`.
+
+Note `merlin_iface` (the frozen capsule grammar) is NOT merlin's internal xDSL `interface` dialect —
+different names, different ops. `make_core_context()` cannot parse a capsule (`Operation
+merlin_iface.tensor is not registered`); that is expected, not a defect. **xDSL is not needed** — it
+was installed while exploring and then removed.
+
+### 12.2 What changed
+
+- **new `app/mxiface.py`** — emits `merlin_iface` MLIR for a matmul, and wraps merlin's parser.
+- **`app/mxcb.py` deleted** — it was a hand-rolled stand-in for this exact lowering.
+- **backend** accepts the grammar's dtype spelling (`f8E4M3FN` alongside `mxfp8`), and derives the
+  output shape/dtype from the COMMIT op rather than a tensor-table lookup — only *leaf* tensors
+  appear in the table, per the grammar ("dst rows x resident cols").
+
+```
+$ PYTHONPATH=$PWD/merlin/merlin/python .venv/bin/python app/torch_linear/run_linear.py --m 32 --k 128 --n 96
+model     nn.Linear(128 -> 96, bias=False), input [32][128]
+quantize  mxfp8 e4m3 + E8M0 block scales (group 32, peak code 2^2)
+lower     merlin_iface MLIR -> command buffer (4 commands: RES_PACK, MATMUL_RESIDENT, COMMIT, EVICT)
+elf       out/build/torch_linear/mx_gemmini_rocket.elf  (35512 bytes)
+spike     Y0 (32, 96) bf16   METRIC {'cycles': 467, ...}
+```
+
+### 12.3 Capsules are now valid input — verified
+
+Because the front end emits the same grammar the capsules are written in, a **shipped merlin capsule
+runs on our backend**:
+
+```
+capsule: MB0_mxfp8_linear
+  parsed -> M=16 K=32 N=32  dtype=f8E4M3FN  target=mx_gemmini
+  ran on spike -> Y0 (16, 32), finite 512/512, METRIC {'cycles': 70, ...}
+```
+
+Operands were supplied locally for that run — the capsule's own **goldens are not yet wired**, which
+is the remaining step toward restoring the correctness gate lost in §11.1. The capsule declares
+`target = mx_gemmini` (the MMIO sibling); the backend does not check the target field, so it is
+accepted. Worth deciding whether it should.
+
+### 12.4 Honest limits
+
+- The lowering used is **interface → command buffer** only. merlin's full `lower_module`
+  (linalg → contract → schedule → interface → target → runtime) is NOT used: it needs a
+  `dialect_plan.yaml` we do not have (Q4) and takes linalg-level input, whereas capsules and our
+  front end both start at the interface level.
+- The command buffer still describes exactly **one matmul**. Getting more op coverage means going up
+  to linalg and the full pipeline, or hand-writing more interface MLIR.
+- Codegen is still C, compiled by gcc. MLIR-to-machine-code (`llvm.inline_asm` `.insn`, as
+  `gemmini_codegen_mlir.py` does for int8) remains the deferred option.
+
+## 13. Next step: two chained GEMMs + softmax
+
+The target model — a classifier head, the smallest thing that is more than one op:
+
+```python
+nn.Sequential(nn.Linear(K, N1, bias=False),
+              nn.Linear(N1, N2, bias=False),
+              nn.Softmax(dim=-1))
+```
+
+This is the right next step because it breaks *three* one-op assumptions at once: one weight, one
+matmul, and everything-runs-on-the-mesh.
+
+### 13.1 The grammar handles the chain — verified, no extension needed
+
+Two `RES_PACK`s and two `MATMUL_RESIDENT`s, chained through a committed intermediate, parse
+correctly with merlin's own reader today:
+
+```
+RES_PACK        {src: W1, dst: W1_res}
+MATMUL_RESIDENT {lhs: X,  rhs: W1_res, dst: acc0}
+COMMIT          {src: acc0, dst: T0}      output_dtype: f8E4M3FN   <- the chaining point
+EVICT           {handle: W1_res}
+RES_PACK        {src: W2, dst: W2_res}
+MATMUL_RESIDENT {lhs: T0, rhs: W2_res, dst: acc1}
+COMMIT          {src: acc1, dst: Y0}      output_dtype: bf16
+EVICT           {handle: W2_res}
+```
+
+The second matmul's LHS is the committed tensor from the first. That is legal: `matmul` takes
+`(tensor, !merlin_iface.resident)` and a commit produces a tensor.
+
+### 13.2 Softmax CANNOT be expressed — it runs on the host
+
+`merlin_iface` v0.1 has exactly **five** ops (`tensor`, `resident_pack`, `matmul`, `commit`,
+`evict`), and `commit`'s epilogue is limited to `["bias_add", "requant", "acc_scale", "relu"]`.
+There is no softmax, no reduction, no general elementwise. The grammar is **frozen and versioned**
+("a consumer must reject a version it does not implement"), so extending it is not ours to do.
+
+That is not a workaround — it matches the hardware. Our contract declares one compute unit,
+`mx_systolic_mesh`, `ops: [matmul]`, with `elementwise_map` only `composed_with: [contraction]`.
+**There is no reduction hardware.** Softmax is a row max, a row sum, and a divide; the mesh cannot
+do any of it.
+
+So softmax runs on the **Rocket scalar host**, in the emitted C, after the mesh produces `Y0`. This
+is merlin's own routing model in miniature (`whole_model_on_accelerator.md`: contractions to the
+mesh, norms/activations/elementwise to the vector/scalar lane; "an op no unit supports is an honest
+scalar/RVV fallback, never a silent drop"). The MX corpus agrees — merlin ships
+`MF1_softmax_bf16_pt` as a **bf16 PyTorch-sourced model slice**, not an ISA capsule.
+
+**Consequence for the design:** the backend gains a notion of a *host epilogue* — ops the command
+buffer carries that are not lowered to the mesh. Today that is out of scope for the frozen grammar,
+so for this step the softmax is described by the app and emitted into the harness, with the
+interface MLIR covering only the two GEMMs. Recorded honestly rather than pretending the compiler
+routed it.
+
+### 13.3 The chaining mechanism: this is what the requant path is for
+
+The intermediate `T0` must be an **MX operand** (fp8 codes + E8M0 scales) to feed GEMM 2, but the
+mesh accumulates in bf16. Converting one to the other is exactly what the datapath's requant does:
+`out_fmt = 0` (FP8 E4M3 packed) plus `gemmini_mxquant_config_mvout` (funct 26), which writes
+per-row per-N-group E8M0 scale codes to DRAM.
+
+Two ways to land it, and the second is the reason the V1 RTL work exists:
+
+| | mechanism | cost |
+|---|---|---|
+| **(a) DRAM round-trip** | GEMM1 requant-mvout codes + scales to DRAM, mvin as GEMM2's A | simple; uses only functs already emitted; a full store/load of the intermediate |
+| **(b) spad-resident (V1)** | GEMM1's requantized FP8 goes straight to the internal scratchpad, GEMM2 consumes it in place | no round-trip; **this is V1's stated purpose** — `../planning/mxgemmini_rocket_standalone_plan.md`: `ex_write_to_spad=true` writes MxRequantizer FP8 output to the internal spad, "reusable as an operand", sim-verified 2026-08-31 |
+
+Start with **(a)** — it is verifiable against `matmul_tiled_fp8_64x64_requant.c`, which already
+PASSes on spike — then move to (b) once the chain is correct. Doing (b) first would confound two
+new things at once.
+
+**The emitter currently refuses this.** `_plan` raises for any `output_dtype != "bf16"`, calling the
+requant path out of scope. That gate has to come down, and with it the FP8 output branch has to be
+emitted for real.
+
+### 13.4 Risks, highest first
+
+1. **The requant scale may overflow GEMM 2.** §10.1: the 16-deep intermediate accumulator has a
+   4-bit exponent and NaNs above ~256, which is why operands are scaled to peak near ±4. For GEMM 1
+   *we* choose the E8M0 scale; for GEMM 2 the **hardware** chooses it, in `mxquant_config_mvout`.
+   If it normalizes `T0` to the full e4m3 range, GEMM 2 returns all-NaN exactly as the first PyTorch
+   run did. **Check this before building anything else** — dump `T0`'s codes and scales after a
+   requant GEMM and see where they land.
+2. **Scale-layout mismatch across the seam.** GEMM 1 emits scales per-row per-**N**-group; GEMM 2
+   wants A-side scales per-row per-**K**-group. Since `N1 == K2` these should coincide, but only if
+   `N1 % 32 == 0`. Verify against the hardware's actual write, not by reasoning.
+3. **Scratchpad capacity.** Two resident weights plus the intermediate now share the 16384-row
+   scratchpad. `b_base` is currently computed for one weight; the allocator becomes real.
+4. **`_plan` is single-op by construction.** It asserts exactly one RES_PACK / matmul / commit. It
+   becomes a loop over a *sequence*, which is a genuine rewrite, not a parameter change.
+
+### 13.5 Validation without a golden
+
+The §11.1 gap bites here: no correctness gate. Two cheap checks that need no golden:
+
+- **Softmax rows sum to 1.** A real invariant, catches gross breakage in either GEMM.
+- **Chain vs two separate runs.** Run GEMM1 alone, requantize its output in `mxquant`, feed it as
+  GEMM2's input in a second single-GEMM run, and compare against the fused chain. Any divergence is
+  in the chaining, not the arithmetic — the differential-not-absolute method that worked in §10.2.
+
+Wiring the capsules' own goldens (§12.3) would be better and is worth doing first if correctness
+matters more than speed here.
+
+### 13.6 Step list
+
+| # | step | gate |
+|---|---|---|
+| 13a | Probe the requant path: single GEMM, `output_dtype = f8E4M3FN`, dump `T0` codes + scales | codes land within the §10.1 bound; scale layout matches risk 2 |
+| 13b | Lift the `out_fmt != bf16` gate; emit the FP8 requant output branch | matches `matmul_tiled_fp8_64x64_requant.c` on spike |
+| 13c | Generalize `_plan` to a command *sequence*; real scratchpad allocation for 2 weights | single-GEMM path unchanged (regression) |
+| 13d | Emit the chained 2-GEMM kernel; app emits the 2-GEMM interface MLIR | chain matches two separate runs (§13.5) |
+| 13e | Host softmax in the emitted harness, over `Y0` | rows sum to 1 |
+| 13f | `app/torch_mlp/` — the `nn.Sequential` front end end to end | runs on spike |
+
+13a is deliberately first and is a *probe*, not a build: it answers the one question that can
+invalidate the rest.
+
+## 14. Open questions
 
 - **Q1 — `radiance-kernels/` tracking. RESOLVED 2026-09-01:** no dependency. Not a submodule, not
   tracked, no build path into it. Read for ideas while authoring; cite in comments where an idea came
@@ -700,7 +895,7 @@ values for one shape — no baremetal-C mapping required.
   datapath, or whether the MX ops need the hand-authored route the radiance `hand_v0/dialect.py`
   took. Deferred to Step 3; does not block Steps 4–5, which emit C directly from a command buffer.
 
-## 13. Long-term direction: one config artifact, two consumers
+## 15. Long-term direction: one config artifact, two consumers
 
 **User, 2026-09-01:** eventually software emits a **JSON of configurations** that drives *both*
 compilation *and* hardware generation. The §4 table is the near-term stand-in for that.
@@ -725,7 +920,7 @@ Implications to keep in view while building Steps 3–5, so we do not have to un
 
 Not in scope for Steps 1–10. Recorded so the contract is authored in a shape that can be generated.
 
-## 14. Related plans
+## 16. Related plans
 
 `../planning/mxgemmini_rocket_standalone_plan.md` (the RTL-side V1/V2/V3 output-mode work this
 consumes), `../planning/fp8_bubble_and_perf_plan.md`, `../planning/acc_raw_debug.md`.

@@ -28,8 +28,14 @@ from typing import Any, Protocol, Sequence
 # Operand format -> the 2-bit CONFIG_EX code (libgemmini/README.md "CONFIG_EX changes").
 OPERAND_FMT = {"fp8": 0, "fp6": 1, "fp4": 2}
 OUTPUT_FMT = {"fp8": 0, "fp6": 1, "fp4": 2, "bf16": 3}
-# merlin quant_formats name -> this target's short format key.
-DTYPE_TO_FMT = {"mxfp8": "fp8", "mxfp6": "fp6", "mxfp4": "fp4"}
+# Operand dtype -> this target's short format key. Two spellings are accepted on purpose:
+#   * the merlin_iface contract grammar uses MLIR's builtin fp8 names (`f8E4M3FN`), which is what
+#     the shipped MX capsules declare — block scaling is a TARGET property, not part of the type;
+#   * merlin's quant_formats registry names (`mxfp8`) name the block-scaled format directly.
+DTYPE_TO_FMT = {
+    "f8E4M3FN": "fp8", "f6E3M2FN": "fp6", "f4E2M1FN": "fp4",
+    "mxfp8": "fp8", "mxfp6": "fp6", "mxfp4": "fp4",
+}
 # One E8M0 exponent per 32 K-elements (MxRequantizer.scala).
 BLOCK_SCALE_GROUP = 32
 # BF16 results drain packed 4 per uint64 word.
@@ -145,7 +151,10 @@ def _plan(cb: dict[str, Any]) -> MxGemmPlan:
         raise MxEmitError("the commit must consume the matmul's accumulator")
     out = commit["operands"]["dst"]
 
-    for name in (lhs, weight, out):
+    # Only LEAF tensors appear in the table — the merlin_iface grammar declares inputs and weights,
+    # while committed outputs are named by the COMMIT op. So the output shape is DERIVED
+    # ("dst rows x resident cols", per interface_grammar.md), not looked up.
+    for name in (lhs, weight):
         if name not in tensors:
             raise MxEmitError(f"tensor {name!r} missing from the command buffer's tensor table")
     m, k_a = tensors[lhs]["shape"]
@@ -153,12 +162,13 @@ def _plan(cb: dict[str, Any]) -> MxGemmPlan:
     if k_a != k_w:
         raise MxEmitError(f"contraction mismatch: lhs K={k_a} vs weight K={k_w}")
 
-    epilogue = list((commit.get("attributes") or {}).get("epilogue", []))
+    attrs = commit.get("attributes") or {}
+    epilogue = list(attrs.get("epilogue", []))
     if epilogue:
         raise MxEmitError(
             f"epilogue {epilogue} unsupported — the E8M0 requant IS this datapath's scaling, and no "
             "additional epilogue is emitted on the BF16 output path")
-    out_dtype = tensors[out].get("dtype", "bf16")
+    out_dtype = attrs.get("output_dtype") or tensors.get(out, {}).get("dtype", "bf16")
     if out_dtype != "bf16":
         raise MxEmitError(
             f"output dtype {out_dtype!r} is the requant path (needs mxquant scale write-back and a "

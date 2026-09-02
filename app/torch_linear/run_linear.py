@@ -24,7 +24,7 @@ sys.path.insert(0, str(REPO / "app"))
 sys.path.insert(0, str(REPO / "compiler" / "targets" / "mx_gemmini_rocket"))
 
 import backend as mx          # noqa: E402  the compiler target package
-import mxcb                   # noqa: E402
+import mxiface                # noqa: E402
 import mxquant as q           # noqa: E402
 
 
@@ -54,8 +54,15 @@ def main() -> int:
     print(f"quantize  mxfp8 e4m3 + E8M0 block scales (group {q.BLOCK}, "
           f"peak code 2^{q.TARGET_CODE_EXP})")
 
-    # ---- lower + build --------------------------------------------------------------------------
-    cb = mxcb.matmul_cb(a.m, a.n, a.k, ops)
+    # ---- emit interface MLIR, lower it with merlin -----------------------------------------------
+    iface = mxiface.matmul_interface_mlir(a.m, a.n, a.k)
+    a.workdir.mkdir(parents=True, exist_ok=True)
+    (a.workdir / "capsule.interface.mlir").write_text(iface, encoding="utf-8")
+    cb = mxiface.to_command_buffer(iface, ops)
+    print(f"lower     merlin_iface MLIR -> command buffer "
+          f"({len(cb['commands'])} commands: {', '.join(c['opcode'] for c in cb['commands'])})")
+
+    # ---- build ----------------------------------------------------------------------------------
     if not mx.available("spike"):
         print("toolchain NOT AVAILABLE — source the chipyard env.sh first.", file=sys.stderr)
         return 2
