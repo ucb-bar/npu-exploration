@@ -1,5 +1,13 @@
 out/
-radiance-kernels/
 .venv/
+radiance-kernels/
 __pycache__/
 *.pyc
+
+# run outputs (regenerated on demand)
+results/
+
+# local notes and parked work — not for upstream
+ENGAGING_NOTES.md
+PLAN.md
+parked/
