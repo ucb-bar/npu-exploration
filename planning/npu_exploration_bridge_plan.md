@@ -1026,7 +1026,166 @@ Implications to keep in view while building Steps 3–5, so we do not have to un
 
 Not in scope for Steps 1–10. Recorded so the contract is authored in a shape that can be generated.
 
-## 17. Related plans
+## 17. Fusing a chain into ONE ELF (2026-09-02, in progress)
 
+**Goal (user, 2026-09-02):** a kernel is currently N ELFs and N spike runs — one per stage, because
+`mxgemm_emit._plan` takes one matmul per command buffer and every intermediate round-trips through
+numpy (`grade/pipeline.py:137`). Fuse all stages of a *chain* kernel (`KernelSpec.is_chain`:
+`linear`, `mlp2`, `mlp3`) into ONE C driver / ONE ELF / ONE spike run, carrying intermediates on
+device. `attention` keeps the per-stage path for now — its intermediates go back to float and are
+re-quantized from scratch (`quantize_matmul_operands`), which would need `app/mxquant.py` ported to C.
+
+**Constraint (user, 2026-09-02):** make the on-device seam as small as possible, and record every
+part of it that exists only because of a hardware property. The latter is
+`chain_seam_hw_notes.md` — read that before touching the RTL; the headline is that
+`MxRequantizer.scala:35`'s `log2_pmax_floor` being a format constant rather than a configured value
+is what creates the seam at all.
+
+Three things had to be true, and all three were checked before writing code:
+
+1. **merlin needs no fork.** `parse_interface_mlir` is line-driven and appends every op it sees, so
+   an N-matmul module parses as 4N commands with no change to the submodule. Verified.
+2. **The codes need no fixup.** `MX_READ_SMEM` drains contiguous `[M][N]` bytes, which is already the
+   `[M][K]` layout the next stage's `mvin` wants. Only the SCALES are transposed
+   (`[M][N/32]` written vs `[K/32][M]` read) — see notes §2. So the minimal seam is one byte
+   transpose; `--seam rescale` adds a 256-byte LUT pass (notes §1).
+3. **`mx_smem` accumulates and is never cleared** (`gemmini.cc:1190`), invisible today because each
+   stage is a fresh process. Fused stages must use disjoint `C_spad`. Notes §5.
+
+### Steps
+
+| # | File | Change | Status |
+|---|---|---|---|
+| 1 | `app/mxiface.py` | `MatmulStage` + `chain_interface_mlir()`; per-stage `mx_operands` | **DONE** |
+| 2 | `backend/mxgemm_emit.py` | `_plan` -> `plan_chain(cb) -> list[MxGemmPlan]`; one `main()`, per-stage `C_spad`, the seam, per-stage `METRIC` | **DONE** |
+| 3 | `grade/pipeline.py` | fused path for `is_chain`: one cb, one ELF, one spike run | **DONE** |
+| 3a | `app/mxquant.py` | `code_shift_lut(shift)` — the device seam's code shift as a 256-entry table | **DONE** |
+| 3b | `app/mxiface.py` | `MatmulStage.chain_code_shift` -> `mx_gemmini.chain_code_shift` commit attr | **DONE** |
+| 4 | `run_kernel.py` | `--per-stage-elf` escape hatch (RTL replay bundles, differential debug) | half — `run(per_stage_elf=)` exists, no CLI flag |
+| 5 | docs | `kernels/README.md` honest-limit paragraph, root `README.md` | todo |
+
+### Step 1 results (2026-09-02)
+
+`chain_interface_mlir(stages)` emits N repetitions of pack/matmul/commit/evict, with stage *i+1*'s
+matmul taking stage *i*'s commit result as its lhs. Nothing extends grammar v0.1: an intermediate is
+named by its COMMIT and so never enters the tensor table, exactly as `interface_grammar.md` specifies
+("committed outputs are named by the COMMIT op"). `evict` is emitted right after each stage's own
+commit, where that weight actually dies, so a chain never claims N residents are live at once.
+
+`matmul_interface_mlir` is now a one-element `chain_interface_mlir`, and is asserted **byte-identical**
+to its previous output — the single-matmul path and the shipped MX capsules are untouched.
+
+`to_command_buffer` now accepts a LIST of operand bundles, one per matmul, in command order. A chained
+stage supplies only its `b_*` keys: its A operand is the previous stage's requantizer output, produced
+on device, which never travels through the side channel at all.
+
+Verified: an mlp3-shaped 3-stage chain parses to 12 commands with `T0`/`T1` flowing as matmul lhs, and
+a tensor table containing only the leaves (`X`, `W0..W2`).
+
+### Step 2 results (2026-09-02) — the fused ELF runs, bit-identically
+
+`plan_chain(cb)` derives one `MxGemmPlan` per matmul, resolving intermediate shapes as they are
+produced. `generate_driver` dispatches: one matmul emits `_emit_single` (asserted byte-identical to
+the historical output on three shapes, bf16 and fp8), N emit `_emit_chain` — one `main()`, one
+accelerator region spanning every stage and every seam.
+
+Three things the chain path does that the single path never had to:
+
+* **disjoint `C_spad` per stage** (`_assign_smem`), because `mx_smem` accumulates and is never
+  cleared. Stage *i* gets `spad_dest + sum(prev smem_rows)`; mlp3 lands at 128/384/640 of 16384.
+* **the seam** (`_emit_seam`). Stage *i+1*'s A operand IS the previous stage's drained buffer — no
+  copy, since `MX_READ_SMEM` already left it in the `[M][K]` layout `mvin` reads. The only work is
+  the scale transpose, and when the intermediate is one E8M0 block wide (K=32) even that is skipped
+  and the next stage reads the requantizer's buffer directly.
+* **per-stage reporting after the last cycle read**, so every stage's codes/scales still reach the
+  host telemetry and no printf lands inside a measured window.
+
+The `rescale` seam's 256-entry code LUT is supplied by the APP on the operand bundle
+(`chain_code_lut`); the backend refuses to invent it rather than reimplementing the element format's
+encode/decode, which `app/mxquant.py` owns (transcribed from `mx_fp_math.h`).
+
+**Validation** — every fused chain against the per-stage path it replaces, on spike:
+
+| kernel | seam | stages | rel_fro | Y0 bits identical | total | per-stage | per-seam |
+|---|---|---|---|---|---|---|---|
+| `mlp2` | `weight` | 2 | 9.3404% | **yes** | 1052 | 296, 297 | 454 |
+| `mlp3` | `weight` | 3 | 12.2610% | **yes** | 1809 | 297, 296, 297 | 455, 454 |
+| `mlp2` | `rescale` | 2 | 9.3319% | **yes** | 26017 | 296, 296 | 25420 |
+
+Bit-identical is the right bar: fusing changes how many programs run, not what is computed, so any
+difference at all would be a bug. `linear` (1 stage) and the three emitter goldens are unchanged.
+
+Seam costs are recorded in `chain_seam_hw_notes.md` "Measured". Headline: `rescale` costs 56x
+`weight` because the code shift touches 32x the data.
+
+**Bug found and fixed in this step:** the code LUT was emitted through `_c_array_2d` as
+`uint8_t CODE_SHIFT0[256] = { {0,1,...} }`. C reads that as an initializer for element 0 alone and
+zero-fills the rest, so every operand mapped to zero — `rel_fro` 100%, no fault. `_c_array_1d` now
+emits flat initializers.
+
+### Step 3 results (2026-09-02) — one ELF per kernel, on the live graded path
+
+`grade/pipeline.py` now has two lowerings behind one entry point. `spec.is_chain` fuses; anything
+else (attention: a computed B operand, a host softmax) keeps one command buffer per matmul.
+`run(per_stage_elf=True)` forces a chain onto the per-stage path for differential debugging.
+
+**A 1-stage kernel goes through the same builder.** `chain_interface_mlir` with one stage is
+byte-identical to `matmul_interface_mlir`, and `generate_driver` dispatches a 1-plan cb to
+`_emit_single` unchanged — so `linear` is one code path with the fused chains and still reports
+282 cycles / rel_fro 5.9122%, the historical numbers.
+
+**What the pipeline supplies at the seam.** Only two things, and neither is data movement:
+
+* **the weight's target exponent, per stage.** Stage 0's weight pairs with a host-quantized X at
+  `TARGET_CODE_EXP`; every later stage's A is the requantizer's own full-range output, so its weight
+  is quantized at `WEIGHT_SEAM_TARGET_EXP = -4` (`weight` seam) or `+2` (`rescale`). This is the
+  §13.3b compensation, and on the `weight` seam it is the *whole* of it — the device does nothing
+  but transpose scale bytes.
+* **the code-shift LUT**, on `rescale` only. `mxquant.code_shift_lut(shift)` — verified identical to
+  `rescale_for_next_gemm` over all 256 codes. The backend refuses to invent it (it is the element
+  format's encode/decode, which `app/mxquant.py` owns).
+
+**Two enablers Step 2 had left unbuilt.** `--seam rescale` could not be expressed through the front
+end at all: `MatmulStage` had no way to carry `mx_gemmini.chain_code_shift` (which
+`_plan_stage` reads), and `mxquant` had no LUT builder. Both added; §17's `rescale` numbers were
+evidently measured from a hand-built cb, not through this path. Standing of the attribute, honestly:
+`interface_grammar.md` **enumerates** commit attributes as `{epilogue, output_dtype, acc_scale?}` and
+defines no extension mechanism, so a target-namespaced key is outside what v0.1 spells out. It is
+safe in practice — merlin's reference reader passes unknown commit attributes through untouched
+(`interface_emit.py:318-322`, verified: `= 6 : i64` parses back as `int` 6), and the shipped MX
+capsules already carry `output_dtype`s outside the doc's `{i32, i8}` enumeration. Emitted only when
+non-zero, so every module produced before this is byte-identical. Fallback if upstream ever objects:
+the `mx_operands` side channel, which already carries the LUT this pairs with.
+
+**Validation — every fused chain against the per-stage path it replaces, on spike:**
+
+| kernel | seam | shape | Y0 bits identical | rel_fro | fused cycles | ELFs |
+|---|---|---|---|---|---|---|
+| `mlp2` | `weight` | 64³ | **yes** | 9.340434% | 1052 | 2 -> 1 |
+| `mlp3` | `weight` | 64³ | **yes** | 12.261013% | 1809 | 3 -> 1 |
+| `mlp2` | `rescale` | 64³ | **yes** | 9.331860% | 26017 | 2 -> 1 |
+| `mlp2` | `weight` | `h=32` | **yes** | 9.507171% | 355 | 2 -> 1 |
+| `mlp2` | `weight` | 32,128,96,64 | **yes** | 9.054224% | 1084 | 2 -> 1 |
+
+The first three reproduce §17's Step-2 table exactly (stages 296/297, seams 454/455/25420). The last
+two are new: `h=32` is the degenerate case where the intermediate is one E8M0 block and the emitted
+seam is **literally nothing** (confirmed in the emitted C), and the last is fully non-square, so the
+§10.2 stride corrections are exercised across a seam. `linear` and `attention` are unchanged
+(attention: 1692 cycles, rel_fro 14.3546%); `tests/selftest_grade.py` passes.
+
+**Do not read the cycle columns as a speedup.** The fused window spans every stage *and* every seam;
+the per-stage total is the sum of N spike runs and counts the seam at **zero**, because there it is
+numpy on the host between processes. mlp2/`weight` is 1052 fused vs 564 per-stage for that reason
+alone. Fusion's win is one ELF, one process, and intermediates that never leave the device — the
+fused number is the honest one, and it is the number `chain_seam_hw_notes.md` wants driven down.
+
+Two smaller consequences: `--build-only` now emits ONE ELF for a whole chain (it used to stop after
+stage 0, since later stages needed an intermediate that only a run could produce), and every stage
+still reports its codes/scales, so per-stage telemetry (peak code, E8M0 range) survives fusion —
+`rescale`'s peak code 7 vs `weight`'s 448 is visible in the log and is the seam doing its job.
+
+## 18. Related plans
+
+`chain_seam_hw_notes.md` (what the chain seam costs and what would remove it in hardware),
 `../planning/mxgemmini_rocket_standalone_plan.md` (the RTL-side V1/V2/V3 output-mode work this
 consumes), `../planning/fp8_bubble_and_perf_plan.md`, `../planning/acc_raw_debug.md`.

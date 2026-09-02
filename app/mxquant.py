@@ -214,6 +214,22 @@ def bf16_bits_to_float(bits: np.ndarray) -> np.ndarray:
 CHAIN_EXP_SHIFT = 6
 
 
+def code_shift_lut(shift: int = CHAIN_EXP_SHIFT) -> np.ndarray:
+    """The 256-entry table that applies :data:`CHAIN_EXP_SHIFT` to a code, for the ON-DEVICE seam.
+
+    Same map as :func:`rescale_for_next_gemm` performs on the host — ``code -> encode(decode(code) /
+    2**shift)`` — precomputed over the whole 8-bit domain so the emitted C is one indexed load per
+    element and needs no float arithmetic on the Rocket core.
+
+    It lives here, not in the backend, because it is the ELEMENT FORMAT's encode/decode: the backend
+    refuses to reimplement e4m3 (``mxgemm_emit._emit_chain`` raises if a stage declares
+    ``mx_gemmini.chain_code_shift`` without supplying this table) and ``mx_fp_math.h`` is what this
+    module transcribes.
+    """
+    codes = np.arange(256, dtype=np.uint8)
+    return fp8_e4m3_to_code(fp8_e4m3_decode(codes) / (2.0 ** shift))
+
+
 def rescale_for_next_gemm(codes: np.ndarray, scales: np.ndarray, *,
                           shift: int = CHAIN_EXP_SHIFT) -> tuple[np.ndarray, np.ndarray]:
     """Make requantizer output safe as the next GEMM's A operand, preserving its value.
