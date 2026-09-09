@@ -31,9 +31,10 @@ sys.path.insert(0, str(REPO))
 from config.recipe import load  # noqa: E402
 
 
-def chipyard() -> Path:
-    cy = os.environ.get("MERLIN_CHIPYARD") or os.environ.get("CHIPYARD_ROOT")
-    return Path(cy) if cy else Path.home() / "orcd/scratch/npu-exploration/chipyard-graphics"
+def gemmini_root() -> Path:
+    """The pinned hw/gemmini submodule — the recipe is held to THESE sources, which are
+    exactly what config/build_spike.py compiles. The chipyard tree no longer speaks here."""
+    return REPO / "hw" / "gemmini"
 
 
 def parse_gemmini_cc(p: Path) -> dict:
@@ -95,13 +96,14 @@ def parse_define(p: Path, name: str) -> int | None:
 
 def main() -> int:
     r = load("baseline")
-    cy = chipyard()
-    lg = cy / "generators/gemmini/software/libgemmini"
-    rt = cy / "generators/gemmini/software/gemmini-rocc-tests/include"
-    scala = cy / "generators/gemmini/src/main/scala/gemmini/ConfigsFP.scala"
+    g = gemmini_root()
+    lg = g / "software/libgemmini"
+    rt = g / "software/gemmini-rocc-tests/include"
+    scala = g / "src/main/scala/gemmini/ConfigsFP.scala"
 
     if not (lg / "gemmini.cc").exists():
-        print(f"SKIP: no chipyard tree at {cy} (set MERLIN_CHIPYARD)")
+        print(f"SKIP: hw/gemmini submodule not initialized at {g} "
+              "(git submodule update --init --recursive hw/gemmini)")
         return 0
 
     fails = []

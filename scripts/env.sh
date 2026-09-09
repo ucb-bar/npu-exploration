@@ -40,3 +40,11 @@ unset _cy _b _lg _src
 
 echo "MERLIN_CHIPYARD=$MERLIN_CHIPYARD"
 echo "RISCV=$RISCV"
+
+# The hardware SOURCES are pinned by the hw/gemmini submodule; the chipyard tree
+# supplies only the toolchain. Warn if the two trees have diverged.
+_sub_head=$(git -C "$(dirname "${BASH_SOURCE[0]:-$0}")/../hw/gemmini" rev-parse --short HEAD 2>/dev/null)
+_cy_head=$(git -C "$_cy/generators/gemmini" rev-parse --short HEAD 2>/dev/null)
+if [ -n "$_sub_head" ] && [ -n "$_cy_head" ] && [ "$_sub_head" != "$_cy_head" ]; then
+    echo "env.sh: NOTE hw/gemmini pin ($_sub_head) != chipyard tree gemmini ($_cy_head); sources come from the pin" >&2
+fi

@@ -1,3 +1,7 @@
 [submodule "merlin"]
 	path = merlin
 	url = git@github.com:ucb-bar/merlin.git
+[submodule "hw/gemmini"]
+	path = hw/gemmini
+	url = https://github.com/ucb-bar/gemmini.git
+	branch = gemmini-mx-cleanup

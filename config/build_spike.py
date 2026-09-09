@@ -55,10 +55,20 @@ def chipyard_root() -> Path:
     return Path(cy)
 
 
+def gemmini_root() -> Path:
+    """The pinned hardware sources: the hw/gemmini submodule, never the chipyard tree.
+
+    The chipyard tree still supplies the TOOLCHAIN (spike, gcc, dtc); sources of the
+    machine itself are pinned in-repo so every commit records what it was built against.
+    """
+    return Path(__file__).resolve().parents[1] / "hw" / "gemmini"
+
+
 def upstream_dir() -> Path:
-    d = chipyard_root() / "generators/gemmini/software/libgemmini"
+    d = gemmini_root() / "software/libgemmini"
     if not (d / "gemmini.cc").exists():
-        raise BuildError(f"libgemmini sources not found at {d}; set MERLIN_CHIPYARD")
+        raise BuildError(f"libgemmini sources not found at {d}; run "
+                         "`git submodule update --init --recursive hw/gemmini`")
     return d
 
 

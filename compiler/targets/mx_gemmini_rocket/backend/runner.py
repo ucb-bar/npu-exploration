@@ -84,15 +84,28 @@ def libgemmini_so() -> Path:
     override = _env("MX_LIBGEMMINI")
     if override:
         return Path(override)
+    pinned = gemmini_root() / "software/libgemmini/libgemmini.so"
+    if pinned.exists():
+        return pinned
     in_tree = chipyard_root() / "generators/gemmini/software/libgemmini/libgemmini.so"
     return in_tree if in_tree.exists() else riscv_root() / "lib" / "libgemmini.so"
 
 
+def gemmini_root() -> Path:
+    """The pinned hardware sources (the repo's hw/gemmini submodule)."""
+    return Path(__file__).resolve().parents[4] / "hw" / "gemmini"
+
+
 def rocc_tests_dir() -> Path:
     """gemmini-rocc-tests — supplies ``include/gemmini.h`` (the MX intrinsics) and the bare-metal
-    harness (crt.S, syscalls.c, the linker script)."""
-    return Path(_env("MX_ROCC_TESTS")
-                or chipyard_root() / "generators/gemmini/software/gemmini-rocc-tests")
+    harness (crt.S, syscalls.c, the linker script). Pinned submodule first."""
+    override = _env("MX_ROCC_TESTS")
+    if override:
+        return Path(override)
+    pinned = gemmini_root() / "software/gemmini-rocc-tests"
+    if (pinned / "include").exists():
+        return pinned
+    return chipyard_root() / "generators/gemmini/software/gemmini-rocc-tests"
 
 
 def _common_dir() -> Path:
