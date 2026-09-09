@@ -19,6 +19,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from config.recipe import RecipeError, list_recipes
+from config.recipe import load as load_recipe
 from grade.pipeline import run
 from grade.telemetry import Telemetry
 from kernels.registry import build, list_kernels
@@ -27,15 +29,21 @@ from kernels.registry import build, list_kernels
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--list", action="store_true", help="list known kernels and exit")
+    ap.add_argument("--list", action="store_true",
+                    help="list known kernels and hardware recipes, then exit")
     ap.add_argument("--kernel", default="linear", help="kernel name (see --list)")
+    ap.add_argument("--config", default="baseline",
+                    help="hardware recipe: a name in config/recipes/ or a path to a .json. "
+                         "Defines the MX-Gemmini the kernel runs on, and is the single "
+                         "definition shared by the software model, spike and Verilator")
     ap.add_argument("--m", type=int, default=64, help="batch rows")
     ap.add_argument("--k", type=int, default=64, help="in_features")
     ap.add_argument("--h", type=int, default=64, help="hidden width (chained kernels)")
     ap.add_argument("--n", type=int, default=64, help="out_features")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--seam", choices=("weight", "rescale"), default="weight",
-                    help="how the requantized intermediate is made safe for the next stage")
+    ap.add_argument("--seam", choices=("weight", "rescale"), default=None,
+                    help="how the requantized intermediate is made safe for the next stage "
+                         "(default: the recipe's software.seam)")
     ap.add_argument("--tol", type=float, default=0.15,
                     help="pass threshold on relative Frobenius error vs fp32")
     ap.add_argument("--simulator", default="spike")
@@ -50,14 +58,21 @@ def main() -> int:
         print("kernels:")
         for name, desc in list_kernels().items():
             print(f"  {name:10s} {desc}")
+        print("\nhardware recipes (--config):")
+        for name, desc in list_recipes().items():
+            print(f"  {name:14s} {desc}")
         return 0
 
     tel = Telemetry()
     try:
+        recipe = load_recipe(a.config)
         spec = build(a.kernel, m=a.m, k=a.k, h=a.h, n=a.n, seed=a.seed)
-        res = run(spec, tol=a.tol, simulator=a.simulator, seam=a.seam,
+        res = run(spec, recipe=recipe, tol=a.tol, simulator=a.simulator, seam=a.seam,
                   build_only=a.build_only, artifacts=a.artifacts,
                   workdir=a.workdir, results_dir=a.results_dir, telemetry=tel)
+    except RecipeError as exc:
+        tel.log("error", f"bad recipe: {exc}")
+        return 2
     except Exception as exc:
         tel.log("error", f"{type(exc).__name__}: {exc}")
         return 2
@@ -65,9 +80,14 @@ def main() -> int:
     if res["metrics"] is None:
         return 0
     m = res["metrics"]
+    corr = m.get("correctness_vs_golden_model")
+    verdict = ("bit-exact vs golden" if corr and corr["bit_exact"]
+               else f"{corr['n_mismatch']}/{corr['total_elements']} DIFFER vs golden" if corr
+               else "no golden (fp32 tier only)")
     print(f"\nVERDICT  {'PASS' if m['pass'] else 'FAIL'}  "
-          f"(tier={m['tier']}, rel_fro={m['accuracy_vs_fp32_reference']['rel_fro']:.4%}, "
-          f"tol={a.tol:.2%}, cycles={m['total_cycles']})")
+          f"(tier={m['tier']}, {verdict})")
+    print(f"COST     rel_fro={m['accuracy_vs_fp32_reference']['rel_fro']:.4%} vs fp32  "
+          f"(tol={a.tol:.2%}, cycles={m['total_cycles']})")
     print(f"RESULTS  {res['run_dir']}")
     return 0 if m["pass"] else 1
 

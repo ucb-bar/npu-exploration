@@ -17,15 +17,21 @@ Nothing here reimplements quantization, lowering, or codegen.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
-#: The intermediate dtype between chained stages: the requantizer's FP8 write-back.
+#: Default intermediate dtype between chained stages (the requantizer's FP8 write-back).
+#: A recipe's ``software.intermediate_dtype`` overrides it; this is the fallback
+#: config/recipe.py applies when a recipe leaves the field out.
 INTERMEDIATE_DTYPE = "f8E4M3FN"
 SPEC_INPUT = "x"
 
@@ -62,16 +68,75 @@ def _git_head(path: Path) -> str | None:
         return None
 
 
-def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weight",
+_GEOMETRY_CHECKED: set[str] = set()
+
+
+def _assert_geometry(console: str, recipe, simulator: str, tel) -> None:
+    """libgemmini announces its mesh size on reset; hold the recipe to it.
+
+    ``gemmini.cc:70-71`` prints ``Gemmini extension configured with: dim = N`` every
+    run. Without this check a recipe naming a mesh the loaded model does not implement
+    would run anyway, the golden would honour the recipe, the device would not, and
+    the report would blame the hardware for a mismatch we caused.
+    """
+    key = f"{simulator}:{recipe.build_id()}"
+    if key in _GEOMETRY_CHECKED:
+        return
+    m = re.search(r"dim\s*=\s*(\d+)", console)
+    if not m:
+        tel.log("geometry", f"WARNING: {simulator} printed no dim banner; recipe dim="
+                            f"{recipe.dim} is UNVERIFIED against the running model")
+        return
+    got = int(m.group(1))
+    if got != recipe.dim:
+        raise RuntimeError(
+            f"geometry mismatch: recipe {recipe.name!r} says dim={recipe.dim} but the "
+            f"loaded {simulator} model reports dim={got}. Build the model for this "
+            f"recipe (config/build_spike.py) instead of running against another one")
+    _GEOMETRY_CHECKED.add(key)
+    tel.log("geometry", f"{simulator} reports dim={got}, matches recipe")
+
+
+def _libgemmini_fingerprint(mx) -> dict:
+    """Identify the model that actually ran, not just where it lives.
+
+    A path is not an identity: we have already been burned once by a libgemmini.so
+    that was stale relative to its own sources (the Makefile lists only gemmini.cc as
+    a prerequisite) and failed as an unhandled trap rather than an error.
+    """
+    try:
+        so = Path(mx.runner.libgemmini_so())
+        h = hashlib.sha256(so.read_bytes()).hexdigest()[:16]
+        return {"path": str(so), "sha256": h,
+                "mtime": datetime.fromtimestamp(so.stat().st_mtime).isoformat(timespec="seconds")}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
+        seam: str | None = None,
         build_only: bool = False, artifacts: bool = False,
         workdir: Path | None = None, results_dir: Path | None = None,
         repo: Path | None = None, telemetry=None) -> dict:
-    """Build, run and grade one KernelSpec (1..N stages). Returns the run record."""
+    """Build, run and grade one KernelSpec (1..N stages) on one hardware recipe.
+
+    ``recipe`` says WHICH MX-Gemmini this is -- mesh size, product and accumulator
+    widths, block-scale group, operand format. It drives all three models of that
+    machine (the software model, spike, Verilator), so there is one definition per
+    run and no way to grade against a machine we did not build.
+    """
+    from config.recipe import load as load_recipe
     from .metrics import compare
     from .report import make_run_id, write_report
     from .telemetry import Telemetry
 
     repo = repo or REPO
+    if recipe is None:
+        recipe = load_recipe("baseline")
+    if simulator not in recipe.supported_backends:
+        raise RuntimeError(f"recipe {recipe.name!r} does not declare support for "
+                           f"{simulator!r} (supported: {', '.join(recipe.supported_backends)})")
+    seam = seam or recipe.seam
     tel = telemetry or Telemetry()
     workdir = workdir or repo / "out" / "build" / spec.name
     results_dir = results_dir or repo / "results"
@@ -94,8 +159,15 @@ def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weigh
     tel.log("kernel", f"{spec.describe()}   ({n_stages} stage"
                       f"{'s' if n_stages != 1 else ''}, seam={seam if n_stages > 1 else 'n/a'})")
 
-    errs = spec.validate(dim=mxgemm_emit.DEFAULT_GEOMETRY["dim"],
-                         block=mxgemm_emit.BLOCK_SCALE_GROUP)
+    tel.log("recipe", f"{recipe.describe()}   build_id={recipe.build_id()}  "
+                      f"src={recipe.path.name}")
+    if recipe.dim != mxgemm_emit.DEFAULT_GEOMETRY["dim"]:
+        raise RuntimeError(
+            f"recipe dim={recipe.dim} but the backend plans for "
+            f"{mxgemm_emit.DEFAULT_GEOMETRY['dim']} (mxgemm_emit.DEFAULT_GEOMETRY); "
+            "pass it through cb['params'] before running a different mesh size")
+
+    errs = spec.validate(dim=recipe.dim, block=recipe.block)
     if errs:
         for e in errs:
             tel.log("illegal", e)
@@ -106,6 +178,23 @@ def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weigh
     tel.log("reference", f"fp32 torch {tuple(ref_fp32.shape)}  "
                          f"range [{ref_fp32.min():.4g}, {ref_fp32.max():.4g}]")
 
+    # Point the oracle at the model built for THIS recipe. A recipe whose hardware
+    # matches the stock build resolves to None and uses the shipped model as-is.
+    if not build_only and simulator == "spike":
+        from config.build_spike import BuildError, resolve as resolve_build
+        try:
+            so = resolve_build(recipe)
+        except BuildError as exc:
+            raise RuntimeError(f"cannot build the spike model for recipe "
+                               f"{recipe.name!r}: {exc}") from exc
+        if so is not None:
+            os.environ["MX_LIBGEMMINI"] = str(so)
+            tel.log("build", f"recipe model {recipe.build_id()} -> {so}")
+        else:
+            os.environ.pop("MX_LIBGEMMINI", None)
+            tel.log("build", f"recipe {recipe.name!r} matches the stock build; "
+                             "using the shipped libgemmini.so")
+
     if not build_only and not mx.available(simulator):
         tel.log("toolchain", f"NOT AVAILABLE for {simulator} -- source scripts/env.sh")
         raise RuntimeError(f"toolchain unavailable for simulator={simulator!r}")
@@ -114,6 +203,7 @@ def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weigh
     # --- (2) stage loop -------------------------------------------------------------
     art_dir = workdir / "artifacts"
     stage_records: list[dict] = []
+    golden_out = None
     saved: dict[str, "np.ndarray"] = {"x": spec.x.numpy()}
     a_codes = a_scales = None
     x_np = spec.x.numpy().astype(np.float32)
@@ -163,13 +253,15 @@ def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weigh
         else:
             b_np = (st.weight.numpy().astype(np.float32) if st.weight is not None
                     else operand(st.rhs))
-            ops = q.quantize_matmul_operands(operand(lhs_ref), b_np)
+            ops = q.quantize_matmul_operands(operand(lhs_ref), b_np,
+                                             target_exp=recipe.target_code_exp)
 
         # A mesh stage commits through the requantizer only when a later stage will consume it in
         # that form; everything else reads back as bf16.
         emit_fp8 = requant_chain and not last
         iface = mxiface.matmul_interface_mlir(
-            m_, n_, k_, out_dtype=INTERMEDIATE_DTYPE if emit_fp8 else "bf16",
+            m_, n_, k_, operand_fmt=recipe.operand_fmt,
+            out_dtype=recipe.intermediate_dtype if emit_fp8 else recipe.out_dtype,
             lhs=lhs_name, weight=f"W{i}", out=out_name)
         cb = mxiface.to_command_buffer(iface, ops)
         stage_dir = workdir / f"stage{i}"
@@ -185,9 +277,11 @@ def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weigh
 
         res = mx.run_command_buffer(cb, workdir=stage_dir, simulator=simulator)
         cycles = res["metrics"].get("cycles")
+        _assert_geometry(res.get("console", ""), recipe, simulator, tel)
         stage_records.append({"stage": i, "name": st.name, "where": "mesh",
                               "m": m_, "k": k_, "n": n_,
-                              "out_dtype": INTERMEDIATE_DTYPE if emit_fp8 else "bf16",
+                              "out_dtype": (recipe.intermediate_dtype if emit_fp8
+                                            else recipe.out_dtype),
                               "metrics": res["metrics"], "elf": res["elf"]})
 
         if artifacts:
@@ -199,6 +293,9 @@ def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weigh
             for key, val in ops.items():
                 saved[f"s{i}_{key}"] = np.asarray(val)
 
+        # The software-model slot: when a datapath model lands (built on the
+        # fp8_matmul_model lineage), it grades THIS stage's real operands here and
+        # sets golden_out, flipping metrics["tier"] from "fp32" to "golden".
         if emit_fp8:
             codes = np.array(res["outputs"][out_name], dtype=np.uint8)
             scales = np.array(res["outputs"][f"{out_name}_scales"], dtype=np.uint8)
@@ -226,7 +323,7 @@ def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weigh
 
     # --- (3) grade ------------------------------------------------------------------
     tel.log("decode", f"bf16 bit patterns -> float32 {tuple(hw.shape)}")
-    metrics = compare(hw, ref_fp32, None, tol_rel_fro=tol)
+    metrics = compare(hw, ref_fp32, golden_out, tol_rel_fro=tol)
     metrics["stages"] = stage_records
     metrics["total_cycles"] = sum((s.get("metrics") or {}).get("cycles", 0)
                                   for s in stage_records)
@@ -255,8 +352,12 @@ def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weigh
             "m": spec.m,
             "dims": [mnk[_mesh[0].name][1]] + [mnk[s.name][2] for s in _mesh],
             "mesh_stages": len(_mesh), "host_stages": len(spec.stages) - len(_mesh),
-            "operand_format": "mxfp8_e4m3", "output_dtype": "bf16",
-            "intermediate_dtype": INTERMEDIATE_DTYPE if n_stages > 1 else None,
+            "recipe": {"name": recipe.name, "build_id": recipe.build_id(),
+                       "path": str(recipe.path), "hardware": recipe.hardware(),
+                       "prod": [recipe.prod_e, recipe.prod_m],
+                       "acc_e": list(recipe.acc_e), "acc_m": list(recipe.acc_m)},
+            "operand_format": recipe.operand_fmt, "output_dtype": recipe.out_dtype,
+            "intermediate_dtype": recipe.intermediate_dtype if n_stages > 1 else None,
             "block_scale_group": q.BLOCK, "target_code_exp": q.TARGET_CODE_EXP,
             "chain_exp_shift": getattr(q, "CHAIN_EXP_SHIFT", None),
             "geometry_defaults": mxgemm_emit.DEFAULT_GEOMETRY,
@@ -267,9 +368,11 @@ def run(spec, *, tol: float = 0.15, simulator: str = "spike", seam: str = "weigh
             "simulator": simulator, "oracle": mx.ORACLE.get(simulator),
             "repo_head": _git_head(repo), "merlin_head": _git_head(repo / "merlin"),
             "gcc": str(mx.runner.gcc_path()), "spike": str(mx.runner.spike_path()),
-            "libgemmini": str(mx.runner.libgemmini_so()),
+            "libgemmini": _libgemmini_fingerprint(mx),
+            "gemmini_head": _git_head(Path(mx.runner.chipyard_root()) / "generators/gemmini"),
+            "chipyard_head": _git_head(Path(mx.runner.chipyard_root())),
         },
-        hardware_output=hw, fp32_reference=ref_fp32, golden_model_output=None,
+        hardware_output=hw, fp32_reference=ref_fp32, golden_model_output=golden_out,
         metrics=metrics, artifacts=artifact_paths, telemetry=tel)
 
     if artifacts:

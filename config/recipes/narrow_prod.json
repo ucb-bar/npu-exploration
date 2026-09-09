@@ -1,0 +1,262 @@
+{
+  "name": "narrow_prod",
+  "description": "Ablation: products truncated to 2 mantissa bits instead of 3, accumulator unchanged. Isolates the cost of the per-product truncation stage.",
+  "array": {
+    "meshRows": 16,
+    "meshColumns": 16,
+    "tileRows": 1,
+    "tileColumns": 1
+  },
+  "types": {
+    "meshProdPrecisionList": [
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 3,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      }
+    ],
+    "meshAccPrecisionList": [
+      {
+        "expWidth": 4,
+        "sigWidth": 5,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 5,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 5,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 5,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 5,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 5,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 5,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 5,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 6,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 6,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 7,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 7,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 7,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 7,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 7,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      }
+    ]
+  },
+  "mx": {
+    "scaleSize": 32,
+    "scaleSizeOut": 32,
+    "enable_lut": false
+  },
+  "software": {
+    "block": 32,
+    "target_code_exp": 0,
+    "seam": "weight",
+    "intermediate_dtype": "f8E4M3FN"
+  },
+  "runtime": {
+    "operand_fmt": "fp8",
+    "out_dtype": "bf16",
+    "use_lut": false
+  },
+  "supported_backends": [
+    "spike"
+  ],
+  "provenance": {
+    "note": "Derived from baseline by narrowing meshProdPrecisionList."
+  }
+}
