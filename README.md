@@ -9,9 +9,11 @@ Every layer of the stack lives in this one repo, split by directory.
 |---|---|---|
 | `app/` | L1 — model | libraries: MX quantization, and emitting/lowering `merlin_iface` MLIR |
 | `kernels/` | L1 — model | what to run: a kernel is a PyTorch model flattened into matmul stages |
+| `config/` | L1 — hardware | recipes: one JSON = one machine (`--config`) |
 | `compiler/` | L2 — compiler | `targets/mx_gemmini_rocket/` — the out-of-tree merlin target (contract + backend) |
 | `grade/` | L2 — evaluation | run a kernel, compare against an FP32 reference, record the run |
 | `sim/` | L3 — substrates | reserved for RTL simulation and FPGA emulation (the spike runner lives in the backend) |
+| `hw/` | hardware | `gemmini/` — the pinned hardware sources, git submodule |
 | `merlin/` | framework | compiler framework, git submodule, **unforked** |
 | `radiance-kernels/` | reference | read-only; **not a dependency** (see below) |
 | `planning/` | — | plans and design decisions |
@@ -42,7 +44,11 @@ First time only, if `merlin/` is empty — `.gitmodules` uses SSH:
 ```bash
 git config submodule.merlin.url https://github.com/ucb-bar/merlin.git
 git submodule update --init merlin
+git submodule update --init --recursive hw/gemmini
 ```
+
+`hw/gemmini` is the pinned hardware: `--recursive` matters, since libgemmini and
+gemmini-rocc-tests are nested inside it. Without it the spike build fails.
 
 ## Two standing constraints
 
@@ -63,19 +69,27 @@ migration is mechanical. **Not started.**
 ```bash
 source scripts/env.sh
 .venv/bin/python run_kernel.py --list
-.venv/bin/python run_kernel.py --kernel linear
+.venv/bin/python run_kernel.py --kernel linear --config baseline
 ```
 
 ```
-[setup    ] repo=/home/…/npu-exploration  merlin=yes  wired=3 paths
-[kernel   ] linear: [64][64] through 64 -> 64   (1 stage, seam=n/a)
+[setup   ] repo=/home/…/npu-exploration  merlin=yes  wired=3 paths
+[kernel  ] linear: [64][64]  L0[64x64x64]   (1 mesh, 0 host)   (1 stage, seam=n/a)
+[recipe  ] baseline  dim=16  operand=fp8->bf16  prod=e4m3  acc[e4..8 m4..7]  block=32   build_id=854265d5…
+[ladder  ] col 0-7      acc=e4m4  prod=e4m3
+[ladder  ] col 8-9      acc=e4m5  prod=e4m3
+[ladder  ] col 10-14    acc=e4m6  prod=e4m3
+[ladder  ] col 15       acc=e8m7  prod=e4m3
 [reference] fp32 torch (64, 64)  range [-2.137, 1.917]
+[build   ] recipe 'baseline' matches the stock build; using the shipped libgemmini.so
 [toolchain] gcc=…/riscv64-unknown-elf-gcc  spike=…/spike
-[stage    ] 0 (L0) 64x64x64 -> bf16   cycles 282
-[grade    ] rel_fro=5.9100%  mae=0.02741  max_abs=0.1369  finite 4096/4096  cycles 282
-[report   ] PASS (tier=fp32) -- saved to results/20260902-…_linear_64x64x64
+[geometry] spike reports dim=16, matches recipe
+[stage   ] 0 (L0) 64x64x64 -> bf16   cycles 282
+[grade   ] rel_fro=5.9122%  mae=0.02743  max_abs=0.1369  finite 4096/4096  cycles 282
+[report  ] PASS (tier=fp32) -- saved to results/20260910-…_linear_64x64x64
 
-VERDICT  PASS  (tier=fp32, rel_fro=5.9100%, tol=15.00%, cycles=282)
+VERDICT  PASS  (tier=fp32, no golden (fp32 tier only))
+COST     rel_fro=5.9122% vs fp32  (tol=15.00%, cycles=282)
 ```
 
 Exit `0` on PASS, `1` on FAIL, `2` on error. The front end emits **`merlin_iface` interface MLIR** —
@@ -89,7 +103,20 @@ the backend. merlin also discovers and loads the backend (`get_backend("mx_gemmi
 .venv/bin/python run_kernel.py --kernel linear --m 32 --k 128 --n 96
 .venv/bin/python run_kernel.py --kernel mlp2 --h 128 --seam rescale
 .venv/bin/python run_kernel.py --kernel mlp3 --m 128 --k 128 --h 128 --n 128 --artifacts
+.venv/bin/python run_kernel.py --kernel linear --config wide_acc
 ```
+
+A **recipe** is the hardware half of a run: mesh size, the per-column product and
+accumulator precisions, and the block-scale group. `--config` picks one; the hashed
+sections give it a `build_id`, and a recipe that is not the stock machine gets its own
+`libgemmini.so` built and cached under `out/builds/<build_id>/`.
+
+| recipe | product | accumulator ladder |
+|---|---|---|
+| `baseline` | e4m3 | m4×8 → m5×2 → m6×5 → e8m7 (stock) |
+| `flat_acc4` | e4m3 | e4m4 flat |
+| `wide_acc` | e4m3 | e8m7 flat |
+| `narrow_prod` | **e4m2** | same ladder as baseline |
 
 | kernel | model | matmuls |
 |---|---|---|
@@ -101,6 +128,7 @@ the backend. merlin also discovers and loads the backend (`get_backend("mx_gemmi
 | flag | default | meaning |
 |---|---|---|
 | `--kernel` | `linear` | which kernel (`--list`) |
+| `--config` | `baseline` | which hardware recipe (`--list`) |
 | `--m --k --h --n` | 64 | batch rows, in_features, hidden, out_features (`attention`: seq, d_model, d_head) |
 | `--seed` | 0 | tensor values |
 | `--seam weight\|rescale` | `weight` | how a chained intermediate's scale is made safe |
@@ -143,7 +171,8 @@ Every stage logs to stderr and to a structured `log.jsonl`, and each run is reco
 ```
 results/<timestamp>_<kernel>_<shape>/
 ├── config.json           shapes, seed, quantization settings, mesh geometry,
-│                         toolchain paths, repo + merlin git heads
+│                         the recipe (build_id + per-column ladder), toolchain
+│                         paths, repo + merlin + gemmini git heads
 ├── metrics.json          verdict, error metrics, per-stage cycles
 ├── log.jsonl             one JSON record per stage, with timestamps
 ├── hardware_output.npy   what the device computed
@@ -185,7 +214,8 @@ Arbitrary shapes (M, K, N independently) work. Consistency across shapes is itse
 operand layout is right — a transposed operand or an off-by-one scale index would not land on the
 same figure repeatedly.
 
-Next: the MX golden model (hardware correctness), then the JSON hardware config.
+The JSON hardware config now exists (`config/`, `--config`). Next: the MX golden model,
+which is what turns COST into a real correctness VERDICT.
 
 ## Troubleshooting
 
@@ -194,8 +224,11 @@ Next: the MX golden model (hardware correctness), then the JSON hardware config.
 `mx_fp_math.h` never trigger a rebuild, and a stale model fails silently this way rather than with a
 useful error. `scripts/env.sh` compares mtimes and warns.
 
+Sources now come from the `hw/gemmini` pin, not chipyard, and a per-recipe build is
+rebuilt automatically when the pin moves. To force one:
+
 ```bash
-(cd $MERLIN_CHIPYARD/generators/gemmini/software/libgemmini && make)
+.venv/bin/python -m config.build_spike --config <recipe> --force
 ```
 
 **`Unable to load extlib … GLIBCXX_3.4.32 not found`** — `libgemmini.so` was built with a newer g++
