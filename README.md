@@ -20,11 +20,13 @@ Every layer of the stack lives in this one repo, split by directory.
 | `scripts/`, `tests/` | — | environment setup; self-tests |
 | `out/`, `results/`, `.venv/` | — | build artifacts, run records, the Python environment (all gitignored) |
 
-External references, outside this repo:
+The hardware references now live in the repo, under the `hw/gemmini` pin:
 
-- `../software/gemmini-rocc-tests/` — the **baremetal C reference**: `include/gemmini.h` (the MX
-  intrinsics this target emits) and the hand-written MX tests, buildable with `build_spike.sh`.
-- `../software/libgemmini/` — the spike functional model of the MX datapath.
+- `hw/gemmini/software/gemmini-rocc-tests/` — the **baremetal C reference**: `include/gemmini.h`
+  (the MX intrinsics this target emits) and the hand-written MX tests.
+- `hw/gemmini/software/libgemmini/` — the spike functional model of the MX datapath.
+
+`radiance-kernels/` is not checked in; clone it alongside only if you want to read it.
 
 ## Getting started
 
@@ -57,10 +59,12 @@ is the same datapath and nearly the same programming model — but nothing here 
 resolve a path into that tree. Reimplement; take ideas, not code. Every *fact* the compiler needs is
 grounded in `generators/gemmini/` (headers, the spike model, the RTL Scala) instead.
 
-**One config artifact, two consumers.** The long-term direction is that software emits a JSON of
-configurations driving *both* compilation *and* hardware generation. Until then the target contract
-is the near-term stand-in, and each of its fields is tagged `[RTL]` / `[ABI]` / `[COMPILE]` so the
-migration is mechanical. **Not started.**
+**One config artifact, two consumers.** Software emits a JSON of configurations driving *both*
+compilation *and* hardware generation. `config/recipes/*.json` is that artifact: it patches the
+spike model (`config/build_spike.py`) and elaborates the Chisel
+(`config/scala/JsonGemminiConfig.scala`), with `tests/test_recipe_drift.py` holding the two in
+agreement. The older target contract remains the stand-in for the fields recipes do not cover
+yet, tagged `[RTL]` / `[ABI]` / `[COMPILE]` so that migration stays mechanical.
 
 ## Running a kernel
 
@@ -201,14 +205,15 @@ wrong"; it does **not** test quantization or the datapath.
 
 ## Status
 
-**PyTorch → ELF → spike works, and is graded.** Measured on the current elaboration:
+**PyTorch → ELF → spike works, and is graded.** Measured on `--config baseline` at gemmini
+`0b2cc2c`. Chain numbers move with the requantizer, so they are only comparable within one pin:
 
 | kernel | shape | cycles | rel_fro vs fp32 |
 |---|---|---|---|
 | `linear` | 64×64×64 | 282 | 5.91% |
-| `linear` | 32×128×96 | 467 | 5.74% |
-| `mlp2` | 64×64×64 | 564 | 9.33% |
-| `mlp3` | 64×64×64 | 846 | 12.25% |
+| `linear` | 32×128×96 | 467 | 5.73% |
+| `mlp2` | 64×64×64 | 564 | 8.95% |
+| `mlp3` | 64×64×64 | 846 | 11.60% |
 
 Arbitrary shapes (M, K, N independently) work. Consistency across shapes is itself evidence the
 operand layout is right — a transposed operand or an off-by-one scale index would not land on the
@@ -233,7 +238,9 @@ rebuilt automatically when the pin moves. To force one:
 
 **`Unable to load extlib … GLIBCXX_3.4.32 not found`** — `libgemmini.so` was built with a newer g++
 than spike. `spike` carries a **DT_RPATH**, which outranks `LD_LIBRARY_PATH`, so no environment
-variable can fix it; rebuild libgemmini with the plain `g++` on `PATH`.
+variable can fix it. Do **not** reach for the `g++` on `PATH`: `scripts/env.sh` puts chipyard's
+conda first, and its g++ (13.2) is exactly the one that causes this. `config/build_spike.py`
+resolves a spack 12.2 g++ explicitly; override with `MX_HOST_GXX` if it moves.
 
 **`Failed to run dtc`** — spike shells out to the device-tree compiler, which lives in the chipyard
 conda env. `scripts/env.sh` puts it on `PATH`.
