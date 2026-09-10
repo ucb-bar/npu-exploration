@@ -72,6 +72,31 @@ def upstream_dir() -> Path:
     return d
 
 
+def sources_fingerprint(up: Path) -> str:
+    """sha256 over all four pinned sources, not just gemmini.cc.
+
+    The build cache is keyed on ``build_id``, which hashes the RECIPE only -- by
+    design, so an fp8-vs-fp4 sweep shares a build. That leaves the other half of the
+    identity unrecorded: the same recipe built against a different hw/gemmini pin is
+    a different machine wearing the same build_id. This fingerprint is that half.
+    """
+    h = hashlib.sha256()
+    for f in SOURCES:
+        h.update(f.encode())
+        h.update((up / f).read_bytes())
+    return h.hexdigest()[:16]
+
+
+def gemmini_pin() -> str | None:
+    """The submodule commit the sources came from, for the record. None if unknown."""
+    try:
+        r = subprocess.run(["git", "-C", str(gemmini_root()), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=30)
+        return r.stdout.strip()[:12] if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _sub_once(text: str, pattern: str, repl: str, expect: int, what: str) -> str:
     """Substitute with an asserted match count.
 
@@ -132,12 +157,25 @@ def build(recipe, *, force: bool = False, gxx: str | None = None, quiet: bool = 
     out = BUILD_ROOT / bid
     so = out / "libgemmini.so"
 
-    if so.exists() and not force:
-        if not quiet:
-            print(f"[cache hit ] {bid}  {so}")
-        return so
-
     up = upstream_dir()
+
+    if so.exists() and not force:
+        want = sources_fingerprint(up)
+        try:
+            got = json.loads((out / "meta.json").read_text()).get("sources_sha256")
+        except (OSError, ValueError):
+            got = None
+        if got == want:
+            if not quiet:
+                print(f"[cache hit ] {bid}  {so}")
+            return so
+        # The pin moved (or this .so predates fingerprinting). Reusing it would grade
+        # against sources this checkout no longer contains, which is exactly the
+        # silent-mismatch failure the whole recipe system exists to prevent.
+        if not quiet:
+            print(f"[stale     ] {bid}  built from sources {got or 'unrecorded'}, "
+                  f"pin now {want} -- rebuilding")
+
     gxx = gxx or os.environ.get("MX_HOST_GXX") or DEFAULT_GXX
     if not Path(gxx).exists():
         raise BuildError(f"compiler not found: {gxx}. Set MX_HOST_GXX to a g++ whose "
@@ -183,6 +221,8 @@ def build(recipe, *, force: bool = False, gxx: str | None = None, quiet: bool = 
         "changes": changes,
         "upstream": str(up),
         "upstream_gemmini_cc_sha256": hashlib.sha256(text.encode()).hexdigest()[:16],
+        "sources_sha256": sources_fingerprint(up),
+        "gemmini_head": gemmini_pin(),
         "so_sha256": hashlib.sha256(so.read_bytes()).hexdigest()[:16],
         "glibcxx_max": ours,
     }, indent=2) + "\n", encoding="utf-8")
