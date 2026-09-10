@@ -161,6 +161,8 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
 
     tel.log("recipe", f"{recipe.describe()}   build_id={recipe.build_id()}  "
                       f"src={recipe.path.name}")
+    for line in recipe.ladder_lines():
+        tel.log("ladder", line)
     if recipe.dim != mxgemm_emit.DEFAULT_GEOMETRY["dim"]:
         raise RuntimeError(
             f"recipe dim={recipe.dim} but the backend plans for "
@@ -354,6 +356,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
             "mesh_stages": len(_mesh), "host_stages": len(spec.stages) - len(_mesh),
             "recipe": {"name": recipe.name, "build_id": recipe.build_id(),
                        "path": str(recipe.path), "hardware": recipe.hardware(),
+                       "ladder": recipe.ladder(),
                        "prod": [recipe.prod_e, recipe.prod_m],
                        "acc_e": list(recipe.acc_e), "acc_m": list(recipe.acc_m)},
             "operand_format": recipe.operand_fmt, "output_dtype": recipe.out_dtype,

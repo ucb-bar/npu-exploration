@@ -180,6 +180,36 @@ class Recipe:
         blob = json.dumps(self.hardware(), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
+    def ladder(self) -> list[dict]:
+        """The precision ladder expanded one entry per column.
+
+        ``types.*`` is stored the way ConfigsFP.scala spells it -- a 16-element list
+        whose ``count`` field is a Chisel literal, not a repeat factor -- so the JSON
+        reads as 16 near-identical blocks and the banner squashes it to a range. A
+        run record has to state which column carries which format outright, because
+        that ladder IS the experiment.
+        """
+        return [
+            {"col": i,
+             "prod": f"e{pr.e}m{pr.m}",
+             "acc": f"e{ac.e}m{ac.m}"}
+            for i, (pr, ac) in enumerate(zip(self.prod, self.acc))
+        ]
+
+    def ladder_lines(self) -> list[str]:
+        """``ladder()`` run-length collapsed: one line per contiguous acc format."""
+        lines, start = [], 0
+        for i in range(1, self.dim + 1):
+            same = (i < self.dim
+                    and (self.acc[i].e, self.acc[i].m) == (self.acc[start].e, self.acc[start].m))
+            if same:
+                continue
+            cols = f"col {start}" if i - start == 1 else f"col {start}-{i - 1}"
+            lines.append(f"{cols:<12} acc=e{self.acc[start].e}m{self.acc[start].m}"
+                         f"  prod=e{self.prod[start].e}m{self.prod[start].m}")
+            start = i
+        return lines
+
     def describe(self) -> str:
         uniform_acc = len(set(zip(self.acc_e, self.acc_m))) == 1
         acc = (f"{self.acc_e[0]}e{self.acc_m[0]}m x{self.dim}" if uniform_acc
