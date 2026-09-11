@@ -32,9 +32,11 @@ from config.recipe import load  # noqa: E402
 
 
 def gemmini_root() -> Path:
-    """The pinned hw/gemmini submodule — the recipe is held to THESE sources, which are
-    exactly what config/build_spike.py compiles. The chipyard tree no longer speaks here."""
-    return REPO / "hw" / "gemmini"
+    """The gemmini sources, from the chipyard tree. The hw/gemmini pin is gone."""
+    import os
+    cy = os.environ.get("MERLIN_CHIPYARD")
+    root = Path(cy) if cy else Path(__file__).resolve().parents[4]
+    return root / "generators" / "gemmini"
 
 
 def parse_gemmini_cc(p: Path) -> dict:
@@ -102,8 +104,8 @@ def main() -> int:
     scala = g / "src/main/scala/gemmini/ConfigsFP.scala"
 
     if not (lg / "gemmini.cc").exists():
-        print(f"SKIP: hw/gemmini submodule not initialized at {g} "
-              "(git submodule update --init --recursive hw/gemmini)")
+        print(f"SKIP: gemmini sources not found at {g}; set MERLIN_CHIPYARD "
+              "(see scripts/env.sh)")
         return 0
 
     fails = []

@@ -49,26 +49,41 @@ class BuildError(RuntimeError):
 
 
 def chipyard_root() -> Path:
+    """The chipyard tree. Falls back to walking up from this file rather than to a fixed path.
+
+    It used to default to a hard-coded directory under ``$HOME``, which fails on any machine but
+    the one it was written on -- and fails as "libgemmini sources not found", which reads like a
+    missing checkout rather than a wrong default.
+    """
     cy = os.environ.get("MERLIN_CHIPYARD") or os.environ.get("CHIPYARD_ROOT")
-    if not cy:
-        cy = str(Path.home() / "orcd/scratch/npu-exploration/chipyard-graphics")
-    return Path(cy)
+    if cy:
+        return Path(cy)
+    # config / npu-exploration / gemmini / generators / <chipyard root>
+    return Path(__file__).resolve().parents[4]
 
 
 def gemmini_root() -> Path:
-    """The pinned hardware sources: the hw/gemmini submodule, never the chipyard tree.
+    """The gemmini sources: the surrounding chipyard tree.
 
-    The chipyard tree still supplies the TOOLCHAIN (spike, gcc, dtc); sources of the
-    machine itself are pinned in-repo so every commit records what it was built against.
+    This USED to be an ``hw/gemmini`` submodule, so that every commit recorded the hardware it was
+    built against. The pin is gone deliberately. It pinned libgemmini (itself a nested submodule)
+    at a commit five behind the working tree, which is a silent-wrong-answer failure rather than a
+    loud one: the model would still build and run, just with the pre-RNE rounding, and only the
+    chained kernels would notice.
+
+    The tree it is read from now is the same one the toolchain comes from, so the model and the
+    ``spike`` that loads it cannot drift apart.
     """
-    return Path(__file__).resolve().parents[1] / "hw" / "gemmini"
+    return chipyard_root() / "generators" / "gemmini"
 
 
 def upstream_dir() -> Path:
     d = gemmini_root() / "software/libgemmini"
     if not (d / "gemmini.cc").exists():
-        raise BuildError(f"libgemmini sources not found at {d}; run "
-                         "`git submodule update --init --recursive hw/gemmini`")
+        raise BuildError(
+            f"libgemmini sources not found at {d}. They come from the chipyard tree; check that "
+            "$MERLIN_CHIPYARD (or scripts/env.sh's default) points at a chipyard checkout that "
+            "contains generators/gemmini/software/libgemmini.")
     return d
 
 
@@ -77,7 +92,7 @@ def sources_fingerprint(up: Path) -> str:
 
     The build cache is keyed on ``build_id``, which hashes the RECIPE only -- by
     design, so an fp8-vs-fp4 sweep shares a build. That leaves the other half of the
-    identity unrecorded: the same recipe built against a different hw/gemmini pin is
+    identity unrecorded: the same recipe built against different gemmini sources is
     a different machine wearing the same build_id. This fingerprint is that half.
     """
     h = hashlib.sha256()
