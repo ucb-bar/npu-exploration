@@ -40,3 +40,8 @@ unset _cy _b _lg _src
 
 echo "MERLIN_CHIPYARD=$MERLIN_CHIPYARD"
 echo "RISCV=$RISCV"
+
+# Hardware sources AND toolchain both come from the chipyard tree -- there is no in-repo pin, so
+# the spike model and the spike that loads it cannot drift apart. Report which tree that is.
+_cy_head=$(git -C "$_cy/generators/gemmini" rev-parse --short HEAD 2>/dev/null)
+[ -n "$_cy_head" ] && echo "gemmini sources: $_cy/generators/gemmini @ $_cy_head"
