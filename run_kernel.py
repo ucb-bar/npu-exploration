@@ -7,7 +7,8 @@ layer and a stitched model:
     .venv/bin/python run_kernel.py --list
     .venv/bin/python run_kernel.py --kernel linear
     .venv/bin/python run_kernel.py --kernel linear --m 32 --k 128 --n 96
-    .venv/bin/python run_kernel.py --kernel mlp2 --h 128 --seam rescale --artifacts
+    .venv/bin/python run_kernel.py --kernel linear --dtype fp4_e2m1
+    .venv/bin/python run_kernel.py --kernel mlp2 --h 128 --artifacts
     .venv/bin/python run_kernel.py --kernel linear --tol 0.01     # forced FAIL
     .venv/bin/python run_kernel.py --kernel linear --build-only   # stop at the ELF
 
@@ -44,6 +45,12 @@ def main() -> int:
     ap.add_argument("--seam", choices=("weight", "rescale"), default=None,
                     help="how the requantized intermediate is made safe for the next stage "
                          "(default: the recipe's software.seam)")
+    ap.add_argument("--dtype", default="fp8_e4m3",
+                    help="MX operand format (see app/mxformats.py; unproven formats are refused)")
+    ap.add_argument("--allow-lossy-chain", action="store_true",
+                    help="chain a format whose requant range exceeds what the nearest-entry finder "
+                         "can represent (fp6_e3m2, fp8_e5m2). The reference has the same behaviour; "
+                         "see app/mxformats.chain_refusal")
     ap.add_argument("--tol", type=float, default=0.15,
                     help="pass threshold on relative Frobenius error vs fp32")
     ap.add_argument("--simulator", default="spike")
@@ -68,6 +75,7 @@ def main() -> int:
         recipe = load_recipe(a.config)
         spec = build(a.kernel, m=a.m, k=a.k, h=a.h, n=a.n, seed=a.seed)
         res = run(spec, recipe=recipe, tol=a.tol, simulator=a.simulator, seam=a.seam,
+                  dtype=a.dtype, allow_lossy_chain=a.allow_lossy_chain,
                   build_only=a.build_only, artifacts=a.artifacts,
                   workdir=a.workdir, results_dir=a.results_dir, telemetry=tel)
     except RecipeError as exc:
@@ -80,14 +88,23 @@ def main() -> int:
     if res["metrics"] is None:
         return 0
     m = res["metrics"]
+    ok = "PASS" if m["pass"] else "FAIL"
     corr = m.get("correctness_vs_golden_model")
-    verdict = ("bit-exact vs golden" if corr and corr["bit_exact"]
-               else f"{corr['n_mismatch']}/{corr['total_elements']} DIFFER vs golden" if corr
-               else "no golden (fp32 tier only)")
-    print(f"\nVERDICT  {'PASS' if m['pass'] else 'FAIL'}  "
-          f"(tier={m['tier']}, {verdict})")
-    print(f"COST     rel_fro={m['accuracy_vs_fp32_reference']['rel_fro']:.4%} vs fp32  "
-          f"(tol={a.tol:.2%}, cycles={m['total_cycles']})")
+    if corr is not None:
+        # The verdict is bit-identity against MXQuant/rtl_exact. No tolerance appears in it.
+        gap = (m.get("delta_vs_mxquant_as_shipped") or {}).get("rel_fro")
+        print(f"\nVERDICT  {ok}  hardware {'==' if corr['bit_exact'] else '!='} MXQuant/rtl_exact"
+              f"  ({corr['total_elements'] - corr['n_mismatch']}/{corr['total_elements']}"
+              f" identical, max|d| {corr['max_abs_diff']:g})")
+        if gap is not None:
+            print(f"         MXQuant as shipped is {gap:.2%} from the hardware "
+                  f"-- the model-vs-silicon gap")
+        print(f"         fp32 {m['accuracy_vs_fp32_reference']['rel_fro']:.4%} (context), "
+              f"cycles {m['total_cycles']}")
+    else:
+        print(f"\nVERDICT  {ok}  "
+              f"(tier={m['tier']}, rel_fro={m['accuracy_vs_fp32_reference']['rel_fro']:.4%}, "
+              f"tol={a.tol:.2%}, cycles={m['total_cycles']})")
     print(f"RESULTS  {res['run_dir']}")
     return 0 if m["pass"] else 1
 
