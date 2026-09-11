@@ -63,16 +63,59 @@ class Stage:
 
 @dataclass
 class HostStage:
-    """A stage the mesh cannot do, run on the host. ``fn`` maps float32 [M][N] -> float32."""
+    """A stage the mesh cannot do, run on the scalar core in fp32.
+
+    DECLARATIVE, not a closure: ``op`` names an entry in :data:`app.mxhost.OPS`, which carries both
+    a Python twin (for the reference) and the ``mx_host.h`` function to call (for the device). A
+    closure can be run but not compiled, so a kernel built from closures can only execute on the
+    host BETWEEN ELFs -- exactly what merlin_glue_port_plan.md D4 abolishes.
+
+    ``fn`` is still accepted, and still works, for a host op that has no C twin yet. Such a kernel
+    is confined to the per-stage path and cannot be fused; ``emittable`` says which case a stage is.
+    """
 
     name: str
-    fn: Callable[[np.ndarray], np.ndarray]
-    src: str | None = None
+    op: str | None = None
+    params: dict = field(default_factory=dict)
+    fn: Callable[[np.ndarray], np.ndarray] | None = None
+    src: "str | tuple[str, ...] | None" = None
     note: str = ""
+
+    @property
+    def srcs(self) -> tuple:
+        """The value names this stage consumes, always as a tuple."""
+        if self.src is None:
+            return ()
+        return (self.src,) if isinstance(self.src, str) else tuple(self.src)
+
+    def __post_init__(self) -> None:
+        if (self.op is None) == (self.fn is None):
+            raise ValueError(
+                f"host stage {self.name!r}: set exactly one of op= (emittable) or fn= "
+                "(python-only, forces the per-stage path)")
+        if self.op is not None:
+            from app import mxhost
+            o = mxhost.get(self.op, **self.params)   # validates the name and the params, early
+            if self.src is not None and len(self.srcs) != o.arity:
+                raise ValueError(
+                    f"host stage {self.name!r}: op {self.op!r} takes {o.arity} input(s), "
+                    f"got {len(self.srcs)} ({self.srcs})")
 
     @property
     def on_mesh(self) -> bool:
         return False
+
+    @property
+    def emittable(self) -> bool:
+        """Can this stage be emitted as C into the fused driver?"""
+        return self.op is not None
+
+    def run(self, *xs: np.ndarray) -> np.ndarray:
+        """Evaluate on the host, for the reference and the golden."""
+        if self.op is None:
+            return self.fn(*xs)
+        from app import mxhost
+        return mxhost.get(self.op, **self.params).fn(*xs, **self.params)
 
 
 AnyStage = Union[Stage, HostStage]
@@ -110,7 +153,9 @@ class KernelSpec:
         prev = INPUT
         for st in self.stages:
             if isinstance(st, HostStage):
-                out[st.name] = out[_split_ref(st.src or prev)[0]]
+                # A multi-input host op is elementwise, so its shape is its first
+                # source's (swiglu's gate and up are the same shape by construction).
+                out[st.name] = out[_split_ref((st.srcs or (prev,))[0])[0]]
             else:
                 lhs, lt = _split_ref(st.lhs or prev)
                 a = out[lhs][::-1] if lt else out[lhs]
@@ -147,7 +192,7 @@ class KernelSpec:
         prev = INPUT
         for st in self.stages:
             if isinstance(st, HostStage):
-                vals[st.name] = st.fn(vals[_split_ref(st.src or prev)[0]])
+                vals[st.name] = st.run(*[vals[_split_ref(r)[0]] for r in (st.srcs or (prev,))])
             else:
                 lhs, lt = _split_ref(st.lhs or prev)
                 a = vals[lhs].T if lt else vals[lhs]

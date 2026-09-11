@@ -1,0 +1,68 @@
+{
+  "name": "mxgemmini_rtl_fp8",
+  "description": "The MxGemmini datapath configuration under which MXQuant's simulated matmul is BIT-IDENTICAL to the hardware (spike libgemmini, and the MxGemminiRocketConfig RTL it models). Verified 2026-09-06 on a real TinyLlama MLP: 65536/65536 elements identical, max abs diff 0.0.",
+  "verified": {
+    "date": "2026-09-06",
+    "against": "spike (software/libgemmini) running bareMetalC/llama_mlp.c, itself bit-exact vs fp8_matmul_model.tiled_matmul_hwlike",
+    "workload": "TinyLlama-1.1B layer 5 MLP, M=32 tokens, D=2048 (full hidden), F=64 of 5632 FFN neurons",
+    "elements_identical": "65536/65536",
+    "max_abs_diff": 0.0,
+    "rel_fro_vs_fp32": 0.1159,
+    "rel_fro_vs_fp32_mxquant_as_shipped": 0.1063,
+    "note": "As shipped, MXQuant reports 10.63% where the hardware gives 11.59% -- within a point on the norm while diverging 17.90% element-wise. Aggregate accuracy is roughly right; the values are not the hardware's."
+  },
+
+  "mesh": {
+    "dim": 16,
+    "window": 16,
+    "block": 32,
+    "comment": "window is the 16-deep PE column; block is the E8M0 group. Both must match or the lane indexing shifts."
+  },
+
+  "formats": {
+    "operand": "MXFP8_E4M3",
+    "operand_scale": "E8M0, X = 2^floor(log2(max(amax, FLT_EPSILON))), NO -log2_pmax term",
+    "product": {"exp": 4, "man": 3},
+    "accumulate_out": "bf16",
+    "comment": "The operand scale convention is MXQuant's own end-to-end convention, which the FP8 datapath was migrated to. Operands need NO change -- they already match bit-for-bit."
+  },
+
+  "acc_schedule": [
+    [4, 4], [4, 4], [4, 4], [4, 4], [4, 4], [4, 4], [4, 4], [4, 4],
+    [4, 5], [4, 5],
+    [4, 6], [4, 6], [4, 6], [4, 6], [4, 6],
+    [8, 7]
+  ],
+  "acc_schedule_source": "ConfigsFP.scala meshAccPrecisionList; gemmini.cc:1162-1163 acc_e[16]={4 x15, 8}, acc_m[16]={4,4,4,4,4,4,4,4,5,5,6,6,6,6,6,7}. Entries are [exp_bits, man_bits] per lane, lane = k % window.",
+  "acc_schedule_csv": "acc_schedule.csv",
+
+  "semantics": {
+    "product_quantize": {
+      "rule": "truncate",
+      "detail": "Mantissa TRUNCATION to man bits, with NO exponent clamp and no subnormal grid at the product stage. NOT float_quantize(rounding='nearest').",
+      "source": "fp8_matmul_model.mx_product_quantize_trunc; MxFPMul.scala product path before the accumulator resize",
+      "mxquant_as_shipped": "float_quantize(outer, exp=prod_e, man=prod_m, rounding='nearest')  (eval_complete.py:606)"
+    },
+    "accumulate": {
+      "rule": "quantize_both_then_exact_add",
+      "detail": "Quantize BOTH the running sum and the incoming product to the lane's (exp, man) with round-to-nearest-even, then add exactly: C = fp_add_exact(fp_quantize_rne(C, e, m), fp_quantize_rne(outer, e, m), e, m). The product is therefore quantized TWICE -- once to e4m3, again to the accumulator lane.",
+      "source": "fp8_matmul_model.py:631-637, mirroring gemmini.cc:1230-1233",
+      "mxquant_as_shipped": "S_red = S_red + outer_q (fp32); S_red = float_quantize(S_red, e, m, 'nearest')  -- only the SUM is quantized  (eval_complete.py:608-614)"
+    },
+    "cross_tile_accumulate": {
+      "rule": "bf16",
+      "detail": "Each 16-deep tile result is scaled, rounded to bf16, and accumulated in bf16: C = bf16_accum_add(C, q_bf16_rne(S_red * scale_map)).",
+      "source": "fp8_matmul_model.py:718-724; gemmini.cc:1190 (mx_smem is bf16 and accumulates)",
+      "mxquant_as_shipped": "C = C + S_red * scale_map  (fp32)  (eval_complete.py:616)"
+    }
+  },
+
+  "important": "These three do NOT decompose. Applied singly, each one LOWERS the error versus fp32 (10.63% -> 9.03% or 8.65%) and two of the three make the divergence from the hardware WORSE (17.90% -> 8.83% / 12.55%). Only all three together are bit-exact. Do not quote the effect of one of them measured with the other two unmatched.",
+
+  "primitives_from": {
+    "module": "fp8_matmul_model",
+    "path_env": "MXGEMMINI_ROOT",
+    "default_relpath": "../../software/gemmini-rocc-tests",
+    "comment": "Relative to this directory (npu-exploration/rtl_exact). The exact-dyadic primitives (mx_product_quantize_trunc, fp_quantize_rne, fp_add_exact, q_bf16_rne, bf16_accum_add) are IMPORTED from the hardware golden model rather than transcribed here, so there is one implementation and it cannot drift. rtl_datapath.py fails loudly if the path is wrong instead of falling back to a lookalike."
+  }
+}

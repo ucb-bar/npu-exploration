@@ -1,0 +1,648 @@
+"""The bit-exact FP8 mesh: per-lane accumulator precision, truncating products, bf16 cross-tile accumulate. What spike reproduces element-for-element.
+
+EXTRACTED VERBATIM from ``fp8_matmul_model.py`` by ``tools/extract_model.py`` — do not edit.
+Entry points: tiled_matmul_hwlike, matrix_mx_requantize, tensor_to_custom_fp_codes, make_fp_quantizer, parse_fp_spec, mx_product_quantize_trunc, fp_quantize_rne, fp_add_exact, q_bf16_rne, bf16_accum_add
+Closure: 35 definitions.
+"""
+from __future__ import annotations
+
+import math
+import re
+import time
+from typing import Callable, Dict, List, Optional, Tuple
+
+import torch
+
+Tensor = torch.Tensor
+QuantFn = Optional[Callable[[Tensor], Tensor]]
+
+
+Tensor = torch.Tensor
+
+QuantFn = Optional[Callable[[Tensor], Tensor]]
+
+INPUT_SPEC = "fp8:e4m3"
+
+PROD_MANT_BITS = 7
+
+TILE = 16
+
+GROUP = 32
+
+SCALE_SPEC = "fpe8m0"
+
+_FP_PRESETS = {
+    "fp16":      dict(exp=5, man=10),
+    "bf16":      dict(exp=8, man=7),
+    "fp8:e4m3":  dict(exp=4, man=3),
+    "fp8:e5m2":  dict(exp=5, man=2),
+    "fp6:e3m2":  dict(exp=3, man=2),
+    "fp4:e4m1":  dict(exp=2, man=1),
+    "fp26":      dict(exp=7, man=18),
+    "fp20":      dict(exp=6, man=13),
+    "fp14":      dict(exp=5, man=8),
+    "fpe8m0":    dict(exp=8, man=0),
+}
+
+def parse_fp_spec(spec: str) -> Tuple[int, int]:
+    s = spec.strip().lower()
+    if s in _FP_PRESETS:
+        return _FP_PRESETS[s]["exp"], _FP_PRESETS[s]["man"]
+    if s == "fp32":
+        return 8, 23
+    m = re.fullmatch(r"fp\d+:(e(\d+)m(\d+))", s)
+    if m:
+        return int(m.group(2)), int(m.group(3))
+    raise ValueError(f"Unrecognized floating-point spec: {spec}")
+
+def trunc_product_mantissa(x: torch.Tensor, frac_bits: int) -> torch.Tensor:
+    x = x.to(torch.float32)
+    is_finite = torch.isfinite(x)
+    ax = x.abs()
+    out = x.clone()
+    nz = (ax != 0) & is_finite
+    if not torch.any(nz):
+        return out
+    xn = x[nz]
+    m, e = torch.frexp(xn)
+    sign = torch.sign(m)
+    m = m.abs()
+    m2 = m * 2.0
+    e2 = e - 1
+    frac = m2 - 1.0
+    scale = float(1 << frac_bits)
+    frac_q = torch.floor(frac * scale) / scale
+    m2_q = 1.0 + frac_q
+    out_nz = (sign * m2_q) * torch.ldexp(torch.ones_like(m2_q), e2)
+    out_nz = torch.where(out_nz.abs() < torch.finfo(torch.float32).tiny, torch.zeros_like(out_nz), out_nz)
+    out[nz] = out_nz
+    return out
+
+def q_bf16_rne(x: torch.Tensor) -> torch.Tensor:
+    return x.to(torch.bfloat16).to(torch.float32)
+
+def _rne_e8(x: Tensor, man_bits: int) -> Tensor:
+    """RNE-round float32 mantissa to man_bits bits, preserving float32 exponent range.
+    For man_bits==7 this is equivalent to q_bf16_rne (validated by native BF16 path).
+    Uses IEEE 754 sign-magnitude bit manipulation so rounding applies to the magnitude."""
+    if man_bits >= 23:
+        return x
+    drop = 23 - man_bits
+    xi   = x.view(torch.int32)
+    mag  = xi & 0x7FFFFFFF                       # magnitude bits (exp+mantissa), sign=0
+    sign = xi ^ mag                               # sign bit only
+    keep_mask = ~((1 << drop) - 1)               # clear dropped mantissa bits
+    round_bit = ((mag >> (drop - 1)) & 1).bool()
+    sticky    = (mag & ((1 << (drop - 1)) - 1)).ne(0)
+    lsb       = ((mag >> drop) & 1).bool()
+    round_up  = round_bit & (sticky | lsb)
+    mag_r = (mag & keep_mask) + round_up.int() * (1 << drop)
+    return (sign | mag_r).view(torch.float32)
+
+def fp_quantize_rne(x: Tensor, exp_bits: int, man_bits: int) -> Tensor:
+    """Unified FP quantizer with round-to-nearest-even.
+    For (8, 7) exactly matches q_bf16_rne (native torch.bfloat16).
+    For exp=8 uses bit manipulation on float32 (same exponent range).
+    For exp<8 uses IEEE-like rounding with subnormal + inf/NaN support.
+    Used for accumulator quantization and resize steps."""
+    x = x.float()
+    if exp_bits == 8 and man_bits == 7:
+        return x.to(torch.bfloat16).to(torch.float32)
+    if exp_bits == 8:
+        return _rne_e8(x, man_bits)
+    flat = x.detach().cpu().reshape(-1).tolist()
+    out_flat = [fp_quantize_rne_scalar(float(v), exp_bits, man_bits) for v in flat]
+    return torch.tensor(out_flat, dtype=torch.float32, device=x.device).view_as(x)
+
+def mx_product_saturate(x: Tensor, exp_bits: int, man_bits: int) -> Tensor:
+    """Clamp product overflow to match MxPEOutToRaw saturation (MxFPMul.scala:374-377).
+    In hardfloat convention, biased exponent 2^exp-1 is 'special', so the hardware
+    saturates to satFrac=(2^man-2) at satExp corresponding to unbiased (bias+1).
+    For MX FP8 this equals the format max (448). For other formats it exceeds the
+    format max — the resize step then converts to the accumulator format.
+    Underflow passes through unchanged (resize handles it)."""
+    x = x.float()
+    bias = (1 << (exp_bits - 1)) - 1
+    is_mx_fp8 = (exp_bits == 4 and man_bits == 3)
+    emax = bias + 1 if is_mx_fp8 else bias
+    scale = float(2 ** man_bits)
+    # Max normal value in the product format
+    max_mant = (2 ** man_bits - 2) if is_mx_fp8 else (2 ** man_bits - 1)
+    max_normal = (2.0 ** emax) * (1.0 + max_mant / scale)
+    # Hardware saturation value: satFrac = 2^man - 2, at exponent bias+1
+    sat_man = 2 ** man_bits - 2
+    sat_val = (1.0 + sat_man / scale) * (2.0 ** (bias + 1))
+    sign = torch.sign(x)
+    ax = x.abs()
+    return sign * torch.where(ax > max_normal, torch.full_like(ax, sat_val), ax)
+
+def mx_product_quantize_trunc(x: Tensor, exp_bits: int, frac_bits: int) -> Tensor:
+    """
+    Match the MxFPMul product path before the accumulator resize.
+    The PE product keeps `frac_bits` fractional bits with truncation.
+    Because of the corrected MxPEOutToRaw logic, NO subnormal grid is applied
+    at this stage. The fraction remains perfectly normalized with full precision
+    regardless of how small the exponent is.
+    """
+    x = x.float()
+    out = x.clone()
+    finite = torch.isfinite(x)
+    ax = x.abs()
+    nz = finite & (ax != 0)
+
+    if not nz.any():
+        return mx_product_saturate(out, exp_bits, frac_bits)
+
+    ax_nz = ax[nz]
+
+    # frexp gives m in [0.5, 1.0) and e such that x = m * 2^e
+    m, e = torch.frexp(ax_nz)
+    E = e - 1
+
+    # The hardware multiplier simply normalizes and truncates to frac_bits.
+    # We apply this universally without checking for 'emin'.
+    scale = float(1 << frac_bits)
+    frac = 2.0 * m - 1.0
+    frac_q = torch.floor(frac * scale) / scale
+
+    # Reconstruct the value
+    val_nz = (1.0 + frac_q) * torch.ldexp(torch.ones_like(frac_q), E)
+
+    out[nz] = torch.sign(x[nz]) * val_nz
+    out[finite & (ax == 0)] = x[finite & (ax == 0)]
+
+    return mx_product_saturate(out, exp_bits, frac_bits)
+
+def _round_div_pow2_rne_int(n: int, shift: int) -> int:
+    if shift <= 0:
+        return n << (-shift)
+    q = n >> shift
+    rem = n & ((1 << shift) - 1)
+    half = 1 << (shift - 1)
+    if rem > half or (rem == half and (q & 1)):
+        q += 1
+    return q
+
+def _encode_exact_scalar_to_fields(x: float, exp_bits: int, man_bits: int) -> Tuple[str, int, int, int]:
+    sign = 1 if math.copysign(1.0, x) < 0 else 0
+    if math.isnan(x):
+        return "nan", sign, 0, 0
+    if math.isinf(x):
+        return "inf", sign, 0, 0
+    if x == 0.0:
+        return "zero", sign, 0, 0
+
+    bias = (1 << (exp_bits - 1)) - 1
+    emin = 1 - bias
+    ax = abs(x)
+    m, e = math.frexp(ax)
+    E = e - 1
+
+    if E >= emin:
+        total_sig = int(round(math.ldexp(ax, man_bits - E)))
+        if total_sig == (1 << (man_bits + 1)):
+            total_sig >>= 1
+            E += 1
+        return "finite", sign, E + bias, total_sig - (1 << man_bits)
+
+    frac = int(round(math.ldexp(ax, man_bits - emin)))
+    if frac >= (1 << man_bits):
+        return "finite", sign, 1, 0
+    return "finite", sign, 0, frac
+
+def _fields_to_dyadic(sign: int, exp_field: int, frac: int, exp_bits: int, man_bits: int) -> Tuple[int, int, int]:
+    bias = (1 << (exp_bits - 1)) - 1
+    emin = 1 - bias
+    if exp_field == 0:
+        return sign, frac, emin - man_bits
+    return sign, (1 << man_bits) + frac, (exp_field - bias) - man_bits
+
+def _round_dyadic_to_scalar(sign: bool, num: int, exp2: int, exp_bits: int, man_bits: int) -> float:
+    if num == 0:
+        return 0.0
+
+    bias = (1 << (exp_bits - 1)) - 1
+    emin = 1 - bias
+    emax = bias
+
+    p = num.bit_length() - 1
+    E = exp2 + p
+
+    if E < emin:
+        shift = (emin - man_bits) - exp2
+        sub_sig = _round_div_pow2_rne_int(num, shift)
+        if sub_sig == 0:
+            return 0.0
+        if sub_sig >= (1 << man_bits):
+            E = emin
+            total_sig = sub_sig
+            if total_sig >= (1 << (man_bits + 1)):
+                total_sig >>= 1
+                E += 1
+            if E > emax:
+                return float("-inf") if sign else float("inf")
+            val = math.ldexp(float(total_sig), E - man_bits)
+            return -val if sign else val
+        val = math.ldexp(float(sub_sig), emin - man_bits)
+        return -val if sign else val
+
+    total_sig = _round_div_pow2_rne_int(num, p - man_bits)
+    if total_sig >= (1 << (man_bits + 1)):
+        total_sig >>= 1
+        E += 1
+    if E > emax:
+        return float("-inf") if sign else float("inf")
+    val = math.ldexp(float(total_sig), E - man_bits)
+    return -val if sign else val
+
+def _scalar_to_dyadic(x: float) -> Tuple[bool, int, int]:
+    ax = abs(x)
+    num, den = ax.as_integer_ratio()
+    exp2 = -(den.bit_length() - 1)
+    return (math.copysign(1.0, x) < 0), num, exp2
+
+def fp_quantize_rne_scalar(x: float, exp_bits: int, man_bits: int) -> float:
+    if math.isnan(x):
+        return float("nan")
+    if math.isinf(x):
+        return x
+    if x == 0.0:
+        return x
+    sign, num, exp2 = _scalar_to_dyadic(x)
+    return _round_dyadic_to_scalar(sign, num, exp2, exp_bits, man_bits)
+
+def fp_add_exact_scalar(x: float, y: float, exp_bits: int, man_bits: int) -> float:
+    if math.isnan(x) or math.isnan(y):
+        return float("nan")
+
+    sign_x = 1 if math.copysign(1.0, x) < 0 else 0
+    sign_y = 1 if math.copysign(1.0, y) < 0 else 0
+
+    if math.isinf(x) or math.isinf(y):
+        if math.isinf(x) and math.isinf(y) and sign_x != sign_y:
+            return float("nan")
+        return x if math.isinf(x) else y
+
+    kind_x, sign_x, exp_x, frac_x = _encode_exact_scalar_to_fields(x, exp_bits, man_bits)
+    kind_y, sign_y, exp_y, frac_y = _encode_exact_scalar_to_fields(y, exp_bits, man_bits)
+
+    if kind_x == "zero":
+        return y
+    if kind_y == "zero":
+        return x
+
+    sign_x, sig_x, e_x = _fields_to_dyadic(sign_x, exp_x, frac_x, exp_bits, man_bits)
+    sign_y, sig_y, e_y = _fields_to_dyadic(sign_y, exp_y, frac_y, exp_bits, man_bits)
+
+    e_min = min(e_x, e_y)
+    lhs = sig_x << (e_x - e_min)
+    rhs = sig_y << (e_y - e_min)
+    total = (-lhs if sign_x else lhs) + (-rhs if sign_y else rhs)
+
+    if total == 0:
+        return 0.0
+    return _round_dyadic_to_scalar(total < 0, abs(total), e_min, exp_bits, man_bits)
+
+def fp_add_exact(x: Tensor, y: Tensor, exp_bits: int, man_bits: int) -> Tensor:
+    assert x.shape == y.shape
+    x_flat = x.detach().cpu().reshape(-1).tolist()
+    y_flat = y.detach().cpu().reshape(-1).tolist()
+    out_flat = [fp_add_exact_scalar(float(a), float(b), exp_bits, man_bits)
+                for a, b in zip(x_flat, y_flat)]
+    return torch.tensor(out_flat, dtype=torch.float32, device=x.device).view_as(x)
+
+def float_quantize_trunc(x: Tensor, exp: int, man: int) -> Tensor:
+    if not torch.is_tensor(x):
+        x = torch.tensor(x, dtype=torch.float32)
+    out = torch.zeros_like(x)
+    is_zero = (x == 0)
+    if torch.all(is_zero):
+        return out
+    sign = torch.sign(x)
+    ax = x.abs()
+    nz_mask = ax > 0
+    ax_nz = ax[nz_mask]
+    if ax_nz.numel() == 0:
+        return out
+    log2_ax = torch.log2(ax_nz)
+    E = torch.floor(log2_ax)
+    bias = (1 << (exp - 1)) - 1
+    emin = 1 - bias
+    # MX FP8 E4M3: biased_exp goes up to 15 (unbiased=8), NaN=0x7F only → pmax=448
+    is_mx_fp8 = (exp == 4 and man == 3)
+    emax = bias + 1 if is_mx_fp8 else bias
+    underflow_mask = E < emin
+    overflow_mask = E > emax
+    normal_mask = (~underflow_mask) & (~overflow_mask)
+    ax_q = torch.zeros_like(ax_nz)
+    ax_q[underflow_mask] = 0.0
+    if overflow_mask.any():
+        E_max = float(emax)
+        base_max = torch.pow(torch.tensor(2.0, dtype=ax_nz.dtype, device=ax_nz.device), E_max)
+        delta_max = base_max / (2 ** man)
+        # MX FP8: biased_exp=15 + mant=7 is NaN, so max normal mant=6
+        max_mant = (2 ** man - 2) if is_mx_fp8 else (2 ** man - 1)
+        max_val = base_max + max_mant * delta_max
+        ax_q[overflow_mask] = max_val
+    if normal_mask.any():
+        E_norm = E[normal_mask]
+        x_norm = ax_nz[normal_mask]
+        base = torch.pow(torch.tensor(2.0, dtype=ax_nz.dtype, device=ax_nz.device), E_norm)
+        delta = base / (2 ** man)
+        t = (x_norm - base) / delta
+        # MX FP8: when E=8 (biased_exp=15), mant=7 would be NaN; clamp to 6
+        if is_mx_fp8:
+            at_emax = (E_norm == emax).to(ax_nz.device)
+            clamp_hi = torch.where(at_emax,
+                torch.full_like(t, 2 ** man - 2 - 1e-7),
+                torch.full_like(t, 2 ** man - 1 - 1e-7))
+            k = torch.floor(torch.clamp(t, torch.zeros_like(t), clamp_hi))
+        else:
+            k = torch.floor(torch.clamp(t, 0, 2 ** man - 1 - 1e-7))
+        ax_q[normal_mask] = base + k * delta
+    out[nz_mask] = sign[nz_mask] * ax_q
+    return out
+
+def make_fp_quantizer(spec: str, rounding: str = "nearest") -> QuantFn:
+    s = spec.strip().lower()
+    if s in ("", "none", "identity"):
+        return None
+    if s == "fp32":
+        return None
+    e, m = parse_fp_spec(spec)
+    rounding = rounding.lower()
+    # E2M3 uses MxQuant's grid (emax=2, max_norm 7.5), which qtorch's float_quantize does NOT match
+    # (qtorch treats exp=2 as emax=1). Route ALL rounding modes for E2M3 through MxQuant so the codebook
+    # floats, operands (incl. the RTZ re-quant of gridded values) and requant all sit on the grid the
+    # hardware decodes. On already-gridded values this is a no-op; MxQuant nearest is the canonical grid.
+    if s == "fp6:e2m3" and rounding in ("nearest", "nearest_even", "zero", "toward_zero", "trunc", "rtz"):
+        return _mxquant_e2m3_quantizer()
+    if rounding in ("nearest", "nearest_even", "stochastic"):
+        from qtorch.quant import float_quantize
+        mode = "nearest" if rounding in ("nearest", "nearest_even") else "stochastic"
+        return lambda x: float_quantize(x, exp=e, man=m, rounding=mode)
+    if rounding in ("zero", "toward_zero", "trunc", "rtz"):
+        return lambda x: float_quantize_trunc(x, exp=e, man=m)
+    raise ValueError(f"Unsupported rounding mode: {rounding}")
+
+def _mxquant_e2m3_quantizer():
+    """Return a callable that quantizes to MxQuant's fp6_e2m3 grid (emax=2, max_norm 7.5, subnormals
+    allowed, RNE, saturate) using MxQuant itself -- npu-exploration/MXQuant is the golden reference."""
+    import os, sys
+    _mxq = os.path.abspath(os.path.join(os.path.dirname(__file__),
+                                        "..", "..", "npu-exploration", "MXQuant", "microxcaling"))
+    if _mxq not in sys.path:
+        sys.path.insert(0, _mxq)
+    from mx.elemwise_ops import _quantize_elemwise
+    from mx.formats import ElemFormat
+    return lambda x: _quantize_elemwise(x, ElemFormat.fp6_e2m3, round='nearest',
+                                        saturate_normals=True, allow_denorm=True)
+
+def tensor_to_custom_fp_codes(t: Tensor, spec: str) -> Tuple[List[List[int]], int]:
+    e_bits, m_bits = parse_fp_spec(spec)
+    total_bits = 1 + e_bits + m_bits
+    s = spec.strip().lower()
+    arr = t.detach().cpu()
+    if arr.ndim == 1:
+        arr = arr.unsqueeze(0)
+    if arr.ndim != 2:
+        raise ValueError("Expected 1D or 2D tensor for hex dump.")
+
+    if s == "bf16":
+        bf16_bits = arr.to(torch.bfloat16).view(torch.int16)
+        out_codes = [[int(bf16_bits[r, c].item()) & 0xFFFF for c in range(arr.shape[1])]
+                     for r in range(arr.shape[0])]
+        return out_codes, total_bits
+
+    bias = (1 << (e_bits - 1)) - 1
+    emin = 1 - bias
+    # MX FP8 E4M3: biased_exp goes up to 15 (unbiased=8), NaN=0x7F only → pmax=448
+    is_mx_fp8 = (e_bits == 4 and m_bits == 3)
+    # MxQuant fp6_e2m3 uses emax = 2^(ebits-1) = 2 (max_norm 7.5), not bias=1. Match MxQuant
+    # (npu-exploration/MXQuant microxcaling formats.py) so E2M3 codes use exp field up to 3.
+    is_e2m3 = (e_bits == 2 and m_bits == 3)
+    emax = bias + 1 if (is_mx_fp8 or is_e2m3) else bias
+    rows, cols = arr.shape
+    out_codes: List[List[int]] = []
+    for r in range(rows):
+        row_codes: List[int] = []
+        for c in range(cols):
+            v = float(arr[r, c].item())
+            if v == 0.0 or not math.isfinite(v):
+                code = 0
+            else:
+                s = 1 if v < 0 else 0
+                av = abs(v)
+                E = math.floor(math.log2(av))
+                if E < emin:
+                    # Subnormal range: quantum = 2^(emin - m_bits)
+                    quantum = 2.0 ** (emin - m_bits)
+                    k = int(round(av / quantum))
+                    if k <= 0:
+                        code = 0
+                    elif k >= 2**m_bits:
+                        # Rounds up to min normal (biased_exp=1, mant=0)
+                        code = (s << (e_bits + m_bits)) | (1 << m_bits)
+                    else:
+                        code = (s << (e_bits + m_bits)) | k  # subnormal: biased_exp=0
+                else:
+                    if E > emax:
+                        E_used = emax
+                        # MX FP8: biased_exp=15 + mant=7 is NaN, so max normal mant=6
+                        mant = (2 ** m_bits) - 2 if is_mx_fp8 else (2 ** m_bits) - 1
+                    else:
+                        E_used = E
+                        base = 2.0 ** E_used
+                        delta = base / (2 ** m_bits)
+                        tpos = (av - base) / delta
+                        mant = int(round(tpos))
+                        if mant >= 2 ** m_bits:
+                            # Rounding carry: banker's rounding pushed mant over the top (e.g. 7.5→8).
+                            # Increment exponent and reset mantissa instead of clamping.
+                            E_used += 1
+                            mant = 0
+                            if E_used > emax:
+                                # Carry pushed past pmax: clip to max representable
+                                E_used = emax
+                                mant = (2 ** m_bits) - 2 if is_mx_fp8 else (2 ** m_bits) - 1
+                        else:
+                            # MX FP8: at biased_exp=15 (E=8), mant=7 would be NaN; clamp to 6
+                            max_mant = (2 ** m_bits) - 2 if (is_mx_fp8 and E_used == emax) else (2 ** m_bits) - 1
+                            mant = max(0, min(mant, max_mant))
+                    exp_bits_val = int(E_used + bias)
+                    code = ((s & 0x1) << (e_bits + m_bits)) | \
+                           ((exp_bits_val & ((1 << e_bits) - 1)) << m_bits) | \
+                           (mant & ((1 << m_bits) - 1))
+            row_codes.append(code)
+        out_codes.append(row_codes)
+    return out_codes, total_bits
+
+def codes_to_hex_rows(codes: List[List[int]], total_bits: int) -> List[List[str]]:
+    width = (total_bits + 3) // 4
+    return [[f"{code:0{width}x}" for code in row] for row in codes]
+
+def prod_quant(x: Tensor) -> Tensor:
+    return trunc_product_mantissa(x, frac_bits=PROD_MANT_BITS)
+
+def matmul_outer_quantized_hwlike(
+    A_in: Tensor,
+    B_in: Tensor,
+    prod_precision_list: Optional[List[Tuple[int, int]]] = None,
+    acc_precision_list: Optional[List[Tuple[int, int]]] = None,
+) -> Tensor:
+    """
+    prod_precision_list: list of (exp_bits, frac_bits) per k-step within a tile.
+                         Indexed by k % TILE. When None, uses PROD_MANT_BITS + bf16
+                         (existing behaviour).
+    acc_precision_list:  list of (exp_bits, frac_bits) per k-step within a tile.
+                         Indexed by k % TILE. When None, uses bf16 (existing behaviour).
+    """
+    M, K = A_in.shape
+    K2, N = B_in.shape
+    assert K == K2
+    if prod_precision_list is not None:
+        assert len(prod_precision_list) == TILE
+    if acc_precision_list is not None:
+        assert len(acc_precision_list) == TILE
+    C = torch.zeros((M, N), dtype=torch.float32, device=A_in.device)
+    for k in range(K):
+        k_idx = k % TILE
+        outer = torch.outer(A_in[:, k], B_in[k, :])
+
+        if prod_precision_list is not None:
+            exp_p, man_p = prod_precision_list[k_idx]
+            outer = mx_product_quantize_trunc(outer, exp_p, man_p)
+        else:
+            outer = prod_quant(outer)
+            outer = q_bf16_rne(outer)
+
+        if acc_precision_list is not None:
+            exp_a, man_a = acc_precision_list[k_idx]
+            C = fp_add_exact(
+                fp_quantize_rne(C, exp_a, man_a),
+                fp_quantize_rne(outer, exp_a, man_a),
+                exp_a, man_a)
+        else:
+            C = fp_add_exact(q_bf16_rne(C), q_bf16_rne(outer), 8, 7)
+    return C
+
+def compute_tile_scale_matrix(A_scales_row, B_scales_col, m0, n0, k0, TM, TN):
+    g = k0 // GROUP
+    sA = A_scales_row[m0:m0+TM, g].to(torch.float32)
+    sB = B_scales_col[g, n0:n0+TN].to(torch.float32)
+    S = torch.outer(sA, sB)
+    S_q = make_fp_quantizer(SCALE_SPEC, "nearest")(S)
+    return S_q
+
+def bf16_accum_add(x: Tensor, y: Tensor) -> Tensor:
+    return fp_add_exact(q_bf16_rne(x), q_bf16_rne(y), 8, 7)
+
+def print_matrix(name: str, mat: Tensor, spec: str = "bf16"):
+    arr = mat.detach().cpu()
+    if arr.ndim == 1:
+        arr = arr.unsqueeze(0)
+    print(f"\n  {name} (decimal):")
+    for r in range(arr.shape[0]):
+        vals = [f"{arr[r,c].item():12.6f}" for c in range(arr.shape[1])]
+        print("    " + " ".join(vals))
+    codes, bits = tensor_to_custom_fp_codes(arr, spec)
+    hex_rows = codes_to_hex_rows(codes, bits)
+    print(f"  {name} (hex, {spec}):")
+    for row in hex_rows:
+        print("    " + " ".join(row))
+
+def tiled_matmul_hwlike(
+    A_in: Tensor,
+    B_in: Tensor,
+    A_scales_row: Tensor,
+    B_scales_col: Tensor,
+    verbose: bool = True,
+    prod_precision_list: Optional[List[Tuple[int, int]]] = None,
+    acc_precision_list: Optional[List[Tuple[int, int]]] = None,
+) -> Tensor:
+    M, K = A_in.shape
+    K2, N = B_in.shape
+    assert K == K2
+
+    TM = TN = TK = TILE
+    Gk = (K + GROUP - 1) // GROUP
+    assert A_scales_row.shape == (M, Gk)
+    assert B_scales_col.shape == (Gk, N)
+
+    C_out = torch.zeros((M, N), dtype=torch.float32, device=A_in.device)
+    tile_count = 0
+
+    for k0 in range(0, K, TK):
+        for n0 in range(0, N, TN):
+            for m0 in range(0, M, TM):
+                tile_count += 1
+                A_tile = A_in[m0:m0+TM, k0:k0+TK]
+                B_tile = B_in[k0:k0+TK, n0:n0+TN]
+
+                if verbose:
+                    print(f"\n{'='*60}")
+                    print(f"TILE {tile_count}: m0={m0}, n0={n0}, k0={k0} (group={k0//GROUP})")
+                    print(f"{'='*60}")
+                    print_matrix("A_tile", A_tile, INPUT_SPEC)
+                    print_matrix("B_tile", B_tile, INPUT_SPEC)
+
+                C_tile = matmul_outer_quantized_hwlike(A_tile, B_tile,
+                    prod_precision_list=prod_precision_list,
+                    acc_precision_list=acc_precision_list)
+
+                if verbose:
+                    print_matrix("C_tile (pre-scale, bf16)", C_tile, "bf16")
+
+                S_tile = compute_tile_scale_matrix(A_scales_row, B_scales_col, m0, n0, k0, TM, TN)
+
+                if verbose:
+                    print_matrix("S_tile (scale factors)", S_tile, "bf16")
+
+                C_tile_scaled = q_bf16_rne(C_tile * S_tile)
+
+                if verbose:
+                    print_matrix("C_tile_scaled (post-scale, bf16)", C_tile_scaled, "bf16")
+
+                C_out[m0:m0+TM, n0:n0+TN] = bf16_accum_add(
+                    C_out[m0:m0+TM, n0:n0+TN], C_tile_scaled
+                )
+
+                if verbose:
+                    print_matrix("C_accumulated (running sum, bf16)",
+                                C_out[m0:m0+TM, n0:n0+TN], "bf16")
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print("FINAL OUTPUT C_out (bf16)")
+        print(f"{'='*60}")
+        print_matrix("C_out", C_out, "bf16")
+
+    return C_out
+
+def matrix_mx_requantize(matrix, quant_spec=INPUT_SPEC):
+    M, N = matrix.shape
+    nblocks = N // GROUP
+    e_bits, m_bits = parse_fp_spec(quant_spec)
+    # Requant block-scale floor: p=0 for all formats -> output normalizes to [1,2) (chained-matmul
+    # fix). Matches the RTL/spike log2_pmax=0. (Previously subtracted emax=(1<<(e_bits-1)).)
+    log2_pmax = 0
+
+    scale_q_fn = make_fp_quantizer(SCALE_SPEC, "nearest")
+
+    C_quantized = torch.zeros_like(matrix)
+    C_scales = torch.zeros(M, nblocks)
+
+    for bi in range(nblocks):
+        block = matrix[:, bi*GROUP:(bi+1)*GROUP]
+        block_max = block.abs().amax(dim=1, keepdim=True)
+        # Match HW: extract exponent of block_max, subtract log2_pmax
+        max_exp = torch.floor(torch.log2(block_max.clamp(min=1e-45)))
+        scale_exp = max_exp - log2_pmax
+        scale = torch.pow(2.0, scale_exp)
+        scale = scale_q_fn(scale)
+
+        # Store scaled BF16 values; tensor_to_custom_fp_codes handles MX FP8 rounding/encoding
+        C_quantized[:, bi*GROUP:(bi+1)*GROUP] = block / scale
+        C_scales[:, bi] = scale.squeeze(1)
+
+    return C_quantized, C_scales

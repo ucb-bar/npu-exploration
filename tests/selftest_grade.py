@@ -65,7 +65,22 @@ def main() -> int:
 
         g_gold = compare(exact, ref, exact, tol_rel_fro=0.15)
         check("golden tier reports bit-exact pass", g_gold["pass"] is True)
-        check("tier switches to golden when supplied", g_gold["tier"] == "golden")
+        check("tier switches to mxquant_rtl_exact when a golden is supplied",
+              g_gold["tier"] == "mxquant_rtl_exact")
+
+        # The golden verdict must be BIT-identity, with no tolerance anywhere in it: a run that is
+        # numerically excellent but not identical still fails, and a huge tolerance cannot save it.
+        off = ref.clone()
+        off.view(-1)[0] += 1e-6
+        g_off = compare(off, ref, ref, tol_rel_fro=1.0)
+        check("a near-miss fails the golden tier no matter the tolerance", g_off["pass"] is False,
+              f"{g_off['correctness_vs_golden_model']['n_mismatch']} element(s) differ")
+
+        # The as-shipped reference is reported, never a pass criterion -- it is EXPECTED to differ.
+        g_ship = compare(exact, ref, exact, tol_rel_fro=0.15, shipped_reference=off)
+        check("as-shipped delta is reported", "delta_vs_mxquant_as_shipped" in g_ship)
+        check("as-shipped delta cannot fail a run", g_ship["pass"] is True,
+              f"differs on {g_ship['delta_vs_mxquant_as_shipped']['n_mismatch']}, still PASS")
 
         print("\n[3] telemetry buffering -----------------------------------------")
         tel = Telemetry()

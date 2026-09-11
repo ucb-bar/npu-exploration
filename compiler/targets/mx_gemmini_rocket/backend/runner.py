@@ -114,14 +114,31 @@ def available(simulator: str = "spike") -> bool:
 
 # --- Build ----------------------------------------------------------------------------------------
 
+#: The one compile-time difference between the two substrates, mirroring how the reference tree
+#: builds: `bareMetalC/Makefile:111` adds -DSPIKE_SIM when $(RUNNER) contains "spike", and the RTL
+#: build passes EXTRA_CFLAGS=-DMX_ROCKET (`build_mx_rocket/`).
+#:
+#: The C WE emit reads neither define -- it has no target conditionals at all, because it only ever
+#: targets the real RoCC. They still matter because `gemmini.h` and the test headers branch on them.
+TARGET_DEFINE = {"spike": "-DSPIKE_SIM", "mx_rocket": "-DMX_ROCKET"}
+
+
 def compile_command_buffer(cb: dict[str, Any], workdir: str | Path, *,
                            driver_src: str | None = None,
-                           transport: Transport | None = None) -> Path:
+                           transport: Transport | None = None,
+                           target: str = "spike") -> Path:
     """Emit the C driver and compile the bare-metal ELF; return the ELF path.
 
     ``driver_src`` overrides codegen with externally-provided C — the rest of the build/run path is
     identical (same seam merlin's gemmini backend offers for certifying a hand-written kernel).
+
+    ``target`` selects the substrate define only. The generated source is byte-identical either way;
+    that is the property Step 4 of ``planning/merlin_glue_port_plan.md`` set out to establish, and
+    ``tests/selftest_mx_rocket_build.py`` asserts it.
     """
+    if target not in TARGET_DEFINE:
+        raise MxRunnerError(f"unknown target {target!r}; known: {sorted(TARGET_DEFINE)}")
+    runtime = Path(__file__).resolve().parent / "runtime"
     work = Path(workdir)
     work.mkdir(parents=True, exist_ok=True)
     main_c = work / "main.c"
@@ -134,24 +151,31 @@ def compile_command_buffer(cb: dict[str, Any], workdir: str | Path, *,
     # Mirrors gemmini-rocc-tests/bareMetalC/Makefile CFLAGS_BAREMETAL exactly. Both the flag set and
     # the INCLUDE ORDER matter: a wrong order shadows the riscv-tests/env syscall headers and
     # corrupts the tohost protocol ("bad syscall" on spike).
-    # -DSPIKE_SIM selects the spike variants of the MX macros in the test headers.
+    # The target define selects the spike vs RTL variants of the MX macros in the test headers.
     cmd = [
         str(gcc_path()),
-        "-DSPIKE_SIM", "-DPREALLOCATE=1", "-DMULTITHREAD=1",
+        TARGET_DEFINE[target], "-DPREALLOCATE=1", "-DMULTITHREAD=1",
         "-mcmodel=medany", "-std=gnu99", "-O2", "-ffast-math",
         "-fno-common", "-fno-builtin-printf", "-fno-tree-loop-distribute-patterns",
         "-march=rv64gc", "-Wa,-march=rv64gc",
-        "-lm", "-lgcc",
         "-I", str(rt / "riscv-tests"),
         "-I", str(rt / "riscv-tests/env"),
         "-I", str(rt),
         "-I", str(common),
+        # The backend's own C runtime (mx_host.h): the fp32 host side of a layer plus the MX
+        # quantizer that hands its result back to the mesh. Step 6 of merlin_glue_port_plan.md.
+        "-I", str(runtime),
         "-DID_STRING=", "-DPRINT_TILE=0",
         "-nostdlib", "-nostartfiles", "-static",
         "-T", str(common / "test.ld"), "-DBAREMETAL=1",
         str(main_c), "-o", str(elf),
         *(str(p) for p in sorted(common.glob("*.c"))),
         *(str(p) for p in sorted(common.glob("*.S"))),
+        # AFTER the sources, not in the flags. A library named before the objects that need it
+        # resolves nothing -- `expf` (SiLU, softmax) then comes back undefined at link time. The
+        # reference tree hit exactly this (llama_layer_hw_plan.md section 8.4) and fixed it the same
+        # way; newlib's libm also wants `__errno`, which mx_host.h stubs under -DBAREMETAL.
+        "-lm", "-lgcc",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:

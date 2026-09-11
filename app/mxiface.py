@@ -20,7 +20,21 @@ from dataclasses import dataclass
 #: merlin_iface spells operand types with MLIR's builtin fp8 names, as the shipped MX capsules do
 #: (`tensor<32x32xf8E4M3FN>`). Block scaling is a property of the TARGET, not of the element type,
 #: so it does not appear here — the target contract declares it.
-MX_ELEM_TYPE = {"fp8": "f8E4M3FN", "fp6": "f6E3M2FN", "fp4": "f4E2M1FN"}
+#: Our format key -> the element type spelling used in the interface module. Sourced from the one
+#: format table so the two cannot drift; formats the frozen grammar has no builtin name for (the LUT
+#: sub-formats) fall back to their own key, which merlin's reader passes through as an opaque token.
+def _elem_types() -> dict[str, str]:
+    # This module is imported BOTH as `app.mxiface` (by the pipeline) and as a top-level `mxiface`
+    # (by the backend, which puts app/ on sys.path). Support both rather than forcing one, since
+    # picking a side would break whichever caller is not updated.
+    try:
+        from . import mxformats
+    except ImportError:                     # imported flat, with app/ on sys.path
+        import mxformats
+    return {f.name: (f.mlir or f.name) for f in mxformats.FORMATS.values()}
+
+
+MX_ELEM_TYPE = _elem_types()
 
 
 @dataclass(frozen=True)
@@ -32,22 +46,13 @@ class MatmulStage:
     the host, or an MX element type (``"f8E4M3FN"``) for one whose requantized output the next stage
     consumes on device.
 
-    ``chain_code_shift`` asks the SEAM AFTER THIS STAGE to divide every code by ``2**shift`` and add
-    that exponent back to the E8M0 scale — value-preserving, and what keeps the requantizer's
-    full-range output (peak 448, ``MxRequantizer.scala:35``) inside the mesh's 4-bit accumulator
-    exponent. Zero means the compensation was folded into the next stage's weight on the host
-    instead (the `weight` seam).
-
-    It rides as a TARGET-NAMESPACED commit attribute, ``mx_gemmini.chain_code_shift``, in the
-    documented typed-integer encoding (`interface_grammar.md` "Attribute encoding": ``k = 4 : i64``).
-    Be honest about the standing: the grammar ENUMERATES commit attributes as
-    ``{epilogue, output_dtype, acc_scale?}`` and defines no extension mechanism, so a namespaced key
-    is outside what v0.1 spells out. It is safe in practice and in keeping with what the MX corpus
-    already does — merlin's reference reader passes unknown commit attributes through untouched
-    (``interface_emit.parse_interface_mlir``), and the shipped MX capsules already carry
-    ``output_dtype`` values outside the doc's ``{i32, i8}`` enumeration. Emitted only when non-zero,
-    so every module we produced before this is byte-identical. If it is ever rejected upstream the
-    fallback is the ``mx_operands`` side channel, which already carries the LUT this pairs with.
+    A chained stage carries NO extra attribute. It used to declare
+    ``mx_gemmini.chain_code_shift``, a target-namespaced commit attribute asking the seam to shift
+    every code — compensation for a requantizer that filled the element format's range. The
+    hardware stopped doing that (``chain_seam_hw_notes.md`` §8) and the seam itself is now empty
+    (``merlin_glue_port_plan.md`` Step 3), so the attribute is gone. That is worth noting because
+    it also removes this target's one extension to frozen grammar v0.1: every module emitted here
+    is now plain ``merlin_iface``, with no namespaced key in it.
     """
 
     m: int
@@ -57,11 +62,10 @@ class MatmulStage:
     out: str
     lhs: str
     out_dtype: str = "bf16"
-    chain_code_shift: int = 0
 
 
 def chain_interface_mlir(stages: list[MatmulStage], *,
-                         operand_fmt: str = "fp8",
+                         operand_fmt: str = "fp8_e4m3",
                          acc_dtype: str = "bf16",
                          target: str = "mx_gemmini_rocket") -> str:
     """A CHAIN of weight-stationary matmuls as one merlin_iface module.
@@ -110,8 +114,6 @@ def chain_interface_mlir(stages: list[MatmulStage], *,
             f': ({lhs_t}, !merlin_iface.resident) -> !merlin_iface.acc<{acc_dtype}>',
             f'  %{st.out} = merlin_iface.commit %acc{i} {{name = "{st.out}", epilogue = [], '
             f'output_dtype = "{st.out_dtype}"'
-            + (f', mx_gemmini.chain_code_shift = {st.chain_code_shift} : i64'
-               if st.chain_code_shift else '')
             + f'}} : (!merlin_iface.acc<{acc_dtype}>) -> tensor<{st.m}x{st.n}x{st.out_dtype}>',
             # Evict where the weight actually dies — right after its own commit — so a chain does
             # not claim N residents are live at once.
@@ -121,7 +123,7 @@ def chain_interface_mlir(stages: list[MatmulStage], *,
 
 
 def matmul_interface_mlir(m: int, n: int, k: int, *,
-                          operand_fmt: str = "fp8",
+                          operand_fmt: str = "fp8_e4m3",
                           out_dtype: str = "bf16",
                           acc_dtype: str = "bf16",
                           target: str = "mx_gemmini_rocket",

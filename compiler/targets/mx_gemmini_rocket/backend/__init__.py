@@ -15,7 +15,7 @@ from __future__ import annotations
 from .mxgemm_emit import (  # noqa: F401
     MxEmitError,
     MxGemmPlan,
-    SpikeSmemTransport,
+    RoccSpadTransport,
     Transport,
     generate_driver,
 )
