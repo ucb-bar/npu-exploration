@@ -1,9 +1,35 @@
 # config — hardware recipes
 
-A recipe is one JSON file = one machine. `[hashed]` fields are the hardware itself:
-changing one changes `build_id` and forces a new spike build. All other fields bind
-per-instruction (`runtime`) or in Python before the hardware runs (`software`).
-`formats.*` is derived by the loader; an explicit block may only confirm it.
+A recipe is one JSON file = one machine. `[hashed]` fields are the hardware itself: changing one
+changes `build_id` and forces a new functional-model build. All other fields bind per-instruction
+(`runtime`) or in Python before the hardware runs (`software`). `formats.*` is derived by the loader;
+an explicit block may only confirm it.
+
+## Using it
+
+```bash
+.venv/bin/python run_kernel.py --list                    # recipes and kernels
+.venv/bin/python run_kernel.py --config wide_acc
+.venv/bin/python -m config.build_spike --config <recipe> --force
+```
+
+| recipe | product | accumulator ladder |
+|---|---|---|
+| `baseline` | e4m3 | m4x8 -> m5x2 -> m6x5 -> e8m7 (stock) |
+| `flat_acc4` | e4m3 | e4m4 flat |
+| `wide_acc` | e4m3 | e8m7 flat |
+| `narrow_prod` | **e4m2** | same ladder as baseline |
+
+A recipe that is not the stock machine gets its own functional model, built and cached under
+`out/builds/<build_id>/`.
+
+## One artifact, two consumers
+
+`recipes/*.json` drives **both** compilation and hardware generation: it patches the functional model
+(`build_spike.py`) and elaborates the Chisel (`scala/JsonGemminiConfig.scala`). Those two could drift
+silently, so `tests/test_recipe_drift.py` holds them in agreement — it is the only thing that does.
+
+## Fields
 
 | attribute | description |
 |---|---|
@@ -39,3 +65,5 @@ per-instruction (`runtime`) or in Python before the hardware runs (`software`).
 | `formats.<fmt>.prod_frac_bits` | exact product fraction width (derived: `2·m + 1`) |
 | `formats.<fmt>.via_lut` | decode goes through the LUT SRAMs (derived) |
 | `formats.fp6` | fail-closed: rejected at load until pinned against `lut_golden_model.py` |
+
+See [`../README.md`](../README.md) for install and the run command.

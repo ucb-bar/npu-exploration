@@ -1,4 +1,4 @@
-# `rtl_exact` — the MXQuant config that IS the hardware
+# rtl_exact — the MXQuant config that IS the hardware
 
 **Use this config for any MXQuant exploration whose numbers are meant to describe MxGemmini.**
 Under it, MXQuant's simulated MX matmul is **bit-identical** to the hardware — 65536/65536 elements,
@@ -97,3 +97,5 @@ these operands, and the same source builds for the MxGemminiRocketConfig RTL pat
 against this fixture is a match against the datapath, not against another Python model.
 
 Background and the full measurement history: `../planning/llama_layer_hw_plan.md` §8.2b.
+
+See [`../README.md`](../README.md) for install and the run command.

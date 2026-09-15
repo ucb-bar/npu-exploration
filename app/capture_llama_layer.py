@@ -121,6 +121,39 @@ def reference_attn(t: dict, eps: float) -> np.ndarray:
     return (softmax_causal(s) @ v @ t["Wo"]).astype(np.float32)
 
 
+def reference_attn_full(t: dict, eps: float, n_heads: int, n_kv_heads: int) -> np.ndarray:
+    """ALL heads, fp32: the complete attention sub-layer, no truncated reduction anywhere.
+
+    With every head present the output is the layer's real attention result, so it can be checked
+    against the model's own forward pass -- `h_mid - h_pre` is exactly this quantity, because the
+    decoder layer computes `h_mid = h_pre + attn(rmsnorm(h_pre))`. That check is impossible for a
+    single head, whose contribution the residual stream never exposes separately.
+    """
+    xn = rmsnorm(t["h_pre"], t["w_in_ln"], eps)
+    H = t["rope_cos"].shape[-1]
+    q = rope_heads(xn @ t["Wq"], t["rope_cos"], t["rope_sin"], n_heads, H)
+    k = rope_heads(xn @ t["Wk"], t["rope_cos"], t["rope_sin"], n_kv_heads, H)
+    v = (xn @ t["Wv"]).astype(np.float32)
+    per_head = n_heads // n_kv_heads                      # GQA: q head h uses kv head h // per_head
+    O = np.empty((xn.shape[0], n_heads * H), dtype=np.float32)
+    for h in range(n_heads):
+        kv = h // per_head
+        qh = q[:, h * H:(h + 1) * H]
+        kh = k[:, kv * H:(kv + 1) * H]
+        vh = v[:, kv * H:(kv + 1) * H]
+        s = (qh @ kh.T) / np.sqrt(np.float32(H))
+        O[:, h * H:(h + 1) * H] = softmax_causal(s) @ vh
+    return (O @ t["Wo"]).astype(np.float32)
+
+
+def rope_heads(x: np.ndarray, cos: np.ndarray, sin: np.ndarray, n: int, H: int) -> np.ndarray:
+    """`rope` applied per head to a [S][n*H] projection. The tables are shared across heads."""
+    out = np.empty_like(x, dtype=np.float32)
+    for h in range(n):
+        out[:, h * H:(h + 1) * H] = rope(x[:, h * H:(h + 1) * H], cos, sin)
+    return out
+
+
 # --- capture --------------------------------------------------------------------------------------
 
 def main() -> int:
@@ -133,6 +166,10 @@ def main() -> int:
     ap.add_argument("--head", type=int, default=0, help="query head; its GQA kv head is derived")
     ap.add_argument("--neuron0", type=int, default=0, help="first FFN neuron of the slice")
     ap.add_argument("--nf", type=int, default=64, help="FFN neurons (multiple of 32)")
+    ap.add_argument("--all-heads", action="store_true",
+                    help="keep EVERY attention head and the full q/k/v/o projections, so the\n"
+                         "result is the layer's real attention output and can be graded\n"
+                         "against the model's own forward pass. The MLP slice is unaffected.")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = ap.parse_args()
 
@@ -195,6 +232,7 @@ def main() -> int:
         layer.post_attention_layernorm.register_forward_pre_hook(pre("h_mid")),
         layer.register_forward_hook(post("h_out")),
         layer.self_attn.register_forward_pre_hook(pre_kw("rope"), with_kwargs=True),
+        layer.self_attn.register_forward_hook(post("attn_torch")),
         layer.input_layernorm.register_forward_hook(post("xn_attn_torch")),
         layer.post_attention_layernorm.register_forward_hook(post("xn_mlp_torch")),
         layer.mlp.gate_proj.register_forward_hook(post("gate_torch")),
@@ -216,16 +254,20 @@ def main() -> int:
     q0, n0, nf = args.head * H, args.neuron0, args.nf
     k0 = kv_head * H
     sa, mlp = layer.self_attn, layer.mlp
+    # --all-heads keeps every projection whole, so the attention output is the layer's real one.
+    # The MLP slice is untouched either way: `Wg`/`Wu`/`Wd` still cover `nf` neurons.
+    qsl = slice(None) if args.all_heads else slice(q0, q0 + H)
+    ksl = slice(None) if args.all_heads else slice(k0, k0 + H)
     t = {
         "h_pre": grab["h_pre"].numpy(),
         "h_mid": grab["h_mid"].numpy(),
         "h_out": grab["h_out"].numpy(),
         "w_in_ln": w(layer.input_layernorm),
         "w_post_ln": w(layer.post_attention_layernorm),
-        "Wq": np.ascontiguousarray(w(sa.q_proj)[q0:q0 + H, :].T),      # [D][H]
-        "Wk": np.ascontiguousarray(w(sa.k_proj)[k0:k0 + H, :].T),      # [D][H]
-        "Wv": np.ascontiguousarray(w(sa.v_proj)[k0:k0 + H, :].T),      # [D][H]
-        "Wo": np.ascontiguousarray(w(sa.o_proj)[:, q0:q0 + H].T),      # [H][D]
+        "Wq": np.ascontiguousarray(w(sa.q_proj)[qsl, :].T),            # [D][H] or [D][n_heads*H]
+        "Wk": np.ascontiguousarray(w(sa.k_proj)[ksl, :].T),            # [D][H] or [D][n_kv*H]
+        "Wv": np.ascontiguousarray(w(sa.v_proj)[ksl, :].T),            # [D][H] or [D][n_kv*H]
+        "Wo": np.ascontiguousarray(w(sa.o_proj)[:, qsl].T),            # [H][D] or [n_heads*H][D]
         "Wg": np.ascontiguousarray(w(mlp.gate_proj)[n0:n0 + nf, :].T),  # [D][F]
         "Wu": np.ascontiguousarray(w(mlp.up_proj)[n0:n0 + nf, :].T),    # [D][F]
         "Wd": np.ascontiguousarray(w(mlp.down_proj)[:, n0:n0 + nf].T),  # [F][D]
@@ -243,7 +285,33 @@ def main() -> int:
 
     eps = float(cfg.rms_norm_eps)
     t["ref_mlp"] = reference_mlp(t, eps)
-    t["ref_attn"] = reference_attn(t, eps)
+    nh, nkv = cfg.num_attention_heads, cfg.num_key_value_heads
+    t["ref_attn"] = (reference_attn_full(t, eps, nh, nkv) if args.all_heads
+                     else reference_attn(t, eps))
+
+    # THE gate for --all-heads, and the reason it is worth capturing: with every head present the
+    # reference IS the layer's attention output, which the forward pass exposes directly as
+    # h_mid - h_pre. A wrong head order, a wrong GQA mapping, or a transposed o_proj all produce
+    # plausible numbers and would survive every other check here; none of them survive this one.
+    if args.all_heads:
+        # Take the attention output from the module's OWN hook, not from h_mid - h_pre. The
+        # difference is mathematically the same quantity, but the residual stream is much larger
+        # than the attention output it carries, so differencing two bf16 values loses most of the
+        # precision to cancellation -- it reads ~2.4e-2 even when the computation is exactly right.
+        attn_torch = grab["attn_torch"].numpy() if "attn_torch" in grab else t["h_mid"] - t["h_pre"]
+        src = "self_attn's own output" if "attn_torch" in grab else "h_mid - h_pre (CANCELLING)"
+        t["attn_torch"] = attn_torch
+        rel = float(np.linalg.norm(t["ref_attn"] - attn_torch) / np.linalg.norm(attn_torch))
+        cancel = float(np.linalg.norm(t["h_pre"]) / np.linalg.norm(attn_torch))
+        print(f"[check] full MHA vs the model's own attention output ({src}): "
+              f"rel_fro = {rel:.3e}  (bf16 forward vs fp32 here, so ~1e-3 is expected)")
+        print(f"[check] residual/attention magnitude ratio {cancel:.1f}x -- that factor is what "
+              f"h_mid - h_pre would multiply the bf16 error by")
+        if rel > 0.02:
+            raise SystemExit(
+                f"full attention does not reproduce the model's own output (rel_fro {rel:.3e}). "
+                f"Suspect the head ordering, the GQA mapping (q head h -> kv head h//"
+                f"{nh // nkv}), or the o_proj [out][in] -> [in][out] transpose.")
 
     # ---- gates: the slicing and the transposes, which fail silently with plausible numbers ----
     xn = rmsnorm(t["h_mid"], t["w_post_ln"], eps)
@@ -260,13 +328,15 @@ def main() -> int:
                          "slicing or the [out][in] -> [in][out] transpose is wrong")
 
     meta = dict(model_id=args.model_id, layer=args.layer, seq=args.seq, tok0=args.tok0,
-                head=args.head, kv_head=kv_head, neuron0=n0, nf=nf, d_model=D, head_dim=H,
+                head=args.head, kv_head=kv_head, all_heads=int(args.all_heads),
+                neuron0=n0, nf=nf, d_model=D, head_dim=H,
                 n_heads=cfg.num_attention_heads, n_kv_heads=cfg.num_key_value_heads,
                 intermediate=cfg.intermediate_size, rms_eps=eps, rope_theta=_rope_theta(cfg),
                 token_ids=ids[0].cpu().numpy())
 
     args.out.mkdir(parents=True, exist_ok=True)
-    path = args.out / (f"layer{args.layer}_h{args.head}_n{n0}-{n0 + nf}"
+    tag = "allheads" if args.all_heads else f"h{args.head}"
+    path = args.out / (f"layer{args.layer}_{tag}_n{n0}-{n0 + nf}"
                        f"_s{args.seq}t{args.tok0}.npz")
     np.savez(path, **{k: v.astype(np.float32) for k, v in t.items()},
              **{f"meta_{k}": np.asarray(v) for k, v in meta.items()})
