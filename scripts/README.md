@@ -1,16 +1,39 @@
 # scripts — environment setup
 
-One script, and the four failures it exists to prevent. Everything here runs before any work does.
+Two scripts, and the four failures they exist to prevent. Everything here runs before any work does.
 
 | file | role |
 |---|---|
-| `env.sh` | sets `MERLIN_CHIPYARD`, `RISCV` and `PATH` from a chipyard checkout |
+| `setup.sh` | provisions everything a fresh clone needs (toolchain, sources, python env, MXQuant) |
+| `env.sh` | sets `MERLIN_CHIPYARD`, `RISCV` and `PATH` from a chipyard(-shaped) tree |
 
-## Using it
+## setup.sh
 
 ```bash
-source scripts/env.sh                      # uses the default chipyard location
-source scripts/env.sh /path/to/chipyard    # or point it at yours
+bash scripts/setup.sh                 # all phases, then the doctor
+bash scripts/setup.sh --check        # doctor only: PASS/FAIL per requirement
+bash scripts/setup.sh --phase <p>    # one phase (see table)
+```
+
+Idempotent: each phase checks its postcondition and skips when satisfied, so re-running after a
+failure resumes. The default root is `<repo>/toolchain`, a chipyard-*shaped* tree
+(`.conda-env/` + `generators/gemmini/`) that `env.sh` picks up with no arguments; `--root` swaps
+in any location, including a real chipyard checkout.
+
+| phase | provides | required by |
+|---|---|---|
+| `python` | `.venv` + `requirements.txt` installed | every `.venv/bin/python` command |
+| `mxquant` | `<repo>/MXQuant` clone (or symlink via `--mxquant <dir>`), `origin/chloe-branch-all` fetched | `app/mxq_golden.py` (import-time), `grade/mxquant_ref.py` |
+| `toolchain` | conda env with `spike`, `riscv64-unknown-elf-gcc`, `dtc` (binaries from the `ucb-bar` channel — no chipyard build) | the runner gate; spike shells out to `dtc` |
+| `gemmini` | `generators/gemmini` @ `gemmini-mx-cleanup` (override: `--gemmini-ref`), with `libgemmini` + `gemmini-rocc-tests` submodules | `config/build_spike.py`, the ELF harness |
+| `libgemmini` | stock `libgemmini.so`, built with the toolchain env's **own** g++ so its libstdc++ can never be newer than spike's | spike `--extlib` |
+| `ppa` | `../MxGemmini-workspace` clone (optional, `--no-ppa` skips; failures warn and continue) | `config/ppa.py` silicon-cost numbers |
+
+## env.sh
+
+```bash
+source scripts/env.sh                      # default: <repo>/toolchain (what setup.sh builds)
+source scripts/env.sh /path/to/chipyard    # or point it at a real chipyard tree
 ```
 
 Two things here cost real debugging time, which is why this is a script and not a line in a README:
