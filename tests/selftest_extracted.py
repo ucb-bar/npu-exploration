@@ -32,7 +32,13 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-ROCC = REPO.parent / "software" / "gemmini-rocc-tests"
+# The chipyard tree ($MERLIN_CHIPYARD) is the canonical reference; the old sibling
+# software/ layout stays as a fallback for checkouts that used it.
+from config.build_spike import gemmini_root  # noqa: E402
+
+ROCC = gemmini_root() / "software" / "gemmini-rocc-tests"
+if not ROCC.is_dir():
+    ROCC = REPO.parent / "software" / "gemmini-rocc-tests"
 
 #: every extracted module: (upstream file, our copy, entry points). Keep in step with the
 #: `tools/extract_model.py` invocations recorded in planning/merlin_glue_port_plan.md section 4.16.

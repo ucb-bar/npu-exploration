@@ -37,7 +37,13 @@ sys.path.insert(0, str(REPO))
 from app import mxformats, mxlut, mxwire            # noqa: E402
 from app.mxq_golden import requantize_chained       # noqa: E402
 
-LIBGEMMINI = REPO.parent / "software" / "libgemmini"
+# The chipyard tree ($MERLIN_CHIPYARD) is the canonical source of the header; the old
+# sibling software/ layout stays as a fallback for checkouts that used it.
+from config.build_spike import gemmini_root          # noqa: E402
+
+LIBGEMMINI = gemmini_root() / "software" / "libgemmini"
+if not (LIBGEMMINI / "mx_fp_math.h").exists():
+    LIBGEMMINI = REPO.parent / "software" / "libgemmini"
 SRC = Path(__file__).parent / "oracle" / "requant_oracle.cc"
 BIN = REPO / "out" / "requant_oracle"
 
