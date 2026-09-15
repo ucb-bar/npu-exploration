@@ -1,9 +1,11 @@
 # Runtime dependencies of the framework itself (see scripts/setup.sh, phase `python`).
 torch
 numpy
+# MXQuant's simulator (the bit-exact golden tier) imports these; without any one of them
+# grading silently falls back to the fp32 tier ("[mxquant] UNAVAILABLE -- No module named ...").
+qtorch
+transformers
+datasets
 
 # Tests.
 pytest
-
-# Optional -- only for rtl_exact/ LLM evaluations (perplexity runs on TinyLlama etc.):
-# transformers
