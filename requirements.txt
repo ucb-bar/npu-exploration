@@ -1,0 +1,9 @@
+# Runtime dependencies of the framework itself (see scripts/setup.sh, phase `python`).
+torch
+numpy
+
+# Tests.
+pytest
+
+# Optional -- only for rtl_exact/ LLM evaluations (perplexity runs on TinyLlama etc.):
+# transformers
