@@ -50,5 +50,11 @@ echo "RISCV=$RISCV"
 
 # Hardware sources AND toolchain both come from the chipyard tree -- there is no in-repo pin, so
 # the spike model and the spike that loads it cannot drift apart. Report which tree that is.
-_cy_head=$(git -C "$_cy/generators/gemmini" rev-parse --short HEAD 2>/dev/null)
-[ -n "$_cy_head" ] && echo "gemmini sources: $_cy/generators/gemmini @ $_cy_head"
+# (Read $MERLIN_CHIPYARD, not $_cy -- it was unset above, which also used to leak exit status 1
+# out of the [ -n ] short-circuit and break `source scripts/env.sh && ...` chains.)
+_cy_head=$(git -C "$MERLIN_CHIPYARD/generators/gemmini" rev-parse --short HEAD 2>/dev/null)
+if [ -n "$_cy_head" ]; then
+    echo "gemmini sources: $MERLIN_CHIPYARD/generators/gemmini @ $_cy_head"
+fi
+unset _cy_head
+true
