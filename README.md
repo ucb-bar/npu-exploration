@@ -19,9 +19,10 @@ source scripts/env.sh                       # sets MERLIN_CHIPYARD, RISCV, PATH
 
 `setup.sh` provisions, inside the clone: the python env (`.venv` + `requirements.txt`), the
 MXQuant checkout (`app/mxq_golden.py` imports it and nothing here works without it), the RISC-V
-toolchain (`spike`, `riscv64-unknown-elf-gcc`, `dtc` — binaries from the `ucb-bar` conda channel,
-no chipyard build needed), the gemmini hardware sources, and a stock `libgemmini.so` built with
-the toolchain's own g++. `bash scripts/setup.sh --check` prints PASS/FAIL for every requirement.
+toolchain (`riscv64-unknown-elf-gcc` and `dtc` from the `ucb-bar` conda channel, `spike` built
+from `riscv-isa-sim` source — no chipyard build needed), the gemmini hardware sources, and a stock
+`libgemmini.so` built with the toolchain's own g++. `bash scripts/setup.sh --check` prints
+PASS/FAIL for every requirement.
 Details, phases and troubleshooting: [`scripts/README.md`](scripts/README.md).
 
 Without SSH keys for GitHub, switch the merlin submodule to HTTPS first:

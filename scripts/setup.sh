@@ -4,7 +4,7 @@
 #   bash scripts/setup.sh                 # all phases, then the doctor
 #   bash scripts/setup.sh --check         # doctor only: PASS/FAIL per requirement
 #   bash scripts/setup.sh --phase <name>  # one phase: python mxquant toolchain
-#                                         #            gemmini libgemmini ppa
+#                                         #            spike gemmini libgemmini ppa
 #
 # Idempotent: every phase checks its postcondition first and skips if satisfied,
 # so re-running after a failure resumes where it left off.
@@ -13,8 +13,11 @@
 #   python     .venv + requirements.txt        (every documented .venv/bin/python command)
 #   mxquant    <repo>/MXQuant checkout          (app/mxq_golden.py imports it at load time;
 #                                                grade/mxquant_ref.py needs origin/chloe-branch-all)
-#   toolchain  <root>/.conda-env with spike, riscv64-unknown-elf-gcc, dtc
+#   toolchain  <root>/.conda-env with riscv64-unknown-elf-gcc, dtc, and a host g++
 #                                               (runner.py gate; spike shells out to dtc)
+#   spike      riscv-isa-sim built from source into <root>/.conda-env/riscv-tools
+#              (the ucb-bar conda riscv-tools package is the GNU toolchain ONLY --
+#               spike is not packaged anywhere; chipyard builds it from source too)
 #   gemmini    <root>/generators/gemmini        (config/build_spike.py patches its libgemmini
 #                                                sources; runner.py needs gemmini-rocc-tests)
 #   libgemmini stock libgemmini.so, built with the toolchain env's OWN g++ so its
@@ -35,8 +38,11 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # (and app/mxq_golden.py is refactored to call only it) -- that swap is this line.
 MXQUANT_URL="git@github.com:chooper1/MXQuant.git"
 MXQUANT_BRANCH="chloe-branch-all"    # grade/mxquant_ref.py extracts files from origin/<this>
-GEMMINI_URL="git@github.com:ucb-bar/gemmini.git"
+# Public repos over HTTPS so no SSH keys are needed for them.
+GEMMINI_URL="https://github.com/ucb-bar/gemmini.git"
 GEMMINI_REF="gemmini-mx-cleanup"
+SPIKE_URL="https://github.com/riscv-software-src/riscv-isa-sim.git"
+SPIKE_REF="master"    # version string 1.1.1-dev, same lineage the orcd flow validated
 PPA_URL="git@github.com:Rakanic/MxGemmini-workspace.git"
 CONDA_CHANNELS=(--override-channels -c ucb-bar -c conda-forge)
 TOOLCHAIN_PKGS=(riscv-tools dtc "gxx_linux-64=12")
@@ -55,6 +61,7 @@ while [ $# -gt 0 ]; do
         --root)        ROOT="$2"; shift 2 ;;
         --mxquant)     MXQUANT_SRC="$2"; shift 2 ;;
         --gemmini-ref) GEMMINI_REF="$2"; shift 2 ;;
+        --spike-ref)   SPIKE_REF="$2"; shift 2 ;;
         --no-ppa)      NO_PPA=1; shift ;;
         --phase)       ONLY_PHASE="$2"; shift 2 ;;
         --check)       CHECK_ONLY=1; shift ;;
@@ -85,8 +92,9 @@ MERLIN_CHIPYARD) at a full chipyard checkout built with its build-setup.sh."
 have_python()     { "$REPO/.venv/bin/python" -c 'import torch, numpy' >/dev/null 2>&1; }
 have_mxquant()    { [ -e "$REPO/MXQuant/prodacc_bundle" ]; }
 have_mxq_branch() { git -C "$REPO/MXQuant" rev-parse --verify -q "origin/$MXQUANT_BRANCH" >/dev/null 2>&1; }
-have_toolchain()  { [ -x "$RISCV_DIR/bin/spike" ] && [ -x "$RISCV_DIR/bin/riscv64-unknown-elf-gcc" ] \
-                    && [ -x "$ROOT/.conda-env/bin/dtc" ]; }
+have_toolchain()  { [ -x "$RISCV_DIR/bin/riscv64-unknown-elf-gcc" ] \
+                    && [ -x "$ROOT/.conda-env/bin/dtc" ] && [ -x "$CONDA_GXX" ]; }
+have_spike()      { [ -x "$RISCV_DIR/bin/spike" ] && [ -f "$RISCV_DIR/include/riscv/mmu.h" ]; }
 have_gemmini()    { [ -f "$LIBGEMMINI_DIR/gemmini.cc" ] && [ -f "$LIBGEMMINI_DIR/mx_fp_math.h" ] \
                     && [ -d "$GEMMINI_DIR/software/gemmini-rocc-tests/bareMetalC" ]; }
 have_merlin()     { [ -e "$REPO/merlin/merlin/python" ]; }
@@ -148,8 +156,29 @@ phase_toolchain() {
         conda create  -y -p "$ROOT/.conda-env" "${CONDA_CHANNELS[@]}" "${TOOLCHAIN_PKGS[@]}"
     fi
     have_toolchain || die toolchain \
-        "install finished but spike/riscv64-unknown-elf-gcc/dtc are not where env.sh expects \
+        "install finished but riscv64-unknown-elf-gcc/dtc/g++ are not where env.sh expects \
 (under $ROOT/.conda-env). Check the conda output above."
+}
+
+phase_spike() {
+    if have_spike; then skip spike; return; fi
+    have_toolchain || die spike "toolchain missing -- run the toolchain phase first"
+    local src="$ROOT/riscv-isa-sim"
+    if [ ! -d "$src/.git" ]; then
+        say spike "cloning $SPIKE_URL @ $SPIKE_REF"
+        git clone -b "$SPIKE_REF" "$SPIKE_URL" "$src"
+    fi
+    say spike "building spike from source into $RISCV_DIR ($(git -C "$src" rev-parse --short HEAD))"
+    # Build with the env's own compilers and rpath its lib, so spike is self-contained
+    # and its DT_RPATH libstdc++ is the same one libgemmini builds link against.
+    mkdir -p "$src/build"
+    (cd "$src/build" && \
+        PATH="$ROOT/.conda-env/bin:$PATH" \
+        CC="$ROOT/.conda-env/bin/x86_64-conda-linux-gnu-gcc" CXX="$CONDA_GXX" \
+        LDFLAGS="-Wl,-rpath,$ROOT/.conda-env/lib -L$ROOT/.conda-env/lib" \
+        ../configure --prefix="$RISCV_DIR" && \
+        make -j"$(nproc)" && make install)
+    have_spike || die spike "build finished but $RISCV_DIR/bin/spike or its headers are missing"
 }
 
 phase_gemmini() {
@@ -168,8 +197,8 @@ phase_gemmini() {
 
 phase_libgemmini() {
     if have_libgemmini; then skip libgemmini; return; fi
-    have_gemmini   || die libgemmini "gemmini sources missing -- run the gemmini phase first"
-    have_toolchain || die libgemmini "toolchain missing -- run the toolchain phase first"
+    have_gemmini || die libgemmini "gemmini sources missing -- run the gemmini phase first"
+    have_spike   || die libgemmini "spike missing (its headers are needed) -- run the spike phase first"
     # Build with the toolchain env's own g++: spike and this .so then share one
     # libstdc++, so the DT_RPATH/GLIBCXX dlopen failure cannot happen by construction.
     local gxx="${MX_HOST_GXX:-$CONDA_GXX}"
@@ -229,7 +258,7 @@ doctor() {
         echo "    .venv/bin/python run_kernel.py --kernel linear --config baseline"
     else
         echo "FAIL above. Re-run 'bash scripts/setup.sh' (idempotent) or the named phase:"
-        echo "    bash scripts/setup.sh --phase <python|mxquant|toolchain|gemmini|libgemmini|ppa>"
+        echo "    bash scripts/setup.sh --phase <python|mxquant|toolchain|spike|gemmini|libgemmini|ppa>"
         return 1
     fi
 }
@@ -240,7 +269,7 @@ if [ "$CHECK_ONLY" = 1 ]; then doctor; exit $?; fi
 
 if [ -n "$ONLY_PHASE" ]; then
     case "$ONLY_PHASE" in
-        python|mxquant|toolchain|gemmini|libgemmini|ppa|merlin) "phase_$ONLY_PHASE" ;;
+        python|mxquant|toolchain|spike|gemmini|libgemmini|ppa|merlin) "phase_$ONLY_PHASE" ;;
         *) die setup "unknown phase: $ONLY_PHASE" ;;
     esac
     exit 0
@@ -250,6 +279,7 @@ phase_merlin
 phase_python
 phase_mxquant
 phase_toolchain
+phase_spike
 phase_gemmini
 phase_libgemmini
 phase_ppa
