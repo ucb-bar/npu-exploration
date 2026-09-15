@@ -105,6 +105,12 @@ def main() -> int:
         print(f"\nVERDICT  {ok}  "
               f"(tier={m['tier']}, rel_fro={m['accuracy_vs_fp32_reference']['rel_fro']:.4%}, "
               f"tol={a.tol:.2%}, cycles={m['total_cycles']})")
+    ppa = m.get("ppa")
+    if ppa:
+        print(f"PPA      {ppa['area_um2']/1e3:.1f}k um2   {ppa['power_mw']:.1f} mW   "
+              f"{ppa['pj_per_op']:.2f} pJ/op   "
+              f"(post-syn {ppa['model']['tech']} model, "
+              f"calibrated={ppa['model']['calibrated']})")
     print(f"RESULTS  {res['run_dir']}")
     return 0 if m["pass"] else 1
 
