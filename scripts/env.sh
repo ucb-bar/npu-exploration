@@ -4,13 +4,20 @@
 # Sets MERLIN_CHIPYARD, RISCV and PATH. Chipyard's own env.sh only activates
 # conda -- it does NOT set $RISCV -- so setting it here is required, not optional.
 # Override the tree by passing a path or pre-setting MERLIN_CHIPYARD.
+#
+# Default: <repo>/toolchain, the chipyard-shaped tree scripts/setup.sh builds
+# (.conda-env/ + generators/gemmini/). A real chipyard checkout works the same way.
 
-_cy="${1:-${MERLIN_CHIPYARD:-$HOME/orcd/scratch/npu-exploration/chipyard-graphics}}"
+_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+_cy="${1:-${MERLIN_CHIPYARD:-$_here/../toolchain}}"
 
 if [ ! -d "$_cy" ]; then
     echo "env.sh: chipyard tree not found: $_cy" >&2
+    echo "        run 'bash scripts/setup.sh' first, or pass a chipyard root:" >&2
+    echo "        source scripts/env.sh /path/to/chipyard" >&2
     return 1 2>/dev/null || exit 1
 fi
+_cy="$(cd "$_cy" && pwd)"
 
 export MERLIN_CHIPYARD="$_cy"
 export RISCV="$_cy/.conda-env/riscv-tools"
@@ -36,7 +43,7 @@ if [ -f "$_lg/libgemmini.so" ]; then
 else
     echo "env.sh: WARNING libgemmini.so not built -- (cd $_lg && make)" >&2
 fi
-unset _cy _b _lg _src
+unset _cy _b _lg _src _here
 
 echo "MERLIN_CHIPYARD=$MERLIN_CHIPYARD"
 echo "RISCV=$RISCV"
