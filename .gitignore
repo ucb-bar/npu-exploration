@@ -11,3 +11,8 @@ results/
 ENGAGING_NOTES.md
 PLAN.md
 parked/
+
+# Generated kernel data: regenerate with `make -C baremetal/mxgemmini data`.
+# ~22 MB of derived bytes, and tracking them is how llama_attn.h sat stale through a
+# rounding-mode change while every test still passed (planning/llama_layer_hw_plan.md 9.1).
+baremetal/*/data/

@@ -65,16 +65,56 @@
 #define SPAD_STORE 0x38 // loop_ws skips: keep the full-width store into the internal scratchpad
 
 #define SPAD_TOP (BANK_NUM * BANK_ROWS)
-#define SPAD_A       0
-#define SPAD_G    4096
-#define SPAD_U    4352
-#define SPAD_B3    512
-#define SPAD_B3_ARG 4608
-#define SPAD_Y0   4608
-#define SPAD_Y1   8704
 
-#define NCHUNK  (LLAMA_D / 2)          // down_proj output columns per pass
+// Scratchpad rows an [m][n] operand occupies: one 16-byte row per DIM elements, FP8 one byte per
+// element and a BF16 output two.
+#define ROWS8(m, n)  ((m) * (n) / DIM)
+#define ROWS16(m, n) ((m) * (n) * 2 / DIM)
+
+// ---- the projections, [M,D] x [D,F] -> BF16 -------------------------------------------------
+// Xn (A) and the weight tile (B) have to be resident together, and at D = 2048 that is 4096 + 8192
+// rows -- more than a 128 KB scratchpad holds at all, so no placement fixes it. The D-deep
+// contraction is SPLIT instead: each K-tile is its own matmul accumulating into the same output
+// region, the first overwriting and the rest adding. That is exactly what loop_ws's ex_accumulate
+// bit is for, and it only became usable once the MX path stopped discarding rs1 (see
+// planning/llama_layer_hw_plan.md 10.3). Take the largest tile that fits; at 16384 rows that is
+// the whole of D and the loop runs once, so the schedule is unchanged on the big config.
+#define P_COST(kt) (ROWS8(LLAMA_M, (kt)) + ROWS8((kt), LLAMA_F) + ROWS16(LLAMA_M, LLAMA_F))
+#define KTILE  (P_COST(LLAMA_D) <= SPAD_TOP ? LLAMA_D : \
+                P_COST(1024)    <= SPAD_TOP ? 1024    : \
+                P_COST(512)     <= SPAD_TOP ? 512     : \
+                P_COST(256)     <= SPAD_TOP ? 256     : 128)
+#define KTILES (LLAMA_D / KTILE)
+#define KGRP   (KTILE / 32)                 // E8M0 scale groups spanned by one K-tile
+
+#define SPAD_XN     0
+#define SPAD_WB     (SPAD_XN + ROWS8(LLAMA_M, KTILE))
+#define SPAD_WB_ARG (SPAD_WB + ROWS8(KTILE, LLAMA_F))
+#define SPAD_GU     SPAD_WB_ARG             // one region: G is drained before U overwrites it
+
+// ---- down_proj, [M,F] x [F,Dc] -> BF16 ------------------------------------------------------
+// One output region, reused by every chunk -- each chunk overwrites and is drained immediately, so
+// the chunks no longer need to be disjoint the way they did when every matmul accumulated.
+#define Y_COST(dc) (ROWS8(LLAMA_M, LLAMA_F) + ROWS8(LLAMA_F, (dc)) + ROWS16(LLAMA_M, (dc)))
+#define NCHUNK (Y_COST(LLAMA_D) <= SPAD_TOP ? LLAMA_D : \
+                Y_COST(1024)    <= SPAD_TOP ? 1024    : \
+                Y_COST(512)     <= SPAD_TOP ? 512     : \
+                Y_COST(256)     <= SPAD_TOP ? 256     : 128)
 #define NCHUNKS (LLAMA_D / NCHUNK)
+
+#define SPAD_H      0
+#define SPAD_WD     (SPAD_H + ROWS8(LLAMA_M, LLAMA_F))
+#define SPAD_WD_ARG (SPAD_WD + ROWS8(LLAMA_F, NCHUNK))
+#define SPAD_Y      SPAD_WD_ARG
+
+// Checked at COMPILE time: a region that runs off the end, or into a still-live one, aliases
+// silently and yields plausible-but-wrong numbers rather than an error.
+#define LLAMA_REQUIRE(name, cond) typedef char llama_spad_##name[(cond) ? 1 : -1]
+LLAMA_REQUIRE(ktile_divides_d,  KTILE * KTILES == LLAMA_D);
+LLAMA_REQUIRE(ktile_is_blocked, (KTILE % 32) == 0);
+LLAMA_REQUIRE(proj_fits,        SPAD_GU + ROWS16(LLAMA_M, LLAMA_F) <= SPAD_TOP);
+LLAMA_REQUIRE(nchunk_divides_d, NCHUNK * NCHUNKS == LLAMA_D);
+LLAMA_REQUIRE(down_fits,        SPAD_Y + ROWS16(LLAMA_M, NCHUNK) <= SPAD_TOP);
 
 // ---- host buffers ----
 static float    xn_f[LLAMA_M * LLAMA_D];
@@ -90,14 +130,20 @@ static uint16_t Ychunk[LLAMA_M * NCHUNK];
 static uint16_t Y_hw[LLAMA_M * LLAMA_D];
 static uint16_t OUT_hw[LLAMA_M * LLAMA_D];
 
-// mvin A[M][K] as tiles: tile (i,k) -> a_spad + (i*tiles_K + k)*DIM, row stride K.
-static void mvin_A(const uint8_t *A, int M, int K, uint32_t a_spad) {
-  gemmini_config_ld(K * sizeof(uint8_t));
+// mvin A[M][K] as tiles: tile (i,k) -> a_spad + (i*tiles_K + k)*DIM. `stride` is the SOURCE row
+// pitch, which differs from K when the tile is a column slice of a wider array -- that is how a
+// K-tile of Xn[M][D] is moved in without copying it out first.
+static void mvin_A_strided(const uint8_t *A, int M, int K, int stride, uint32_t a_spad) {
+  gemmini_config_ld(stride * sizeof(uint8_t));
   int tiles_I = M / DIM, tiles_K = K / DIM;
   for (int i = 0; i < tiles_I; i++)
     for (int k = 0; k < tiles_K; k++)
-      gemmini_extended_mvin((void *) (A + (size_t) i * DIM * K + (size_t) k * DIM),
+      gemmini_extended_mvin((void *) (A + (size_t) i * DIM * stride + (size_t) k * DIM),
                             a_spad + (i * tiles_K + k) * DIM, DIM, DIM);
+}
+
+static void mvin_A(const uint8_t *A, int M, int K, uint32_t a_spad) {
+  mvin_A_strided(A, M, K, K, a_spad);
 }
 
 // mvin B[K][N_full], columns [n0, n0+N): tile (k,j) -> b_spad + (k*tiles_J + j)*DIM, row stride
@@ -123,7 +169,10 @@ static void mvout_bf16(uint16_t *dst, uint32_t spad, int M, int N) {
 }
 
 // One mesh matmul, BF16 out: A already resident at a_spad, B already resident under b_arg.
-static void mesh_matmul(int M, int K, int N, uint32_t a_spad, uint32_t b_arg, uint32_t c_spad) {
+// `accum` is loop_ws's ex_accumulate (rs1 bit 0): 0 OVERWRITES the output region, 1 adds into it.
+// Only a K-tile after the first wants 1.
+static void mesh_matmul(int M, int K, int N, uint32_t a_spad, uint32_t b_arg, uint32_t c_spad,
+                        int accum) {
   static uint32_t scale_sink[512] __attribute__((aligned(32)));
   int I = M / DIM, J = N / DIM, Kt = K / DIM;
   gemmini_config_st(N * sizeof(uint16_t));
@@ -135,12 +184,30 @@ static void mesh_matmul(int M, int K, int N, uint32_t a_spad, uint32_t b_arg, ui
                        0,
                        c_spad,
                        false, false,
-                       false, false, false,
+                       false, false, accum,
                        NO_ACTIVATION,
                        0, 0,
                        false,
                        SPAD_STORE);
   gemmini_fence();
+}
+
+// One [M,D] x [D,F] projection, K-tiled. Tile t contributes Xn[:, t*KTILE ..] @ W[t*KTILE .., :]
+// into SPAD_GU: the first overwrites, the rest accumulate, so after the loop the region holds the
+// full D-deep reduction. Both scale windows take a CONTIGUOUS slice -- the A window is [GD][M] and
+// the B window [GD][F], so a K-tile is whole rows of each, no gather needed.
+static void projection(const uint8_t *w_codes, const uint8_t *w_scales, uint16_t *dst) {
+  for (int t = 0; t < KTILES; t++) {
+    mvin_A_strided(xn_codes + (size_t) t * KTILE, LLAMA_M, KTILE, LLAMA_D, SPAD_XN);
+    gemmini_mx_load_scales((uint64_t) (xn_scales + (size_t) t * KGRP * LLAMA_M),
+                           KGRP * LLAMA_M, 0);
+    gemmini_mx_load_scales((uint64_t) (w_scales + (size_t) t * KGRP * LLAMA_F),
+                           KGRP * LLAMA_F, 1);
+    gemmini_fence();
+    mvin_B(w_codes + (size_t) t * KTILE * LLAMA_F, KTILE, LLAMA_F, 0, LLAMA_F, SPAD_WB);
+    mesh_matmul(LLAMA_M, KTILE, LLAMA_F, SPAD_XN, SPAD_WB_ARG, SPAD_GU, t > 0);
+  }
+  mvout_bf16(dst, SPAD_GU, LLAMA_M, LLAMA_F);
 }
 
 // riscv-tests' own handle_trap is weak and exits 1337 with no cause, which is indistinguishable
@@ -160,6 +227,8 @@ int main() {
 #endif
   printf("llama MLP: M=%d D=%d F=%d  (real TinyLlama layer, fp8 e4m3 + E8M0)\n",
          LLAMA_M, LLAMA_D, LLAMA_F);
+  printf("plan  spad %d rows: proj %d K-tile(s) of %d | down_proj %d chunk(s) of %d\n",
+         SPAD_TOP, KTILES, KTILE, NCHUNKS, NCHUNK);
 
   gemmini_flush(0);
   gemmini_extended3_config_ex(WEIGHT_STATIONARY, 0, 0, ACC_SCALE_IDENTITY, 1, 1, 0, 0, false,
@@ -180,22 +249,9 @@ int main() {
 
   // ================= mesh stages 1 and 2: gate_proj and up_proj =================
   t0 = read_cycles();
-  mvin_A(xn_codes, LLAMA_M, LLAMA_D, SPAD_A);
-  gemmini_mx_load_scales((uint64_t) xn_scales, sizeof(xn_scales), 0);
-  gemmini_mx_load_scales((uint64_t) &WG_SCALES_COL, sizeof(WG_SCALES_COL), 1);
-  gemmini_fence();
-  mvin_B((const uint8_t *) WG_IN, LLAMA_D, LLAMA_F, 0, LLAMA_F, SPAD_TOP - LLAMA_D * LLAMA_F / DIM);
-  mesh_matmul(LLAMA_M, LLAMA_D, LLAMA_F, SPAD_A, SPAD_TOP, SPAD_G);
+  projection((const uint8_t *) WG_IN, (const uint8_t *) WG_SCALES_COL, G_hw);
+  projection((const uint8_t *) WU_IN, (const uint8_t *) WU_SCALES_COL, U_hw);
   t_mesh += read_cycles() - t0;
-  mvout_bf16(G_hw, SPAD_G, LLAMA_M, LLAMA_F);
-
-  t0 = read_cycles();
-  gemmini_mx_load_scales((uint64_t) &WU_SCALES_COL, sizeof(WU_SCALES_COL), 1);
-  gemmini_fence();
-  mvin_B((const uint8_t *) WU_IN, LLAMA_D, LLAMA_F, 0, LLAMA_F, SPAD_TOP - LLAMA_D * LLAMA_F / DIM);
-  mesh_matmul(LLAMA_M, LLAMA_D, LLAMA_F, SPAD_A, SPAD_TOP, SPAD_U);
-  t_mesh += read_cycles() - t0;
-  mvout_bf16(U_hw, SPAD_U, LLAMA_M, LLAMA_F);
 
   int g_d = mx_count_diff_u16(G_hw, (const uint16_t *) G_OUT_BF16, LLAMA_M * LLAMA_F);
   int u_d = mx_count_diff_u16(U_hw, (const uint16_t *) U_OUT_BF16, LLAMA_M * LLAMA_F);
@@ -215,12 +271,11 @@ int main() {
 
   // ================= mesh stage 4: down_proj, in N-chunks =================
   t0 = read_cycles();
-  mvin_A(h_codes, LLAMA_M, LLAMA_F, SPAD_A);
+  mvin_A(h_codes, LLAMA_M, LLAMA_F, SPAD_H);
   gemmini_mx_load_scales((uint64_t) h_scales, sizeof(h_scales), 0);
   gemmini_fence();
   t_mesh += read_cycles() - t0;
 
-  const uint32_t y_spad[NCHUNKS] = { SPAD_Y0, SPAD_Y1 };
   for (int c = 0; c < NCHUNKS; c++) {
     // The B-side scale window is indexed b_off = group * (this pass's N) + col, so it needs the
     // chunk's columns packed contiguously rather than a stride into the [GF][D] array.
@@ -230,11 +285,11 @@ int main() {
     t0 = read_cycles();
     gemmini_mx_load_scales((uint64_t) wd_scales_chunk, sizeof(wd_scales_chunk), 1);
     gemmini_fence();
-    mvin_B((const uint8_t *) WD_IN, LLAMA_F, LLAMA_D, c * NCHUNK, NCHUNK, SPAD_B3);
-    mesh_matmul(LLAMA_M, LLAMA_F, NCHUNK, SPAD_A, SPAD_B3_ARG, y_spad[c]);
+    mvin_B((const uint8_t *) WD_IN, LLAMA_F, LLAMA_D, c * NCHUNK, NCHUNK, SPAD_WD);
+    mesh_matmul(LLAMA_M, LLAMA_F, NCHUNK, SPAD_H, SPAD_WD_ARG, SPAD_Y, 0);
     t_mesh += read_cycles() - t0;
 
-    mvout_bf16(Ychunk, y_spad[c], LLAMA_M, NCHUNK);
+    mvout_bf16(Ychunk, SPAD_Y, LLAMA_M, NCHUNK);
     for (int m = 0; m < LLAMA_M; m++)
       memcpy(&Y_hw[(size_t) m * LLAMA_D + c * NCHUNK], &Ychunk[(size_t) m * NCHUNK],
              NCHUNK * sizeof(uint16_t));

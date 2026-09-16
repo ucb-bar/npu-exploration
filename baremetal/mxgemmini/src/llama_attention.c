@@ -87,44 +87,67 @@
 
 #define SPAD_TOP  (BANK_NUM * BANK_ROWS)
 
-// Scratchpad rows an [m][n] operand occupies: one 16-byte row per DIM elements. FP8 codes are one
-// byte each; a BF16 output is two, so it costs twice the rows.
+// Scratchpad rows an [m][n] operand occupies: one 16-byte row per DIM elements. fp8 codes are one
+// byte per element, a BF16 output two.
 #define ROWS8(m, n)  ((m) * (n) / DIM)
 #define ROWS16(m, n) ((m) * (n) * 2 / DIM)
 
-// o_proj is emitted in N-chunks because [M,H]x[H,D] un-chunked needs 16512 rows at the full D, 128
-// over the 16384 available (planning/llama_layer_hw_plan.md section 3).
-#define NCHUNKS 2
-#define NCHUNK  (LLAMA_D / NCHUNKS)
+// ---- phase 1: Q, K, V = Xn @ Wq/Wk/Wv, [M,D] x [D,H] -> BF16 --------------------------------
+// Xn (A) and the weight tile (B) must be resident together; at D = 2048 that is 4096 + 8192 rows,
+// more than a 128 KB scratchpad holds at all, so no placement fixes it. The D-deep contraction is
+// SPLIT into K-tiles that accumulate into one output region (ex_accumulate = 0 on the first, 1
+// after) -- which only became usable once the MX path stopped discarding rs1 (see
+// planning/llama_layer_hw_plan.md 10.3). At 16384 rows the largest tile is all of D and the loop
+// runs once, so the big-config schedule is unchanged.
+#define P_COST(kt) (ROWS8(LLAMA_M, (kt)) + ROWS8((kt), LLAMA_H) + ROWS16(LLAMA_M, LLAMA_H))
+#define KTILE  (P_COST(LLAMA_D) <= SPAD_TOP ? LLAMA_D : \
+                P_COST(1024)    <= SPAD_TOP ? 1024    : \
+                P_COST(512)     <= SPAD_TOP ? 512     : \
+                P_COST(256)     <= SPAD_TOP ? 256     : 128)
+#define KTILES (LLAMA_D / KTILE)
+#define KGRP   (KTILE / 32)                  // E8M0 scale groups spanned by one K-tile
 
-// A `_ARG` address is the row just PAST its B tile: that is what gemmini_loop_ws_spad takes as its B
-// argument, since the loop walks the B tiles backwards from there.
-#define SPAD_A         0                                        // Xn [M][D], fp8, resident for Q/K/V
-#define SPAD_Q         (SPAD_A + ROWS8(LLAMA_M, LLAMA_D))
-#define SPAD_K         (SPAD_Q + ROWS16(LLAMA_M, LLAMA_H))
-#define SPAD_V         (SPAD_K + ROWS16(LLAMA_M, LLAMA_H))
-#define SPAD_QKV_B     (SPAD_TOP - ROWS8(LLAMA_D, LLAMA_H))     // B tiles live at the top
-#define SPAD_QKV_B_ARG SPAD_TOP
-#define SPAD_KT        (SPAD_V + ROWS16(LLAMA_M, LLAMA_H))
-#define SPAD_KT_ARG    (SPAD_KT + ROWS8(LLAMA_H, LLAMA_M))
-#define SPAD_S         SPAD_KT_ARG
-#define SPAD_VB        (SPAD_S + ROWS16(LLAMA_M, LLAMA_M))
-#define SPAD_VB_ARG    (SPAD_VB + ROWS8(LLAMA_M, LLAMA_H))
-#define SPAD_O         SPAD_VB_ARG                              // LIVE through o_proj: its A operand
-#define SPAD_WO        SPAD_A                                   // on the dead Xn rows
-#define SPAD_WO_ARG    (SPAD_WO + ROWS8(LLAMA_H, NCHUNK))
-#define SPAD_Y0        (SPAD_O + ROWS8(LLAMA_M, LLAMA_H))
-#define SPAD_Y1        (SPAD_Y0 + ROWS16(LLAMA_M, NCHUNK))
+// A `_ARG` address is the row just PAST its B tile: that is what gemmini_loop_ws_spad takes as its
+// B argument, since the loop walks the B tiles backwards from there.
+#define SPAD_XN      0
+#define SPAD_PB      (SPAD_XN + ROWS8(LLAMA_M, KTILE))
+#define SPAD_PB_ARG  (SPAD_PB + ROWS8(KTILE, LLAMA_H))
+#define SPAD_QKV     SPAD_PB_ARG             // one region: Q, then K, then V, each drained
 
-// The three live-range constraints, checked at COMPILE time so a header with an unworkable D fails
-// the build instead of producing silently overlapped regions. A negative array size is the C99 way.
+// ---- phases 2-4: scores, softmax product, o_proj --------------------------------------------
+// O is the one value that stays LIVE across a later matmul -- o_proj reads it in place as its A
+// operand, with the E8M0 bytes the requantizer wrote into the act-scale window. So O sits at row 0
+// and everything else is placed above it; the S/P/V working regions are dead by the time o_proj
+// starts, which is why SPAD_WO may reuse their rows.
+#define SPAD_O       0                                       // LIVE through o_proj
+#define SPAD_QA      (SPAD_O  + ROWS8(LLAMA_M, LLAMA_H))
+#define SPAD_KT      (SPAD_QA + ROWS8(LLAMA_M, LLAMA_H))
+#define SPAD_KT_ARG  (SPAD_KT + ROWS8(LLAMA_H, LLAMA_M))
+#define SPAD_S       SPAD_KT_ARG
+#define SPAD_PA      (SPAD_S  + ROWS16(LLAMA_M, LLAMA_M))
+#define SPAD_VB      (SPAD_PA + ROWS8(LLAMA_M, LLAMA_M))
+#define SPAD_VB_ARG  (SPAD_VB + ROWS8(LLAMA_M, LLAMA_H))
+
+// o_proj is N-chunked, one output region reused: each chunk overwrites and is drained immediately.
+#define Y_COST(dc) (ROWS8(LLAMA_M, LLAMA_H) + ROWS8(LLAMA_H, (dc)) + ROWS16(LLAMA_M, (dc)))
+#define NCHUNK (Y_COST(LLAMA_D) <= SPAD_TOP ? LLAMA_D : \
+                Y_COST(1024)    <= SPAD_TOP ? 1024    : \
+                Y_COST(512)     <= SPAD_TOP ? 512     : \
+                Y_COST(256)     <= SPAD_TOP ? 256     : 128)
+#define NCHUNKS (LLAMA_D / NCHUNK)
+#define SPAD_WO      (SPAD_O + ROWS8(LLAMA_M, LLAMA_H))      // on the dead S/P/V rows
+#define SPAD_WO_ARG  (SPAD_WO + ROWS8(LLAMA_H, NCHUNK))
+#define SPAD_Y       SPAD_WO_ARG
+
+// Checked at COMPILE time, because an overflowing region aliases silently and produces plausible
+// numbers. Each names a live range, not just a bound.
 #define LLAMA_SPAD_REQUIRE(name, cond) typedef char llama_spad_##name[(cond) ? 1 : -1]
-//   1. Q/K/V outputs must not reach the B window that is live while they are written.
-LLAMA_SPAD_REQUIRE(qkv_clear_of_b, SPAD_V + ROWS16(LLAMA_M, LLAMA_H) <= SPAD_QKV_B);
-//   2. Wo's B tile lands on the dead Xn rows and must stop short of O, which is still live.
-LLAMA_SPAD_REQUIRE(wo_clear_of_o, SPAD_WO_ARG <= SPAD_O);
-//   3. Both Y chunks must fit under the top of the scratchpad.
-LLAMA_SPAD_REQUIRE(y_fits, SPAD_Y1 + ROWS16(LLAMA_M, NCHUNK) <= SPAD_TOP);
+LLAMA_SPAD_REQUIRE(ktile_divides_d,  KTILE * KTILES == LLAMA_D);
+LLAMA_SPAD_REQUIRE(ktile_is_blocked, (KTILE % 32) == 0);
+LLAMA_SPAD_REQUIRE(proj_fits,        SPAD_QKV + ROWS16(LLAMA_M, LLAMA_H) <= SPAD_TOP);
+LLAMA_SPAD_REQUIRE(attn_fits,        SPAD_VB_ARG <= SPAD_TOP);
+LLAMA_SPAD_REQUIRE(nchunk_divides_d, NCHUNK * NCHUNKS == LLAMA_D);
+LLAMA_SPAD_REQUIRE(oproj_fits,       SPAD_Y + ROWS16(LLAMA_M, NCHUNK) <= SPAD_TOP);
 
 static float    xn_f[LLAMA_M * LLAMA_D];
 static uint8_t  xn_codes[LLAMA_M * LLAMA_D];
@@ -153,13 +176,19 @@ uintptr_t handle_trap(uintptr_t cause, uintptr_t epc, uintptr_t regs[32]) {
   return 0;
 }
 
-static void mvin_A(const uint8_t *A, int M, int K, uint32_t a_spad) {
-  gemmini_config_ld(K * sizeof(uint8_t));
+// `stride` is the SOURCE row pitch, which differs from K when the tile is a column slice of a
+// wider array -- that is how a K-tile of Xn[M][D] moves in without being copied out first.
+static void mvin_A_strided(const uint8_t *A, int M, int K, int stride, uint32_t a_spad) {
+  gemmini_config_ld(stride * sizeof(uint8_t));
   int tiles_I = M / DIM, tiles_K = K / DIM;
   for (int i = 0; i < tiles_I; i++)
     for (int k = 0; k < tiles_K; k++)
-      gemmini_extended_mvin((void *) (A + (size_t) i * DIM * K + (size_t) k * DIM),
+      gemmini_extended_mvin((void *) (A + (size_t) i * DIM * stride + (size_t) k * DIM),
                             a_spad + (i * tiles_K + k) * DIM, DIM, DIM);
+}
+
+static void mvin_A(const uint8_t *A, int M, int K, uint32_t a_spad) {
+  mvin_A_strided(A, M, K, K, a_spad);
 }
 
 static void mvin_B(const uint8_t *B, int K, int N_full, int n0, int N, uint32_t b_spad) {
@@ -201,8 +230,10 @@ static void mvout_detile(uint8_t *dst, uint32_t spad, int M, int N) {
 // One mesh matmul. `out_fmt` picks BF16 (drained by the host) or FP8 requant; `resident` routes the
 // requantizer's block scales into the act-scale window as well as to DRAM, and `tiled` deposits the
 // codes in the operand-A layout -- together, the next matmul's A operand, in place.
+// `accum` is loop_ws's ex_accumulate (rs1 bit 0): 0 OVERWRITES the output region, 1 adds into it.
+// Only a K-tile after the first wants 1.
 static void mesh_matmul(int M, int K, int N, uint32_t a_spad, uint32_t b_arg, uint32_t c_spad,
-                        int out_fmt, uint64_t scale_dram, int resident) {
+                        int out_fmt, uint64_t scale_dram, int resident, int accum) {
   int I = M / DIM, J = N / DIM, Kt = K / DIM;
   gemmini_extended3_config_ex(WEIGHT_STATIONARY, 0, 0, ACC_SCALE_IDENTITY, 1, 1, 0, 0, false,
                               0, 0, out_fmt, 0);
@@ -221,7 +252,7 @@ static void mesh_matmul(int M, int K, int N, uint32_t a_spad, uint32_t b_arg, ui
                        0,
                        c_spad,
                        false, false,
-                       false, false, false,
+                       false, false, accum,
                        NO_ACTIVATION,
                        0, 0,
                        false,
@@ -235,6 +266,8 @@ int main() {
 #endif
   printf("llama attention: M=%d D=%d head_dim=%d  (real TinyLlama head, fp8 e4m3 + E8M0)\n",
          LLAMA_M, LLAMA_D, LLAMA_H);
+  printf("plan  spad %d rows: proj %d K-tile(s) of %d | o_proj %d chunk(s) of %d\n",
+         SPAD_TOP, KTILES, KTILE, NCHUNKS, NCHUNK);
 
   static uint32_t scale_sink[512] __attribute__((aligned(32)));
   gemmini_flush(0);
@@ -252,18 +285,11 @@ int main() {
          mx_count_diff_u8(xn_scales, (const uint8_t *) XN_SCALES_ROW, LLAMA_GD * LLAMA_M),
          LLAMA_GD * LLAMA_M);
 
-  // ================= mesh: Q, K, V -- Xn resident across all three =================
-  t0 = read_cycles();
-  mvin_A(xn_codes, LLAMA_M, LLAMA_D, SPAD_A);
-  gemmini_mx_load_scales((uint64_t) xn_scales, sizeof(xn_scales), 0);
-  gemmini_fence();
-  t_mesh += read_cycles() - t0;
-
+  // ================= mesh: Q, K, V, each K-tiled over the D-deep contraction =================
   const uint8_t *wcodes[3] = { (const uint8_t *) WQ_IN, (const uint8_t *) WK_IN,
                                (const uint8_t *) WV_IN };
   const uint8_t *wscales[3] = { (const uint8_t *) WQ_SCALES_COL, (const uint8_t *) WK_SCALES_COL,
                                 (const uint8_t *) WV_SCALES_COL };
-  const uint32_t qkv_spad[3] = { SPAD_Q, SPAD_K, SPAD_V };
   uint16_t *qkv_hw[3] = { Q_hw, K_hw, V_hw };
   const uint16_t *qkv_gold[3] = { (const uint16_t *) Q_OUT_BF16, (const uint16_t *) K_OUT_BF16,
                                   (const uint16_t *) V_OUT_BF16 };
@@ -271,13 +297,23 @@ int main() {
   int qkv_diff = 0;
   for (int s = 0; s < 3; s++) {
     t0 = read_cycles();
-    gemmini_mx_load_scales((uint64_t) wscales[s], LLAMA_GD * LLAMA_H, 1);
-    gemmini_fence();
-    mvin_B(wcodes[s], LLAMA_D, LLAMA_H, 0, LLAMA_H, SPAD_QKV_B);
-    mesh_matmul(LLAMA_M, LLAMA_D, LLAMA_H, SPAD_A, SPAD_QKV_B_ARG, qkv_spad[s],
-                OUT_BF16, (uint64_t) scale_sink, 0);
+    // Tile t contributes Xn[:, t*KTILE ..] @ W[t*KTILE .., :] into SPAD_QKV: the first overwrites,
+    // the rest accumulate, so after the loop the region holds the full D-deep reduction. Both
+    // scale windows take a CONTIGUOUS slice -- the A window is [GD][M] and the B window [GD][H],
+    // so a K-tile is whole rows of each and no gather is needed.
+    for (int kt = 0; kt < KTILES; kt++) {
+      mvin_A_strided(xn_codes + (size_t) kt * KTILE, LLAMA_M, KTILE, LLAMA_D, SPAD_XN);
+      gemmini_mx_load_scales((uint64_t) (xn_scales + (size_t) kt * KGRP * LLAMA_M),
+                             KGRP * LLAMA_M, 0);
+      gemmini_mx_load_scales((uint64_t) (wscales[s] + (size_t) kt * KGRP * LLAMA_H),
+                             KGRP * LLAMA_H, 1);
+      gemmini_fence();
+      mvin_B(wcodes[s] + (size_t) kt * KTILE * LLAMA_H, KTILE, LLAMA_H, 0, LLAMA_H, SPAD_PB);
+      mesh_matmul(LLAMA_M, KTILE, LLAMA_H, SPAD_XN, SPAD_PB_ARG, SPAD_QKV,
+                  OUT_BF16, (uint64_t) scale_sink, 0, kt > 0);
+    }
     t_mesh += read_cycles() - t0;
-    mvout_bf16(qkv_hw[s], qkv_spad[s], LLAMA_M, LLAMA_H);
+    mvout_bf16(qkv_hw[s], SPAD_QKV, LLAMA_M, LLAMA_H);
     int d = mx_count_diff_u16(qkv_hw[s], qkv_gold[s], LLAMA_M * LLAMA_H);
     qkv_diff += d;
     printf("mesh  %s = Xn @ W%s : %d/%d differ from golden\n",
@@ -301,13 +337,13 @@ int main() {
 
   // ================= mesh: S = Q @ K^T =================
   t0 = read_cycles();
-  mvin_A(q_codes, LLAMA_M, LLAMA_H, SPAD_A);
+  mvin_A(q_codes, LLAMA_M, LLAMA_H, SPAD_QA);
   mvin_B(kt_codes, LLAMA_H, LLAMA_M, 0, LLAMA_M, SPAD_KT);
   gemmini_mx_load_scales((uint64_t) q_scales, sizeof(q_scales), 0);
   gemmini_mx_load_scales((uint64_t) kt_scales, sizeof(kt_scales), 1);
   gemmini_fence();
-  mesh_matmul(LLAMA_M, LLAMA_H, LLAMA_M, SPAD_A, SPAD_KT_ARG, SPAD_S,
-              OUT_BF16, (uint64_t) scale_sink, 0);
+  mesh_matmul(LLAMA_M, LLAMA_H, LLAMA_M, SPAD_QA, SPAD_KT_ARG, SPAD_S,
+              OUT_BF16, (uint64_t) scale_sink, 0, 0);
   t_mesh += read_cycles() - t0;
   mvout_bf16(S_hw, SPAD_S, LLAMA_M, LLAMA_M);
   int s_d = mx_count_diff_u16(S_hw, (const uint16_t *) S_OUT_BF16, LLAMA_M * LLAMA_M);
@@ -326,13 +362,13 @@ int main() {
 
   // ================= mesh: O = P @ V, requantized straight into the scratchpad =================
   t0 = read_cycles();
-  mvin_A(p_codes, LLAMA_M, LLAMA_M, SPAD_A);
+  mvin_A(p_codes, LLAMA_M, LLAMA_M, SPAD_PA);
   mvin_B(v_codes, LLAMA_M, LLAMA_H, 0, LLAMA_H, SPAD_VB);
   gemmini_mx_load_scales((uint64_t) p_scales, sizeof(p_scales), 0);
   gemmini_mx_load_scales((uint64_t) v_scales, sizeof(v_scales), 1);
   gemmini_fence();
-  mesh_matmul(LLAMA_M, LLAMA_M, LLAMA_H, SPAD_A, SPAD_VB_ARG, SPAD_O,
-              OUT_FP8, (uint64_t) o_scales_dram, 1);
+  mesh_matmul(LLAMA_M, LLAMA_M, LLAMA_H, SPAD_PA, SPAD_VB_ARG, SPAD_O,
+              OUT_FP8, (uint64_t) o_scales_dram, 1, 0);
   t_mesh += read_cycles() - t0;
 
   // Residency check: read O back WITHOUT disturbing it, and check the scales the requantizer wrote.
@@ -347,7 +383,6 @@ int main() {
   // No A mvin and no A-scale load: the codes are already resident at SPAD_O in the operand-A tiled
   // layout, and the requantizer wrote their E8M0 bytes into the act-scale window transposed
   // ([H/32][M], a_off = group * M + row), which is exactly what this matmul indexes.
-  const uint32_t y_spad[NCHUNKS] = { SPAD_Y0, SPAD_Y1 };
   for (int c = 0; c < NCHUNKS; c++) {
     for (int g = 0; g < LLAMA_GH; g++)
       memcpy(wo_scales_chunk + (size_t) g * NCHUNK, &WO_SCALES_COL[g][c * NCHUNK], NCHUNK);
@@ -355,10 +390,10 @@ int main() {
     gemmini_mx_load_scales((uint64_t) wo_scales_chunk, sizeof(wo_scales_chunk), 1);
     gemmini_fence();
     mvin_B((const uint8_t *) WO_IN, LLAMA_H, LLAMA_D, c * NCHUNK, NCHUNK, SPAD_WO);
-    mesh_matmul(LLAMA_M, LLAMA_H, NCHUNK, SPAD_O, SPAD_WO_ARG, y_spad[c],
-                OUT_BF16, (uint64_t) scale_sink, 0);
+    mesh_matmul(LLAMA_M, LLAMA_H, NCHUNK, SPAD_O, SPAD_WO_ARG, SPAD_Y,
+                OUT_BF16, (uint64_t) scale_sink, 0, 0);
     t_mesh += read_cycles() - t0;
-    mvout_bf16(Ychunk, y_spad[c], LLAMA_M, NCHUNK);
+    mvout_bf16(Ychunk, SPAD_Y, LLAMA_M, NCHUNK);
     for (int m = 0; m < LLAMA_M; m++)
       memcpy(&Y_hw[(size_t) m * LLAMA_D + c * NCHUNK], &Ychunk[(size_t) m * NCHUNK],
              NCHUNK * sizeof(uint16_t));

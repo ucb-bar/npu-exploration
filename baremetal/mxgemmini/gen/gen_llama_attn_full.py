@@ -27,12 +27,21 @@ from pathlib import Path
 
 import numpy as np
 
+#: gen/ -> mxgemmini/ -> baremetal/ -> the repo root.
 HERE = Path(__file__).resolve().parent
-NPU = HERE.parent.parent / "npu-exploration"
+NPU = HERE.parents[2]
+#: Generated data lands next to the kernels that include it, not next to the generator.
+DATA = HERE.parent / "data"
+#: gen_matmul_llama.py stays in gemmini-rocc-tests: it generates the matmul_*.h data for the ISA
+#: tests themselves, so it belongs with them. We borrow its FORMATS/quantize/mesh-model helpers.
+ROCC = NPU.parent / "software" / "gemmini-rocc-tests"
 if not (NPU / "app" / "mxq_golden.py").exists():
     raise SystemExit(f"npu-exploration not found at {NPU}")
+if not (ROCC / "gen_matmul_llama.py").exists():
+    raise SystemExit(f"gen_matmul_llama.py not found in {ROCC}")
 sys.path.insert(0, str(NPU))
-sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROCC))
+DATA.mkdir(parents=True, exist_ok=True)
 
 import gen_matmul_llama as G      # noqa: E402  -- quantize(), _requant(), _run_mesh(), bf16_bits()
 import gen_llama_layer as GL      # noqa: E402  -- load_capture(), FMT
@@ -225,8 +234,8 @@ def _p_from(codes: np.ndarray) -> np.ndarray:
 
 
 def emit(b: Blob, d: dict) -> tuple[Path, Path]:
-    bin_path = HERE / "include" / "llama_attn_full.bin"
-    hdr_path = HERE / "include" / "llama_attn_full.h"
+    bin_path = DATA / "llama_attn_full.bin"
+    hdr_path = DATA / "llama_attn_full.h"
     bin_path.write_bytes(bytes(b.buf))
 
     offs = "\n".join(f"#define LLAMA_OFF_{n:<12s} {o}u" for n, o in b.off.items())
@@ -282,8 +291,8 @@ def emit(b: Blob, d: dict) -> tuple[Path, Path]:
 #define LLAMA_RMS_EPS {d['eps']:.10g}f
 
 // The blob, linked by objcopy -I binary (see bareMetalC/Makefile).
-extern const uint8_t _binary_include_llama_attn_full_bin_start[];
-#define LLAMA_BLOB _binary_include_llama_attn_full_bin_start
+extern const uint8_t _binary_llama_attn_full_bin_start[];
+#define LLAMA_BLOB _binary_llama_attn_full_bin_start
 #define LLAMA_AT(off, type) ((const type *) (LLAMA_BLOB + (off)))
 
 {offs}
@@ -298,8 +307,8 @@ def main() -> int:
     print(f"llama_attn_full  from {cap['_path'].name}")
     b, d = build(cap)
     bp, hp = emit(b, d)
-    print(f"  wrote {bp.relative_to(HERE)}  ({bp.stat().st_size / 1e6:.1f} MB)")
-    print(f"  wrote {hp.relative_to(HERE)}  ({hp.stat().st_size / 1e3:.1f} kB)")
+    print(f"  wrote {bp.relative_to(DATA.parent)}  ({bp.stat().st_size / 1e6:.1f} MB)")
+    print(f"  wrote {hp.relative_to(DATA.parent)}  ({hp.stat().st_size / 1e3:.1f} kB)")
     return 0
 
 

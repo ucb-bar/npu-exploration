@@ -48,12 +48,21 @@ from pathlib import Path
 
 import numpy as np
 
+#: gen/ -> mxgemmini/ -> baremetal/ -> the repo root.
 HERE = Path(__file__).resolve().parent
-NPU = HERE.parent.parent / "npu-exploration"
+NPU = HERE.parents[2]
+#: Generated data lands next to the kernels that include it, not next to the generator.
+DATA = HERE.parent / "data"
+#: gen_matmul_llama.py stays in gemmini-rocc-tests: it generates the matmul_*.h data for the ISA
+#: tests themselves, so it belongs with them. We borrow its FORMATS/quantize/mesh-model helpers.
+ROCC = NPU.parent / "software" / "gemmini-rocc-tests"
 if not (NPU / "app" / "mxq_golden.py").exists():
     raise SystemExit(f"npu-exploration not found at {NPU}")
+if not (ROCC / "gen_matmul_llama.py").exists():
+    raise SystemExit(f"gen_matmul_llama.py not found in {ROCC}")
 sys.path.insert(0, str(NPU))
-sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROCC))
+DATA.mkdir(parents=True, exist_ok=True)
 
 import torch  # noqa: E402
 import gen_matmul_llama as G  # noqa: E402  -- PROD/ACC precision, quantize(), bf16_bits(), _rows()
@@ -262,7 +271,7 @@ def _exactness_note(cap: dict, D: int, what: str, heads: int) -> str:
 def emit_mlp(cap: dict, d: dict, tag: str = "") -> Path:
     M, D, F = d["M"], d["D"], d["F"]
     GD, GF = D // BLOCK, F // BLOCK
-    path = HERE / "include" / f"llama_mlp{tag}.h"
+    path = DATA / f"llama_mlp{tag}.h"
     guard = f"INCLUDE_LLAMA_MLP{tag.upper()}_H"
     r = G._rows
     with open(path, "w") as fh:
@@ -486,7 +495,7 @@ def _f32_rows(a: np.ndarray) -> str:
 def emit_attn(cap: dict, d: dict, tag: str = "") -> Path:
     M, D, H = d["M"], d["D"], d["H"]
     GD, GH, GM = D // BLOCK, H // BLOCK, M // BLOCK
-    path = HERE / "include" / f"llama_attn{tag}.h"
+    path = DATA / f"llama_attn{tag}.h"
     guard = f"INCLUDE_LLAMA_ATTN{tag.upper()}_H"
     r = G._rows
     b = G.bf16_bits
@@ -703,7 +712,7 @@ def main() -> int:
             p = emit_mlp(cap, build_mlp(cap), tag)
         else:
             p = emit_attn(cap, build_attn(cap), tag)
-        print(f"  wrote {p.relative_to(HERE)}  ({p.stat().st_size / 1e6:.1f} MB)")
+        print(f"  wrote {p.relative_to(DATA.parent)}  ({p.stat().st_size / 1e6:.1f} MB)")
     return 0
 
 

@@ -127,9 +127,15 @@ static inline uint8_t mx_e4m3_encode(float v) {
     int mid = (lo + hi + 1) >> 1;
     if (mx_e4m3_mag[mid] <= v) lo = mid; else hi = mid - 1;
   }
-  // Ties away from zero: take the upper neighbour when the distances are equal.
+  // Ties to even: on an exact tie take whichever neighbour has an even code. Codes are consecutive,
+  // so `lo` odd means `lo + 1` is the even one. MXQuant's quantize_mx_block32 -- which every golden
+  // in this repo is generated from -- rounds half to even, and so does the datapath model
+  // (fp_quantize_rne, fp8_matmul_model.py:631). Corrected 2026-09-14; see
+  // planning/llama_layer_hw_plan.md 9.1. Random test data almost never contains an exact tie, which
+  // is why selftest_mx_host passed against the wrong rule for a year.
   float d_lo = v - mx_e4m3_mag[lo], d_hi = mx_e4m3_mag[lo + 1] - v;
-  return sign | (uint8_t) ((d_hi <= d_lo) ? (lo + 1) : lo);
+  int up = (d_hi < d_lo) || (d_hi == d_lo && (lo & 1));
+  return sign | (uint8_t) (up ? (lo + 1) : lo);
 }
 
 // ---- block quantization --------------------------------------------------------------------

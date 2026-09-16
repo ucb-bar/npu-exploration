@@ -36,8 +36,8 @@ xDSL-free: plain text in, plain text out.
 ## Reference
 
 `../../software/gemmini-rocc-tests/` is the baremetal C reference for the ISA and the
-hand-written MX tests: `./build_spike.sh bareMetalC` for spike, `./build_mx_rocket.sh
-bareMetalC` for the RTL path. Those kernels are also what actually runs on RTL today —
-see [`../sim/README.md`](../sim/README.md).
+hand-written ISA tests: `./build_spike.sh bareMetalC` for spike, `./build_mx_rocket.sh
+bareMetalC` for the RTL path. The whole-application kernels that used to live beside them are now
+in [`../baremetal/mxgemmini/`](../baremetal/mxgemmini/README.md).
 
 See [`../README.md`](../README.md) for install and the run command.

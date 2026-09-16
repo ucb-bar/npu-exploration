@@ -14,7 +14,8 @@ here plus a small branch in the backend's `run_elf`.
 The compiler path (`run_kernel.py`) has **not** run on RTL. Its C compiles for `-DMX_ROCKET` and its
 instruction stream matches the baremetal tests', but no simulator is driven from here yet.
 
-The hand-written baremetal kernels in `../../software/gemmini-rocc-tests/` do run under VCS, driven
+The hand-written application kernels in [`../baremetal/mxgemmini/`](../baremetal/mxgemmini/README.md)
+and the ISA tests in `../../software/gemmini-rocc-tests/` both run under VCS, driven
 by `generators/gemmini/run_mx_vcs.sh`. That is the working RTL path today, and the one to copy.
 
 ```bash
@@ -29,13 +30,13 @@ Measured on this design, from `sims/vcs/mx_vcs_logs_*`: `matmul_tiled_fp8_64x64`
 21.7 s CPU, i.e. **~4,900 sim-cycles/sec**. That number is the whole reason the llama kernels have a
 small-D variant — budget with it before starting a run.
 
-| ELF (`build_mx_rocket/bareMetalC/`) | cycles (spike) | ~VCS wall time |
+| ELF | cycles (spike) | ~VCS wall time |
 |---|---|---|
-| `matmul_tiled_fp8_64x64-baremetal` | 106 K | 22 s |
-| `llama_attention_small-baremetal` | 2.5 M | ~8 min |
-| `llama_attention-baremetal` | 12.7 M | ~45 min, and it exceeds `run_mx_vcs.sh`'s `+max-cycles=10000000` |
-| `llama_mlp-baremetal` | 11.7 M | ~40 min, same cap problem |
-| `llama_attention_full-baremetal` | 28.7 M | ~1.6 h, same cap. **Spike-verified only — see below.** |
+| `gemmini-rocc-tests/build_mx_rocket/bareMetalC/matmul_tiled_fp8_64x64-baremetal` | 106 K | 22 s |
+| `out/baremetal/mx_rocket/llama_attention_small` | 2.5 M | ~8 min |
+| `out/baremetal/mx_rocket/llama_attention` | 12.7 M | ~45 min, and it exceeds `run_mx_vcs.sh`'s `+max-cycles=10000000` |
+| `out/baremetal/mx_rocket/llama_mlp` | 11.7 M | ~40 min, same cap problem |
+| `out/baremetal/mx_rocket/llama_attention_full` | 28.7 M | ~1.6 h, same cap. **Spike-verified only — see below.** |
 
 The host's fp32 glue is ~99.9% of every llama figure above; the mesh itself is 2–15 K cycles. Raise
 `+max-cycles` for the two full-D kernels, or run the small one.

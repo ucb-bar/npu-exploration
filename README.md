@@ -66,6 +66,7 @@ Each directory has its own README covering what it holds and what to do there.
 |---|---|
 | [`app/`](app/README.md) | MX quantization, host ops, the format table, codebooks, interface MLIR |
 | [`kernels/`](kernels/README.md) | the kernel registry — a kernel is data, not code. **Add kernels here.** |
+| [`baremetal/`](baremetal/README.md) | hand-written application kernels per target (TinyLlama on MxGemmini) |
 | [`config/`](config/README.md) | hardware recipes: one JSON = one machine (`--config`) |
 | [`compiler/`](compiler/README.md) | the out-of-tree merlin target: contract + backend |
 | [`grade/`](grade/README.md) | run, compare, record — and what the verdict means |
