@@ -67,3 +67,7 @@ silently, so `tests/test_recipe_drift.py` holds them in agreement — it is the 
 | `formats.fp6` | fail-closed: rejected at load until pinned against `lut_golden_model.py` |
 
 See [`../README.md`](../README.md) for install and the run command.
+
+## Silicon cost (PPA)
+
+`config/ppa.py` maps a recipe onto the MxGemmini area/power model (`../MxGemmini-workspace/ppa`, override with `MX_PPA_ROOT`) and every graded run records the result under `metrics["ppa"]`. No recipe fields are added: the model consumes the hashed sections (`acc` ladder, product precision, mesh dims, operand format) directly. Standalone: `python -m config.ppa --config <recipe> [--json]`. Numbers are post-synthesis (tstech16c, 2.0 ns), calibrated at 16x16 only.

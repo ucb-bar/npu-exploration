@@ -662,6 +662,18 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
         metrics["seam_cycles"] = sum(v for s in stage_records
                                      for k, v in (s.get("metrics") or {}).items()
                                      if k.startswith("seam_cycles_stage"))
+    # --- silicon cost: the PPA model. Analytical (no EDA tools, ~ms), consumes the
+    # recipe alone -- a fourth recipe consumer, independent of the spike run. Its
+    # absence is not a failure: the grade stands without it, like the mxquant tier.
+    try:
+        from config.ppa import run_ppa
+        ppa = metrics["ppa"] = run_ppa(recipe)
+        tel.log("ppa", f"{ppa['area_um2']/1e3:.1f}k um2  {ppa['power_mw']:.1f} mW  "
+                       f"{ppa['pj_per_op']:.2f} pJ/op  (post-syn model"
+                       f"{'' if ppa['model']['calibrated'] else ', UNCALIBRATED dim'})")
+    except Exception as exc:
+        tel.log("ppa", f"UNAVAILABLE -- {exc}")
+
     acc = metrics["accuracy_vs_fp32_reference"]
     tel.log("grade", f"tier={metrics['tier']}  "
                      f"finite {metrics['finite']['n_finite']}/{metrics['finite']['total']}  "

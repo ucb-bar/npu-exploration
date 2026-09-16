@@ -1,6 +1,10 @@
 out/
 .venv/
 radiance-kernels/
+
+# provisioned by scripts/setup.sh (not vendored; MXQuant may be a symlink)
+toolchain/
+MXQuant
 __pycache__/
 *.pyc
 

@@ -37,15 +37,26 @@ BUILD_ROOT = REPO / "out" / "builds"
 #: The four files that make up the model.
 SOURCES = ("gemmini.cc", "gemmini.h", "gemmini_params.h", "mx_fp_math.h")
 
-#: NOT `g++` from PATH. scripts/env.sh puts chipyard's conda bin first, and conda's
-#: g++ (13.2) links a libstdc++ newer than the one spike's DT_RPATH pins (spack 12.2,
-#: max GLIBCXX_3.4.30). DT_RPATH outranks LD_LIBRARY_PATH, so such a build fails at
-#: dlopen with no useful message. Resolve the compiler explicitly.
-DEFAULT_GXX = "/orcd/software/core/001/spack/pkg/gcc/12.2.0/yt6vabm/bin/g++"
-
-
 class BuildError(RuntimeError):
     pass
+
+
+def default_gxx() -> str:
+    """A g++ whose libstdc++ is no newer than the one spike's DT_RPATH resolves.
+
+    DT_RPATH outranks LD_LIBRARY_PATH, so a mismatched build fails at dlopen with no
+    useful message. Preference order: ``$MX_HOST_GXX``; the toolchain env's own g++
+    (scripts/setup.sh installs gxx_linux-64 into the SAME conda env as spike, so their
+    libstdc++ is literally the same file and a mismatch is impossible); plain ``g++``
+    from PATH, with the post-link GLIBCXX guard below as the safety net.
+    """
+    env = os.environ.get("MX_HOST_GXX")
+    if env:
+        return env
+    conda_gxx = chipyard_root() / ".conda-env/bin/x86_64-conda-linux-gnu-g++"
+    if conda_gxx.exists():
+        return str(conda_gxx)
+    return "g++"
 
 
 def chipyard_root() -> Path:
@@ -191,8 +202,8 @@ def build(recipe, *, force: bool = False, gxx: str | None = None, quiet: bool = 
             print(f"[stale     ] {bid}  built from sources {got or 'unrecorded'}, "
                   f"pin now {want} -- rebuilding")
 
-    gxx = gxx or os.environ.get("MX_HOST_GXX") or DEFAULT_GXX
-    if not Path(gxx).exists():
+    gxx = gxx or default_gxx()
+    if not (Path(gxx).exists() or shutil.which(gxx)):
         raise BuildError(f"compiler not found: {gxx}. Set MX_HOST_GXX to a g++ whose "
                          "libstdc++ is no newer than the one spike's DT_RPATH points at")
 
