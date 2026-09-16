@@ -674,6 +674,20 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     except Exception as exc:
         tel.log("ppa", f"UNAVAILABLE -- {exc}")
 
+    # Predicted timeline of THIS kernel on that machine (RTL-calibrated; see
+    # config/perf.py for why it is not comparable to spike's functional count).
+    try:
+        from config.perf import run_perf
+        perf = metrics["perf"] = run_perf(recipe, metrics["stages"])
+        perf["spike_functional_cycles"] = metrics.get("total_cycles")
+        e = perf.get("energy")
+        tel.log("perf", f"{perf['total_cycles_predicted']} cycles predicted "
+                        f"({perf['total_us']:.1f} us, util {perf['utilization_pct_min']:.1f}%"
+                        + (f", {e['uj_kernel']:.2f} uJ" if e else "") + ")  "
+                        "[spike's count is a functional op counter, not a timeline]")
+    except Exception as exc:
+        tel.log("perf", f"UNAVAILABLE -- {exc}")
+
     acc = metrics["accuracy_vs_fp32_reference"]
     tel.log("grade", f"tier={metrics['tier']}  "
                      f"finite {metrics['finite']['n_finite']}/{metrics['finite']['total']}  "

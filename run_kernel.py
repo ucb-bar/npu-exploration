@@ -111,6 +111,14 @@ def main() -> int:
               f"{ppa['pj_per_op']:.2f} pJ/op   "
               f"(post-syn {ppa['model']['tech']} model, "
               f"calibrated={ppa['model']['calibrated']})")
+    perf = m.get("perf")
+    if perf:
+        e = perf.get("energy")
+        print(f"PERF     {perf['total_cycles_predicted']} cycles predicted   "
+              f"{perf['total_us']:.1f} us   util {perf['utilization_pct_min']:.1f}%"
+              + (f"   {e['uj_kernel']:.2f} uJ ({e['pj_per_op_achieved']:.1f} pJ/op achieved)"
+                 if e else "")
+              + f"   [spike functional count: {perf.get('spike_functional_cycles')}]")
     print(f"RESULTS  {res['run_dir']}")
     return 0 if m["pass"] else 1
 

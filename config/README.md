@@ -71,3 +71,7 @@ See [`../README.md`](../README.md) for install and the run command.
 ## Silicon cost (PPA)
 
 `config/ppa.py` maps a recipe onto the MxGemmini area/power model (`../MxGemmini-workspace/ppa`, override with `MX_PPA_ROOT`) and every graded run records the result under `metrics["ppa"]`. No recipe fields are added: the model consumes the hashed sections (`acc` ladder, product precision, mesh dims, operand format) directly. Standalone: `python -m config.ppa --config <recipe> [--json]`. Numbers are post-synthesis (tstech16c, 2.0 ns), calibrated at 16x16 only.
+
+## Predicted performance (perf)
+
+`config/perf.py` maps the recipe plus each stage's GEMM shape onto the RTL-calibrated performance model (`../MxGemmini-workspace/ppa/perf/perf_model.py`); every graded run records predicted cycles, wall time, utilization, phase breakdown and energy-at-achieved-utilization under `metrics["perf"]`. The prediction is a full kernel timeline (setup, loads, LUT, compute, drain) and is **not comparable to spike's stage cycles**, which are a functional op counter — both are recorded, labelled, never graded against each other. Standalone: `python -m config.perf --config <recipe> --m 64 --k 64 --n 64 [--json]`. Again no recipe fields are added.
