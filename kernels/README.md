@@ -62,3 +62,10 @@ equivalents, where the glue *does* run on Rocket, it is 99.9% of the cycles
 ([`../planning/llama_layer_hw_plan.md`](../planning/llama_layer_hw_plan.md) §8.3).
 
 See [`../README.md`](../README.md) for install and the run command.
+
+## Tracing a torch module (kernels/trace.py)
+
+`trace(module, x, name=...)` turns a plain PyTorch module into a KernelSpec via torch.fx --
+bias-free Linears, matmuls (rhs transpose folded to `.T`), scaled/causal softmax, add, and
+`silu(g)*u` (swiglu); custom modules via `kernels.trace.TRANSLATORS`. Anything else raises.
+Every traced spec satisfies `spec.reference() == module(x)` in fp32 (tests/selftest_trace.py).
