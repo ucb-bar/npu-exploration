@@ -27,7 +27,16 @@ OBJCOPY   := riscv$(XLEN)-unknown-elf-objcopy
 BENCH     := $(ROCC)/riscv-tests/benchmarks/common
 OUT       := $(REPO)/out/baremetal
 
-KERNELS   := llama_mlp llama_attention llama_attention_small llama_attention_full
+KERNELS   := llama_mlp llama_mlp_small llama_mlp_tiny \
+             llama_attention llama_attention_small llama_attention_tiny llama_attention_full
+
+# The MX bisection ladder: fifteen tiny self-checking ELFs. mxl0..mxl9 each take ONE delta from
+# the 64x64 ISA shape that passes, walking to the llama projection that does not; mxl10..mxl14 are
+# the second tier, separating the four things that change across the mxl3-to-mxl4 cliff. Run in
+# order; the first that fails names the feature. See src/mx_ladder.c and gen/gen_mx_ladder.py.
+LADDER    := mxl0 mxl1 mxl2 mxl3 mxl4 mxl5 mxl6 mxl7 mxl8 mxl9 \
+             mxl10 mxl11 mxl12 mxl13 mxl14 \
+             mxl15 mxl16 mxl17 mxl18
 
 # Matches gemmini-rocc-tests/bareMetalC/Makefile's flags; -I order puts our headers first so
 # mx_host.h and data/*.h resolve here, while "include/gemmini_testutils.h" resolves in $(ROCC).
@@ -45,19 +54,29 @@ LIBS := -lm
 RUNTIME := $(wildcard $(BENCH)/*.c) $(wildcard $(BENCH)/*.S)
 
 DATA := $(wildcard $(CURDIR)/data/*.h)
-DEPS := $(CURDIR)/include/mx_host.h $(DATA) \
+DEPS := $(CURDIR)/include/mx_host.h $(CURDIR)/include/mx_mesh.h $(DATA) \
         $(ROCC)/include/gemmini.h $(ROCC)/include/gemmini_params.h \
         $(ROCC)/include/gemmini_testutils.h
 
-.PHONY: all spike mx_rocket data run clean
+.PHONY: all spike mx_rocket ladder ladder-spike data run run-ladder clean
 all: spike mx_rocket
-spike:     $(addprefix $(OUT)/spike/,$(KERNELS))
-mx_rocket: $(addprefix $(OUT)/mx_rocket/,$(KERNELS))
+spike:     $(addprefix $(OUT)/spike/,$(KERNELS) $(LADDER))
+mx_rocket: $(addprefix $(OUT)/mx_rocket/,$(KERNELS) $(LADDER))
 
-# llama_attention_small.c is llama_attention.c with a different data header selected, so the
-# pattern rule's own prerequisite misses the source that actually carries the kernel.
-$(OUT)/spike/llama_attention_small $(OUT)/mx_rocket/llama_attention_small: \
-	$(CURDIR)/src/llama_attention.c
+# Just the ladder, both targets -- what you want when bisecting an FPGA failure.
+ladder:       $(addprefix $(OUT)/mx_rocket/,$(LADDER)) $(addprefix $(OUT)/spike/,$(LADDER))
+ladder-spike: $(addprefix $(OUT)/spike/,$(LADDER))
+
+# Every rung is src/mxlN.c including src/mx_ladder.c, so the pattern rule's own prerequisite
+# misses the file that actually carries the driver (same reason llama_attention_small needs it).
+$(foreach k,$(LADDER),$(eval $(OUT)/spike/$(k) $(OUT)/mx_rocket/$(k): $(CURDIR)/src/mx_ladder.c))
+
+# The sliced variants are the base kernel with a different data header selected, so the pattern
+# rule's own prerequisite misses the source that actually carries the kernel.
+$(foreach k,llama_attention_small llama_attention_tiny,\
+  $(eval $(OUT)/spike/$(k) $(OUT)/mx_rocket/$(k): $(CURDIR)/src/llama_attention.c))
+$(foreach k,llama_mlp_small llama_mlp_tiny,\
+  $(eval $(OUT)/spike/$(k) $(OUT)/mx_rocket/$(k): $(CURDIR)/src/llama_mlp.c))
 
 # llama_attention_full carries 10.8 MB of weights. As C initializers that is ~56 MB of source, so
 # the data is a binary blob linked as its own section. objcopy derives the symbol names from the
@@ -85,14 +104,26 @@ $(OUT)/mx_rocket/%: $(CURDIR)/src/%.c $(DEPS)
 # --all-heads capture; see gen/gen_llama_attn_full.py.
 data:
 	cd $(CURDIR)/gen && $(VENV) gen_llama_layer.py mlp attn
+	cd $(CURDIR)/gen && $(VENV) gen_llama_layer.py mlp  --d 256 --tag _small
 	cd $(CURDIR)/gen && $(VENV) gen_llama_layer.py attn --d 256 --tag _small
+	cd $(CURDIR)/gen && $(VENV) gen_llama_layer.py mlp attn --d 64 --tag _tiny
 	cd $(CURDIR)/gen && $(VENV) gen_llama_attn_full.py
+	cd $(CURDIR)/gen && $(VENV) gen_mx_ladder.py
 
 run: spike
 	@for k in $(KERNELS); do \
 	  echo "=== $$k ==="; \
 	  spike --extlib=$(LIBGEMMINI) --extension=gemmini $(OUT)/spike/$$k \
 	    2>&1 | grep -vE '^Gemmini ext|^    dim'; \
+	done
+
+# The ladder on spike, in bisection order. A rung that fails HERE is a bug in the ladder itself,
+# not in the FPGA -- spike is the reference the goldens were written against.
+run-ladder: ladder-spike
+	@for k in $(LADDER); do \
+	  spike --extlib=$(LIBGEMMINI) --extension=gemmini $(OUT)/spike/$$k \
+	    2>&1 | grep -vE '^Gemmini ext|^    dim'; \
+	  echo; \
 	done
 
 clean:

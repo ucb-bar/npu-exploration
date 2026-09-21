@@ -64,6 +64,25 @@
 
 #define DIM 16
 
+// PIN THE GEOMETRY, and warn instead of silently following the shared header.
+//
+// `DIM` is overridden above, which is why a dim32 `gemmini_params.h` never broke these kernels --
+// but `BANK_ROWS` was not, and it flips with whatever bitstream is being built (4096 for dim16,
+// 2048 for dim32). Section 9.3 makes this kernel deliberately ADAPTIVE to the scratchpad size, so
+// a flip does not produce wrong numbers -- it quietly retunes the K-tiling and the output chunking
+// for a machine that is not the one being targeted, and the ELF looks fine while planning against
+// half the memory it has. Pin it, say so at compile time, and keep the adaptivity for anyone who
+// overrides it: `-DLLAMA_BANK_ROWS=2048` reproduces the small-config schedule exactly.
+#ifndef LLAMA_BANK_ROWS
+#define LLAMA_BANK_ROWS 4096
+#endif
+#if BANK_ROWS != LLAMA_BANK_ROWS
+#warning "gemmini_params.h BANK_ROWS differs from this kernel's: pinning the kernel's value. \
+Correct if that header is set for another bitstream; -DLLAMA_BANK_ROWS=N to retarget."
+#endif
+#undef BANK_ROWS
+#define BANK_ROWS LLAMA_BANK_ROWS
+
 #define GEMMINI_CTRL 0x40084000
 #define GEMMINI_RS1_ADDR (GEMMINI_CTRL + 0x10)
 #define GEMMINI_RS2_ADDR (GEMMINI_CTRL + 0x18)
@@ -99,11 +118,29 @@
 // after) -- which only became usable once the MX path stopped discarding rs1 (see
 // planning/llama_layer_hw_plan.md 10.3). At 16384 rows the largest tile is all of D and the loop
 // runs once, so the big-config schedule is unchanged.
+//
+// THE SCALE WINDOW IS A SECOND BUDGET, and on a deep contraction it binds before the scratchpad
+// does. `ScaleFactorMem` holds 256 rows x 16 B per double-buffer half, and one matmul needs
+// (N/16) * (K/32) = N*K/512 of them. Past that the row address TRUNCATES and the upper K-groups
+// silently reuse lower rows: right sign, right magnitude, 5-60% wrong. That is Fault B
+// (planning/rtl_fault_b_kdepth.md), which is what made this kernel fail on hardware while passing
+// on spike. The RTL does not signal the overflow, so the kernel must not emit one.
+//
+// This REPLACES the `LLAMA_KTILE_MAX = 1024` workaround of 2026-09-20. That cap was expressed in
+// K, which is only correct while N <= 64 -- deriving the bound from N*K instead means it LIFTED
+// ITSELF when the RTL went from 128 usable rows to 256 (D = 2048 at H = 64 needs exactly 256, so
+// the projection is one K-tile again), and it still protects a future kernel that widens N.
+#ifndef LLAMA_SCALE_ROWS_MAX
+#define LLAMA_SCALE_ROWS_MAX 256
+#endif
+#define SCALE_ROWS(k, n) ((n) * (k) / 512)
 #define P_COST(kt) (ROWS8(LLAMA_M, (kt)) + ROWS8((kt), LLAMA_H) + ROWS16(LLAMA_M, LLAMA_H))
-#define KTILE  (P_COST(LLAMA_D) <= SPAD_TOP ? LLAMA_D : \
-                P_COST(1024)    <= SPAD_TOP ? 1024    : \
-                P_COST(512)     <= SPAD_TOP ? 512     : \
-                P_COST(256)     <= SPAD_TOP ? 256     : 128)
+#define KFITS(kt)  (P_COST(kt) <= SPAD_TOP && \
+                    SCALE_ROWS((kt), LLAMA_H) <= LLAMA_SCALE_ROWS_MAX)
+#define KTILE  (KFITS(LLAMA_D) ? LLAMA_D : \
+                KFITS(1024)    ? 1024    : \
+                KFITS(512)     ? 512     : \
+                KFITS(256)     ? 256     : 128)
 #define KTILES (LLAMA_D / KTILE)
 #define KGRP   (KTILE / 32)                  // E8M0 scale groups spanned by one K-tile
 
@@ -130,10 +167,12 @@
 
 // o_proj is N-chunked, one output region reused: each chunk overwrites and is drained immediately.
 #define Y_COST(dc) (ROWS8(LLAMA_M, LLAMA_H) + ROWS8(LLAMA_H, (dc)) + ROWS16(LLAMA_M, (dc)))
-#define NCHUNK (Y_COST(LLAMA_D) <= SPAD_TOP ? LLAMA_D : \
-                Y_COST(1024)    <= SPAD_TOP ? 1024    : \
-                Y_COST(512)     <= SPAD_TOP ? 512     : \
-                Y_COST(256)     <= SPAD_TOP ? 256     : 128)
+#define YFITS(dc) (Y_COST(dc) <= SPAD_TOP && \
+                   SCALE_ROWS(LLAMA_H, (dc)) <= LLAMA_SCALE_ROWS_MAX)
+#define NCHUNK (YFITS(LLAMA_D) ? LLAMA_D : \
+                YFITS(1024)    ? 1024    : \
+                YFITS(512)     ? 512     : \
+                YFITS(256)     ? 256     : 128)
 #define NCHUNKS (LLAMA_D / NCHUNK)
 #define SPAD_WO      (SPAD_O + ROWS8(LLAMA_M, LLAMA_H))      // on the dead S/P/V rows
 #define SPAD_WO_ARG  (SPAD_WO + ROWS8(LLAMA_H, NCHUNK))
@@ -148,6 +187,13 @@ LLAMA_SPAD_REQUIRE(proj_fits,        SPAD_QKV + ROWS16(LLAMA_M, LLAMA_H) <= SPAD
 LLAMA_SPAD_REQUIRE(attn_fits,        SPAD_VB_ARG <= SPAD_TOP);
 LLAMA_SPAD_REQUIRE(nchunk_divides_d, NCHUNK * NCHUNKS == LLAMA_D);
 LLAMA_SPAD_REQUIRE(oproj_fits,       SPAD_Y + ROWS16(LLAMA_M, NCHUNK) <= SPAD_TOP);
+// The scale-window bound, for every matmul in the kernel. The two adaptive ones pick a tiling that
+// satisfies it; these two have fixed shapes, so a check is the only thing that would catch a future
+// M or H that breaks them. Fault B was invisible precisely because nothing asserted this.
+LLAMA_SPAD_REQUIRE(scores_scale_fits, SCALE_ROWS(LLAMA_H, LLAMA_M) <= LLAMA_SCALE_ROWS_MAX);
+LLAMA_SPAD_REQUIRE(pv_scale_fits,     SCALE_ROWS(LLAMA_M, LLAMA_H) <= LLAMA_SCALE_ROWS_MAX);
+LLAMA_SPAD_REQUIRE(proj_scale_fits,   SCALE_ROWS(KTILE, LLAMA_H) <= LLAMA_SCALE_ROWS_MAX);
+LLAMA_SPAD_REQUIRE(oproj_scale_fits,  SCALE_ROWS(LLAMA_H, NCHUNK) <= LLAMA_SCALE_ROWS_MAX);
 
 static float    xn_f[LLAMA_M * LLAMA_D];
 static uint8_t  xn_codes[LLAMA_M * LLAMA_D];

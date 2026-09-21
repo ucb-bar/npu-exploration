@@ -44,6 +44,25 @@
 
 #define DIM 16
 
+// PIN THE GEOMETRY, and warn instead of silently following the shared header.
+//
+// `DIM` is overridden above, which is why a dim32 `gemmini_params.h` never broke these kernels --
+// but `BANK_ROWS` was not, and it flips with whatever bitstream is being built (4096 for dim16,
+// 2048 for dim32). Section 9.3 makes this kernel deliberately ADAPTIVE to the scratchpad size, so
+// a flip does not produce wrong numbers -- it quietly retunes the K-tiling and the output chunking
+// for a machine that is not the one being targeted, and the ELF looks fine while planning against
+// half the memory it has. Pin it, say so at compile time, and keep the adaptivity for anyone who
+// overrides it: `-DLLAMA_BANK_ROWS=2048` reproduces the small-config schedule exactly.
+#ifndef LLAMA_BANK_ROWS
+#define LLAMA_BANK_ROWS 4096
+#endif
+#if BANK_ROWS != LLAMA_BANK_ROWS
+#warning "gemmini_params.h BANK_ROWS differs from this kernel's: pinning the kernel's value. \
+Correct if that header is set for another bitstream; -DLLAMA_BANK_ROWS=N to retarget."
+#endif
+#undef BANK_ROWS
+#define BANK_ROWS LLAMA_BANK_ROWS
+
 #define GEMMINI_CTRL 0x40084000
 #define GEMMINI_RS1_ADDR (GEMMINI_CTRL + 0x10)
 #define GEMMINI_RS2_ADDR (GEMMINI_CTRL + 0x18)
@@ -76,11 +95,22 @@
 //    largest that fits; the B tile is what dominates, being D deep. ONE output region serves every
 //    chunk: loop_ws is issued with ex_accumulate = 0, which overwrites it.
 #define P1_COST(nc) (ROWS8(LLAMA_M, LLAMA_D) + ROWS8(LLAMA_D, (nc)) + ROWS16(LLAMA_M, (nc)))
-#define PROJ_N   (P1_COST(512) <= SPAD_ROWS ? 512 : \
-                  P1_COST(256) <= SPAD_ROWS ? 256 : \
-                  P1_COST(128) <= SPAD_ROWS ? 128 : \
-                  P1_COST(64)  <= SPAD_ROWS ? 64  : \
-                  P1_COST(32)  <= SPAD_ROWS ? 32  : 16)
+// The projection keeps the full D-deep contraction in ONE loop_ws, so its B-side scale window is
+// (PROJ_N/16) * (D/32) rows against the 256 the hardware holds -- a second budget that binds
+// independently of the scratchpad. At D = 2048 that caps PROJ_N at 64, which is what the
+// scratchpad picks anyway; the term is here so a bigger scratchpad cannot silently choose 128 and
+// wrap the scale rows. See planning/rtl_fault_b_kdepth.md.
+#ifndef LLAMA_SCALE_ROWS_MAX
+#define LLAMA_SCALE_ROWS_MAX 256
+#endif
+#define SCALE_ROWS(k, n) ((n) * (k) / 512)
+#define P1FITS(nc) (P1_COST(nc) <= SPAD_ROWS && \
+                    SCALE_ROWS(LLAMA_D, (nc)) <= LLAMA_SCALE_ROWS_MAX)
+#define PROJ_N   (P1FITS(512) ? 512 : \
+                  P1FITS(256) ? 256 : \
+                  P1FITS(128) ? 128 : \
+                  P1FITS(64)  ? 64  : \
+                  P1FITS(32)  ? 32  : 16)
 #define SPAD_XN     0
 #define PROJ_C      ROWS8(LLAMA_M, LLAMA_D)                  // the output sits above Xn
 #define PROJ_B      (SPAD_ROWS - ROWS8(LLAMA_D, PROJ_N))     // B tiles live at the top

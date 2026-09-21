@@ -1,0 +1,24 @@
+# The llama kernels on RTL. Cheapest first, so a structural failure shows up in minutes rather
+# than hours.
+#
+#   tools/simq add run CONFIG=MxGemminiRocketConfig BINARY=baremetal/mxgemmini/llama.jobs \
+#       MAX_CYCLES=60000000 TIMEOUT=28800
+#
+# MAX_CYCLES MATTERS HERE. These kernels are dominated by the host's fp32 glue, not the mesh:
+# llama_attention measures mesh 15467 / host 12.6M cycles on spike (plan 8.3). That is already past
+# the default +max-cycles=10000000, so the full-D kernels CANNOT finish at the default -- the same
+# reason ladder rung mxl9 never completed. The D=64/256 variants are ~8-30x cheaper and will.
+#
+# Use `run`, not `run-debug`: run-debug now dumps an FSDB per job, and a 12M-cycle run makes a very
+# large one. Re-run a single failing kernel with run-debug if you need waves.
+llama_mlp_tiny            # D=64   -- fastest end-to-end check that the chain works at all
+llama_attention_tiny      # D=64   -- all six matmuls incl. the resident P@V -> o_proj seam
+llama_mlp_small           # D=256
+llama_attention_small     # D=256
+llama_mlp                 # D=2048 -- the real MLP; no requant stage anywhere in it
+llama_attention           # D=2048 -- the real attention head
+llama_attention_full      # all 32 heads, 10.8 MB blob. NEVER RUN ON RTL before today:
+                          #   its projection is K=2048 @ N=64 = 256 scale rows, exactly the new
+                          #   ceiling, and it needs ex_accumulate + region reuse, both confirmed
+                          #   on RTL by mxl5/mxl6. This is the one that produces a real hardware
+                          #   number for the attention sub-layer.

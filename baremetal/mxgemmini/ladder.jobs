@@ -1,0 +1,24 @@
+# The MX bisection ladder, in bisection order. Feed it to simq:
+#   tools/simq run-debug CONFIG=MxGemminiRocketConfig BINARY=baremetal/mxgemmini/ladder.jobs JOBS=8
+#
+# mxl9 is EXCLUDED: it is the no-mesh host-glue rung and costs 10.65M cycles on spike, i.e. more
+# than the default +max-cycles=10000000, so it can never finish at the default. On its own:
+#   tools/simq run-debug CONFIG=MxGemminiRocketConfig BINARY=mxl9 MAX_CYCLES=40000000 TIMEOUT=14400
+mxl0            # control: 64x64x64, the shape the ISA test already passes
+mxl1            # non-square tile grid, I=2 J=4
+mxl2            # TK=16
+mxl3            # TK=64, 2 KB B-scale window
+mxl4            # TK=128, 4 KB B-scale window -- llama's Q exactly (was FAULT B)
+mxl5            # the same matmul as 2 accumulating K-tiles -- ex_accumulate
+mxl6            # two matmuls into one C_spad -- region reuse
+mxl7            # requant->spad + resident scales (was FAULT A)
+mxl8            # strided A mvin
+mxl10           # 34 E8M0 groups -- one past the old 32-group cliff
+mxl11           # 48 groups
+mxl12           # 64 groups, HALVED B window -- acquits the B window
+mxl13           # 32 groups, FULL B window -- convicts it; sits at the new 256-row ceiling
+mxl14           # 32 groups, full A window
+mxl15           # requant control: I=J=Kt=4, the chain test's own shape
+mxl16           # requant, I=2
+mxl17           # requant, Kt=2
+mxl18           # requant, GN=1 -- the rung that pinned Fault A
