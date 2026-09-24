@@ -12,8 +12,8 @@ We never edit the submodule. The four sources are copied into
 through the ``MX_LIBGEMMINI`` override the runner already honours
 (``runner.py:84`` -> ``--extlib=``).
 
-    python -m config.build_spike --config flat_acc4
-    python -m config.build_spike --list
+    python -m models.spike.build_spike --config flat_acc4
+    python -m models.spike.build_spike --list
 
 Cost: about 30 seconds on a miss, zero on a hit.
 """
@@ -31,7 +31,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 BUILD_ROOT = REPO / "out" / "builds"
 
 #: The four files that make up the model.
@@ -264,21 +264,21 @@ def resolve(recipe, *, quiet: bool = True) -> Path | None:
     A recipe whose hardware matches the stock build needs nothing built: the shipped
     model already IS that machine.
     """
-    from .recipe import load
+    from config.recipe import load
     if recipe.build_id() == load("baseline").build_id():
         return None
     return build(recipe, quiet=quiet)
 
 
 def main() -> int:
-    from .recipe import RECIPES_DIR, RecipeError, load
+    from config.recipe import RECIPES_DIR, RecipeError, load
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=None, help="recipe name or path")
     ap.add_argument("--all", action="store_true", help="build every recipe in config/recipes/")
     ap.add_argument("--list", action="store_true", help="show the build cache")
     ap.add_argument("--force", action="store_true", help="rebuild even on a cache hit")
-    ap.add_argument("--gxx", default=None, help=f"compiler (default {DEFAULT_GXX})")
+    ap.add_argument("--gxx", default=None, help="host g++ (default: $MX_HOST_GXX, else the toolchain env g++)")
     a = ap.parse_args()
 
     if a.list:

@@ -277,7 +277,7 @@ def _assert_geometry(console: str, recipe, simulator: str, tel) -> None:
         raise RuntimeError(
             f"geometry mismatch: recipe {recipe.name!r} says dim={recipe.dim} but the "
             f"loaded {simulator} model reports dim={got}. Build the model for this "
-            f"recipe (config/build_spike.py) instead of running against another one")
+            f"recipe (models/spike/build_spike.py) instead of running against another one")
     _GEOMETRY_CHECKED.add(key)
     tel.log("geometry", f"{simulator} reports dim={got}, matches recipe")
 
@@ -381,7 +381,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     # Point the oracle at the model built for THIS recipe. A recipe that matches the stock
     # machine reuses the shipped libgemmini.so; anything else gets its own build, cached.
     if not build_only:
-        from config.build_spike import BuildError, resolve as resolve_build
+        from models.spike.build_spike import BuildError, resolve as resolve_build
         try:
             so = resolve_build(recipe)
         except BuildError as exc:
@@ -667,7 +667,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     # recipe alone -- a fourth recipe consumer, independent of the spike run. Its
     # absence is not a failure: the grade stands without it, like the mxquant tier.
     try:
-        from config.ppa import run_ppa
+        from models.ppa.ppa import run_ppa
         ppa = metrics["ppa"] = run_ppa(recipe)
         tel.log("ppa", f"{ppa['area_um2']/1e3:.1f}k um2  {ppa['power_mw']:.1f} mW  "
                        f"{ppa['pj_per_op']:.2f} pJ/op  (post-syn model"
@@ -676,9 +676,9 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
         tel.log("ppa", f"UNAVAILABLE -- {exc}")
 
     # Predicted timeline of THIS kernel on that machine (RTL-calibrated; see
-    # config/perf.py for why it is not comparable to spike's functional count).
+    # models/perf/perf.py for why it is not comparable to spike's functional count).
     try:
-        from config.perf import run_perf
+        from models.perf.perf import run_perf
         perf = metrics["perf"] = run_perf(recipe, metrics["stages"])
         perf["spike_functional_cycles"] = metrics.get("total_cycles")
         e = perf.get("energy")

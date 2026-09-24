@@ -26,9 +26,9 @@ in any location, including a real chipyard checkout.
 | `mxquant` | `<repo>/MXQuant` clone (or symlink via `--mxquant <dir>`), `origin/chloe-branch-all` fetched | `app/mxq_golden.py` (import-time), `grade/mxquant_ref.py` |
 | `toolchain` | conda env with `riscv64-unknown-elf-gcc`, `dtc` and a host g++ (binaries from the `ucb-bar` channel — no chipyard build) | the runner gate; spike shells out to `dtc` |
 | `spike` | `riscv-isa-sim` built from source into `$RISCV` (spike is not packaged anywhere — chipyard builds it from source too; override: `--spike-ref`) | the execution substrate |
-| `gemmini` | `generators/gemmini` @ `gemmini-mx-cleanup` (override: `--gemmini-ref`), with `libgemmini` + `gemmini-rocc-tests` submodules | `config/build_spike.py`, the ELF harness |
+| `gemmini` | `generators/gemmini` @ `gemmini-mx-cleanup` (override: `--gemmini-ref`), with `libgemmini` + `gemmini-rocc-tests` submodules | `models/spike/build_spike.py`, the ELF harness |
 | `libgemmini` | stock `libgemmini.so`, built with the toolchain env's **own** g++ so its libstdc++ can never be newer than spike's | spike `--extlib` |
-| `ppa` | `../MxGemmini-workspace` clone (optional, `--no-ppa` skips; failures warn and continue) | `config/ppa.py` silicon-cost numbers |
+| `ppa` | `../MxGemmini-workspace` clone (optional, `--no-ppa` skips; failures warn and continue) | `models/ppa/ppa.py` silicon-cost numbers |
 
 ## env.sh
 
@@ -53,7 +53,7 @@ Rebuild and install it from gemmini (`make clean` first — its Makefile misses 
 force a per-recipe rebuild:
 
 ```bash
-.venv/bin/python -m config.build_spike --config <recipe> --force
+.venv/bin/python -m models.spike.build_spike --config <recipe> --force
 ```
 
 The same code is also what a baremetal test prints when it was built without `-DSPIKE_SIM` and took

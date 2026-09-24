@@ -22,11 +22,11 @@
 #   spike      riscv-isa-sim built from source into <root>/.conda-env/riscv-tools
 #              (the ucb-bar conda riscv-tools package is the GNU toolchain ONLY --
 #               spike is not packaged anywhere; chipyard builds it from source too)
-#   gemmini    <root>/generators/gemmini        (config/build_spike.py patches its libgemmini
+#   gemmini    <root>/generators/gemmini        (models/spike/build_spike.py patches its libgemmini
 #                                                sources; runner.py needs gemmini-rocc-tests)
 #   libgemmini stock libgemmini.so, built with the toolchain env's OWN g++ so its
 #              libstdc++ can never be newer than the one spike's DT_RPATH resolves
-#   ppa        ../MxGemmini-workspace clone     (config/ppa.py silicon-cost model; OPTIONAL --
+#   ppa        ../MxGemmini-workspace clone     (models/ppa/ppa.py silicon-cost model; OPTIONAL --
 #                                                runs proceed with "[ppa] UNAVAILABLE" without it)
 #
 # <root> defaults to <repo>/toolchain and is chipyard-SHAPED (.conda-env/ +
@@ -221,7 +221,7 @@ phase_libgemmini() {
     local gxx="${MX_HOST_GXX:-$CONDA_GXX}"
     [ -x "$gxx" ] || die libgemmini "no compiler at $gxx (set MX_HOST_GXX to override)"
     say libgemmini "building stock libgemmini.so with $gxx"
-    # Same compile line config/build_spike.py uses for per-recipe builds.
+    # Same compile line models/spike/build_spike.py uses for per-recipe builds.
     (cd "$LIBGEMMINI_DIR" && "$gxx" -L "$RISCV_DIR/lib" -Wl,-rpath,"$RISCV_DIR/lib" -shared \
         -o libgemmini.so -std=c++17 -I "$RISCV_DIR/include" -I . -fPIC -O3 gemmini.cc)
     have_libgemmini || die libgemmini "build produced no fresh libgemmini.so"

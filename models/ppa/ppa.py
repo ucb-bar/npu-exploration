@@ -23,7 +23,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 
 #: Defaults matching the model's own tapeout-baseline invocation (ppa/README.md
 #: "Quick start"): --util 0.965 --blocks-variant new --calib new at 2.0 ns.

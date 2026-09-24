@@ -1,6 +1,6 @@
 """Predicted kernel timeline: adapter to the MxGemmini performance model.
 
-Where ``config/ppa.py`` prices the MACHINE (area/power, kernel-independent),
+Where ``models/ppa/ppa.py`` prices the MACHINE (area/power, kernel-independent),
 this prices the RUN: cycles, wall time, utilization and energy of each GEMM
 stage on the machine the recipe describes. The model is Amanda Shi's
 ``MxGemmini-workspace/ppa/perf/perf_model.py`` -- RTL-FSDB-calibrated
@@ -21,7 +21,7 @@ mvins, GPU-written scales, no overlap -- which is the configuration the FSDB
 validation covered. ``--energy`` re-runs compose_gemmini at the ACHIEVED
 utilization, giving energy per stage and pJ/op including idle.
 
-Root discovery reuses ``config.ppa.ppa_root()`` (``$MX_PPA_ROOT`` override);
+Root discovery reuses ``models.ppa.ppa.ppa_root()`` (``$MX_PPA_ROOT`` override);
 absence raises :class:`PerfError`, which callers treat as "skip, log".
 """
 from __future__ import annotations
@@ -31,9 +31,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from config.ppa import DEFAULT_CLOCK_NS, PpaError, ppa_root, _workspace_head
+from models.ppa.ppa import DEFAULT_CLOCK_NS, PpaError, ppa_root, _workspace_head
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 
 
 class PerfError(RuntimeError):

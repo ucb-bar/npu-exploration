@@ -39,7 +39,7 @@ from app.mxq_golden import requantize_chained       # noqa: E402
 
 # The chipyard tree ($MERLIN_CHIPYARD) is the canonical source of the header; the old
 # sibling software/ layout stays as a fallback for checkouts that used it.
-from config.build_spike import gemmini_root          # noqa: E402
+from models.spike.build_spike import gemmini_root          # noqa: E402
 
 LIBGEMMINI = gemmini_root() / "software" / "libgemmini"
 if not (LIBGEMMINI / "mx_fp_math.h").exists():

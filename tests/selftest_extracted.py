@@ -34,7 +34,7 @@ if str(REPO) not in sys.path:
 
 # The chipyard tree ($MERLIN_CHIPYARD) is the canonical reference; the old sibling
 # software/ layout stays as a fallback for checkouts that used it.
-from config.build_spike import gemmini_root  # noqa: E402
+from models.spike.build_spike import gemmini_root  # noqa: E402
 
 ROCC = gemmini_root() / "software" / "gemmini-rocc-tests"
 if not ROCC.is_dir():
