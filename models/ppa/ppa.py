@@ -151,6 +151,13 @@ def run_ppa(recipe, *, util: float = DEFAULT_UTIL,
     return out
 
 
+def line(ppa: dict) -> str:
+    """The PPA line run_kernel.py prints: the recipe machine's silicon cost."""
+    return (f"PPA      {ppa['area_um2']/1e3:.1f}k um2   {ppa['power_mw']:.1f} mW   "
+            f"{ppa['pj_per_op']:.2f} pJ/op   "
+            f"(post-syn {ppa['model']['tech']} model, calibrated={ppa['model']['calibrated']})")
+
+
 def main() -> int:
     import argparse
     import json as _json
