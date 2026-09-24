@@ -64,6 +64,9 @@ def main() -> int:
     ap.add_argument("--artifacts", action="store_true",
                     help="write the RTL-replay bundle (interface MLIR + C + operands.npz)")
     ap.add_argument("--build-only", action="store_true", help="emit the ELF, do not run it")
+    ap.add_argument("--per-stage-elf", action="store_true",
+                    help="one ELF per matmul, intermediates carried by the host (the differential-debugging "
+                         "path); the default fuses a chain or emits a graph as ONE ELF")
     ap.add_argument("--legacy-mxquant", action="store_true",
                     help="grade against the legacy implementation (grade/mxquant_ref.py: MXQuant's "
                          "simulator patched at runtime; needs the MXQuant clone; recipe-blind). "
@@ -96,7 +99,7 @@ def main() -> int:
             acc_args["model_id"] = a.model_id
         res = run(spec, recipe=recipe, tol=a.tol, simulator=a.simulator, seam=a.seam,
                   dtype=a.dtype, allow_lossy_chain=a.allow_lossy_chain,
-                  build_only=a.build_only, artifacts=a.artifacts,
+                  build_only=a.build_only, artifacts=a.artifacts, per_stage_elf=a.per_stage_elf,
                   workdir=a.workdir, results_dir=a.results_dir, telemetry=tel,
                   models=selected, legacy_mxquant=a.legacy_mxquant, accuracy_args=acc_args)
     except RecipeError as exc:

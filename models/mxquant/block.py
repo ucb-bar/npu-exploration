@@ -20,11 +20,12 @@ from typing import Literal, NamedTuple
 
 import torch
 
-import models
+import models  # noqa: F401  -- puts the mxq submodule on sys.path
+from mxq import scale_factor
 
 BLOCK = 32
 #: MXQuant `_po2`: torch.finfo(float32).eps; the MX-Gemmini requantizer: max(amax, FLT_EPSILON).
-SCALE_FLOOR = 2.0 ** -23
+SCALE_FLOOR = scale_factor.HARDWARE_FLOOR    # 2^-23
 #: MXQuant's rounding vocabulary -> mxq's. "floor" has no hardware meaning and is refused.
 _ROUNDING = {"even": "rne", "nearest": "ties_away"}
 

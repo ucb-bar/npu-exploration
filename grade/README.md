@@ -56,7 +56,7 @@ previous reference under [`rtl_exact/`](../rtl_exact/README.md) on every kernel 
 |---|---|---|---|---|
 | `linear` | 64³ | 1 mesh | 4096/4096 | 5.91% |
 | `mlp2` … `mlp8` | 64³ | 2–8 mesh, fused chain | 4096/4096 | 8.97% … 22.7% |
-| `attention` | 64³ | 6 mesh + 1 host | 4096/4096 | 13.62% |
+| `attention` | 64³ | 6 mesh + 1 host | 4096/4096 **per-stage only** (see below) | 13.62% |
 | `llama_mlp` | 32×2048 | 3 mesh + 2 host | 65536/65536 | 11.98% |
 | `llama_attention` | 32×2048 | 6 mesh + 4 host | 65536/65536 | 15.02% |
 
@@ -66,8 +66,17 @@ The two llama kernels are a real TinyLlama decoder layer — captured activation
 All six MX formats are bit-identical as single matmuls **and** as fused chains eight stages deep:
 `fp8_e4m3`, `fp8_e4m3_quad`, `fp8_e5m2`, `fp6_e3m2`, `fp6_e2m3`, `fp4_e2m1`.
 
-Across recipes (2026-09-24): `linear`, `mlp2` and `attention` on `baseline`, `flat_acc4`, `wide_acc`
-and `narrow_prod` — 12 runs, all 4096/4096 identical at tier `mxquant_recipe_exact`.
+Across recipes (2026-09-24): `linear`, `mlp2`, `mlp3` and `attention --per-stage-elf` on `baseline`,
+`flat_acc4`, `wide_acc` and `narrow_prod` — all 4096/4096 identical at tier `mxquant_recipe_exact`.
+
+**Open (found 2026-09-24): the graph path's single ELF is wrong for `attention`.** Since the graph
+emitter landed (c01c3a0, 2026-09-11) the pipeline ran the graph ELF and then *also* ran the per-stage
+path, which overwrote the hardware output, so the graph ELF's result was never graded and every
+attention run cost seven spike runs instead of one. With that fixed the graph ELF's `Y0` matches
+nothing — not fp32 (rel. Frobenius 131), not the model, not any intermediate — and reports
+`METRIC cycles 0`. `run_kernel.py --kernel attention` therefore FAILs on every recipe today;
+`--per-stage-elf` grades the same kernel bit-exact through six ELFs. The emitter (`app/mxgraph.py`)
+and the generated `main.c` are Nicolas's; the record now says which ELF was graded.
 
 For what has and has not run on RTL, see [`../sim/README.md`](../sim/README.md).
 

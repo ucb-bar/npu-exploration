@@ -79,6 +79,7 @@ is recorded under `results/<timestamp>_<kernel>_<shape>/`.
 | `--tol` | 0.15 | pass threshold on relative Frobenius error vs fp32 |
 | `--artifacts` | off | also write an RTL-replay bundle (MLIR + C + `operands.npz`) |
 | `--build-only` | off | stop at the ELF |
+| `--per-stage-elf` | off | one ELF per matmul, intermediates carried by the host; the default fuses a chain or emits a graph as one ELF |
 | `--legacy-mxquant` | off | grade with the previous reference (`grade/mxquant_ref.py`, MXQuant bundle extracted from the clone on first use); for the equivalence test, removed in the next PR |
 | `--gpus --nsamples --model-id` | | accuracy model: GPUs to split the samples over, sample count, HF model |
 

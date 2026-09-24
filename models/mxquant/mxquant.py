@@ -29,9 +29,11 @@ import torch
 
 import models
 from config import scheme as _scheme
+from models.mxquant.block import BLOCK
 
 TIER = "mxquant_recipe_exact"
-#: How a value reached the mesh. THE LOWERING DECIDES THIS; the pipeline writes these strings.
+#: How a value reached the mesh. THE LOWERING DECIDES THIS (grade/pipeline.py writes "host" / "requant"
+#: into the edge map); these names are only read here.
 VIA_HOST = "host"
 VIA_REQUANT = "requant"
 
@@ -61,6 +63,9 @@ def run(spec, recipe, *, dtype: str = "fp8_e4m3", edges: dict | None = None, shi
     if not ok:
         raise Unavailable(why)
     arith, sched, window = _scheme.datapath(recipe)
+    if recipe.block != BLOCK:
+        raise Unavailable(f"{recipe.name}: software.block = {recipe.block}, but the wire operands are "
+                          f"quantized in groups of {BLOCK} (app/mxq_golden.py); this model cannot follow")
     y, stages = _walk(spec, dtype, edges, _mesh_hw(recipe, arith, sched, window, dtype))
     shipped_y = None
     if shipped:
@@ -85,9 +90,8 @@ def compare(hw: np.ndarray, ref: np.ndarray) -> dict:
     ref = np.asarray(ref, dtype=np.float32)
     if hw.shape != ref.shape:
         return {"shape_mismatch": [list(hw.shape), list(ref.shape)], "identical": False}
-    same = (hw == ref) | (np.isnan(hw) & np.isnan(ref))
+    same = hw == ref                                   # NaN != NaN: the same rule grade/metrics.bit_exact_diff grades by
     diff = np.abs(hw - ref)
-    diff = diff[np.isfinite(diff)]
     denom = float(np.linalg.norm(ref))
     return {
         "identical": bool(same.all()),

@@ -153,6 +153,8 @@ def run_perf(recipe, stages, *, as_measured: bool = True, energy: bool = True,
     script = perf_model_path()   # fail before any work if the model is absent
     per_stage = []
     for s in stages:
+        if s.get("where", "mesh") != "mesh":       # host stages run on Rocket; the model prices the mesh
+            continue
         res = _run_one(recipe, int(s["m"]), int(s["n"]), int(s["k"]),
                        str(s.get("out_dtype", "bf16")),
                        as_measured=as_measured, energy=energy, clock_ns=clock_ns)

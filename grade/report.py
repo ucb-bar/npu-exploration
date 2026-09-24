@@ -7,8 +7,8 @@ backend actually planned with, toolchain provenance) alongside the arrays —
 not just the metrics.
 
 Arrays: ``hardware_output.npy`` (when spike ran), ``fp32_reference.npy``, ``mxquant_output.npy``
-(when the mxquant model ran). Before 2026-09-24 the last was named ``golden_model.npy`` and never
-actually written.
+(when the mxquant model ran; before 2026-09-24 the pipeline passed None here and the file was never
+written).
 """
 
 from __future__ import annotations

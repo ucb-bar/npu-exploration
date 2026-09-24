@@ -1,8 +1,8 @@
 # Runtime dependencies of the framework itself (see scripts/setup.sh, phase `python`).
 torch
 numpy
-# MXQuant's simulator (the bit-exact golden tier) imports these; without any one of them
-# grading silently falls back to the fp32 tier ("[mxquant] UNAVAILABLE -- No module named ...").
+# The legacy reference (grade/mxquant_ref.py, --legacy-mxquant) imports these; without any one of them
+# it reports "[mxquant] UNAVAILABLE -- No module named ..." and the run grades on the fp32 tier.
 qtorch
 transformers
 datasets

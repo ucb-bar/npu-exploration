@@ -16,11 +16,13 @@ length 1, so nothing special-cases it. Two lowerings sit behind that entry:
   contracts two computed values and has a host softmax), and reachable for a chain
   via ``per_stage_elf=True`` for differential debugging.
 
-The grade is against **MXQuant**, not fp32: under ``rtl_exact`` MXQuant's simulated
-matmul is bit-identical to the datapath, so the verdict is bit-identity with no
-tolerance in it, and a second run of MXQuant *as shipped* reports how far the model
-the quantization work is done in sits from the silicon. The fp32 comparison stays as
-a labelled context line — it measures the cost of the format, not correctness.
+The grade is against the **mxquant model** (``models/mxquant``: mxq's systolic arithmetic
+on the recipe's product format and accumulator ladder, fed the operands the ELF carries),
+not fp32, so the verdict is bit-identity with no tolerance in it. A second run in mxq's
+MXQuant mode (*as shipped*) reports how far the published simulator sits from the
+silicon. The fp32 comparison stays as a labelled context line — it measures the cost of
+the format, not correctness. ``--models`` selects which models run; without spike there
+is no verdict.
 
 Every hardware step is a call into this repo's own modules (``app/mxq_golden.py``
 for quantization — MXQuant, never transcribed — ``app/mxiface.py`` for lowering,
@@ -197,7 +199,7 @@ def _fused_command_buffer(spec, dtype: str = DEFAULT_DTYPE, *,
         meta.append({"stage": i, "name": st.name, "where": "mesh", "out": out_name,
                      "m": m_, "k": k_, "n": n_,
                      "out_dtype": "bf16" if last else intermediate,
-                     # The OUTPUT codebook, when there is one. The MXQuant reference needs it to
+                     # The OUTPUT codebook, when there is one. The mxquant model needs it to
                      # reproduce a chained intermediate: the requantizer projects onto this table
                      # and the next stage reads it back with the same one.
                      "fused": True})
@@ -345,6 +347,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     """
     from .metrics import compare, mxquant_only
     from .report import make_run_id, write_report
+    from config.recipe import RecipeError
     import models as models_pkg                      # also puts the mxq submodule on sys.path
     from models import mxquant as mxquant_model
     from models import reference as reference_model
@@ -410,7 +413,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
             tel.log("illegal", e)
         raise ValueError(f"{spec.name}: {len(errs)} shape violation(s); first: {errs[0]}")
 
-    # --- (1) the FP32 reference the hardware is graded against ----------------------
+    # --- (1) the FP32 reference: context for the cost of the format ------------------
     ref_fp32 = reference_model.run(spec)["y"]
     tel.log("reference", f"fp32 torch {tuple(ref_fp32.shape)}  "
                          f"range [{ref_fp32.min():.4g}, {ref_fp32.max():.4g}]")
@@ -550,11 +553,12 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
                     saved[f"s{i}_{key}"] = np.asarray(val)
 
     if "spike" in models and not (fused or graphed):
-        # The per-stage path carries every intermediate through the HOST as float, so its edges are
-        # host-re-quantized like the graph path's.
+        # The per-stage path: one ELF per matmul, the host carrying every intermediate between runs
+        # (as the requantizer's codes+scales for fp8, as float otherwise), so its edges are
+        # host-re-quantized like the graph path's. Reached by a graph that cannot be emitted as one
+        # ELF, or by per_stage_elf on one that can. (Before 2026-09-24 this block also ran AFTER the
+        # graph path and overwrote its result, so graph kernels were graded on the wrong ELF.)
         edges = {st.name: {"via": "host"} for st in spec.stages if st.on_mesh}
-
-    if "spike" in models and not fused:
         a_codes = a_scales = None
         x_np = spec.x.numpy().astype(np.float32)
 
@@ -682,7 +686,8 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     if "mxquant" in models:
         impl = legacy or mxquant_model
         ok, why = impl.available()
-        not_modelled = (mxquant_model.Unavailable,) + ((legacy.MxQuantUnavailable,) if legacy else ())
+        not_modelled = ((mxquant_model.Unavailable, RecipeError)
+                        + ((legacy.MxQuantUnavailable,) if legacy else ()))
         if not ok:
             tel.log("mxquant", f"UNAVAILABLE -- {why}; grading falls back to the fp32 tier")
         else:
@@ -692,7 +697,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
                     sh = legacy.simulate(spec, rtl_exact=False, dtype=dtype, edges=edges)
                     y_model, y_ship, tier = g.y, sh.y, "mxquant_rtl_exact"
                     mxq_info = {"source": "MXQuant prodacc via grade/mxquant_ref.py (legacy)",
-                                "recipe_aware": False}
+                                "recipe_aware": False, "recipe": recipe.name, "dtype": dtype}
                 else:
                     r = mxquant_model.run(spec, recipe, dtype=dtype, edges=edges)
                     y_model, y_ship, mxq_info, tier = r["y"], r["shipped_y"], r["model"], r["tier"]
@@ -768,7 +773,12 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
 
     # --- model-level accuracy: TinyLlama perplexity with the recipe's arithmetic in every linear
     # layer (models/accuracy). Minutes on a GPU, cached by build_id, so it runs only when named.
-    if "accuracy" in models:
+    if "accuracy" in models and dtype != recipe.operand_mlir_dtype:
+        # The accuracy model runs the RECIPE's operand format in every layer; this kernel ran --dtype.
+        # One record must not carry a VERDICT in one format and a perplexity in another.
+        tel.log("accuracy", f"SKIPPED -- the model runs the recipe's operand format "
+                            f"({recipe.operand_mlir_dtype}), this kernel ran {dtype}")
+    elif "accuracy" in models:
         try:
             from models import accuracy as accuracy_model
             acc = metrics["accuracy"] = accuracy_model.run(recipe, tel=tel, **(accuracy_args or {}))

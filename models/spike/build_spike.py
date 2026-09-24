@@ -4,7 +4,7 @@ libgemmini's MX precision ladder is compile-time: ``prod_e``/``prod_m``, the 16-
 ``acc_e``/``acc_m`` tables and the block-scale group are C literals in
 ``gemmini.cc``, not runtime fields. So a recipe that changes them needs its own
 ``libgemmini.so``, and running it against the stock one would fail in the worst
-possible way -- silently, with the golden honouring the recipe, the device ignoring
+possible way -- silently, with the mxquant model honouring the recipe, the device ignoring
 it, and the report blaming the hardware for a mismatch we caused.
 
 We never edit the submodule. The four sources are copied into
