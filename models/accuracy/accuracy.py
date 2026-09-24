@@ -91,6 +91,8 @@ def run(recipe, *, model_id: str = MODEL_ID, nsamples: int = 16, seqlen: int = 2
         force: bool = False, tel=None) -> dict:
     """Perplexity of the recipe machine and of the bf16 model, both cached. Raises when it cannot run."""
     _scheme.scheme(recipe, rounding_mode=rounding_mode, scale_floor=scale_floor)   # refuse before any GPU work
+    if nsamples < 1:
+        raise ValueError(f"nsamples must be at least 1, got {nsamples}")
     ok, why = available()
     if not ok:
         raise RuntimeError(why)
@@ -137,9 +139,10 @@ def _worker_cmd(recipe, *, results_dir: Path, rules: str, rounding_mode: str, sc
         rpath = "none"
     else:                                   # the worker re-reads the recipe: a Scheme holds partials, not JSON
         results_dir.mkdir(parents=True, exist_ok=True)
-        rfile = results_dir / f"{recipe.name}_{recipe.build_id()}.recipe.json"
-        if not rfile.exists():
-            rfile.write_text(json.dumps(recipe.raw, indent=1))
+        raw = json.dumps(recipe.raw, sort_keys=True)
+        rfile = results_dir / f"{recipe.name}_{hashlib.sha256(raw.encode()).hexdigest()[:16]}.recipe.json"
+        if not rfile.exists():              # content-addressed: every field, not only the hashed hardware ones
+            rfile.write_text(raw)
         rpath = str(rfile)
     cmd = [sys.executable, "-m", "models.accuracy._worker", "--recipe", rpath, "--rules", rules,
            "--rounding-mode", rounding_mode, "--scale-floor", repr(scale_floor),
@@ -167,31 +170,39 @@ def _measure(recipe, *, gpus: str | None, compiled: bool, results_dir: Path, for
     base = _worker_cmd(recipe, results_dir=results_dir, rules=rules, rounding_mode=rounding_mode,
                        scale_floor=scale_floor, compiled=compiled, model_id=model_id, seqlen=seqlen,
                        nsamples=nsamples, seed=seed)
-    devices = gpus.split(",") if gpus else [None]
+    devices = [g.strip() for g in gpus.split(",") if g.strip()] if gpus else [None]
     bounds = [round(i * nsamples / len(devices)) for i in range(len(devices) + 1)]
     log = results_dir / f"{k}.log"
     if tel:
         tel.log("accuracy", f"{what}: {nsamples} samples on {len(devices)} worker(s)  (log {log})")
     t0, parts, procs = time.time(), [], []
-    with open(log, "a") as lf:
-        lf.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')}  {what}  {json.dumps(settings)}\n")
-        lf.flush()
-        for g, lo, hi in zip(devices, bounds, bounds[1:]):
-            if lo == hi:
-                continue
-            part = results_dir / f"{k}.part{lo}_{hi}.json"
-            parts.append(part)
-            env = dict(os.environ)
-            if g is not None:
-                env["CUDA_VISIBLE_DEVICES"] = g
-            procs.append(subprocess.Popen(base + ["--samples", f"{lo}:{hi}", "--out", str(part)],
-                                          cwd=REPO, env=env, stdout=lf, stderr=subprocess.STDOUT))
-        codes = [p.wait() for p in procs]
-    if any(codes):
-        tail = "".join(log.read_text().splitlines(keepends=True)[-15:])
-        raise RuntimeError(f"accuracy worker failed (exit {codes}); last lines of {log}:\n{tail}")
+    try:
+        with open(log, "a") as lf:
+            lf.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')}  {what}  {json.dumps(settings)}\n")
+            lf.flush()
+            for g, lo, hi in zip(devices, bounds, bounds[1:]):
+                if lo == hi:
+                    continue
+                part = results_dir / f"{k}.part{lo}_{hi}.{os.getpid()}.json"
+                parts.append(part)
+                env = dict(os.environ)
+                if g is not None:
+                    env["CUDA_VISIBLE_DEVICES"] = g
+                procs.append(subprocess.Popen(base + ["--samples", f"{lo}:{hi}", "--out", str(part)],
+                                              cwd=REPO, env=env, stdout=lf, stderr=subprocess.STDOUT))
+            codes = [p.wait() for p in procs]
+        if any(codes):
+            tail = "".join(log.read_text().splitlines(keepends=True)[-15:])
+            raise RuntimeError(f"accuracy worker failed (exit {codes}); last lines of {log}:\n{tail}")
+        records = [json.loads(p.read_text()) for p in parts]
+    except BaseException:                   # a failed or interrupted run leaves no workers and no part files
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+        for p in parts:
+            p.unlink(missing_ok=True)
+        raise
 
-    records = [json.loads(p.read_text()) for p in parts]
     per_sample = sorted((s for r in records for s in r["per_sample"]), key=lambda s: s["index"])
     total, tokens = 0.0, 0
     for s in per_sample:                    # same order of addition as the single-process loop
@@ -199,7 +210,9 @@ def _measure(recipe, *, gpus: str | None, compiled: bool, results_dir: Path, for
         tokens += s["tokens"]
     rec = {**records[0], "per_sample": per_sample, "seconds": time.time() - t0, "gpus": gpus,
            "perplexity": math.exp(total / tokens), "settings": settings, "key": k}
-    path.write_text(json.dumps(rec, indent=1))
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(rec, indent=1))
+    os.replace(tmp, path)                   # a reader never sees a half-written cache file
     for p in parts:
         p.unlink()
     if tel:

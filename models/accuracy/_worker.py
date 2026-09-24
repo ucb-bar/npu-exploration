@@ -138,6 +138,9 @@ def main() -> int:
 
     ids = load_samples(args.model_id, args.seqlen, args.nsamples, args.seed)
     lo, hi = (int(v) for v in args.samples.split(":")) if args.samples else (0, ids.shape[0])
+    if hi > ids.shape[0]:
+        raise SystemExit(f"--nsamples {args.nsamples}: WikiText-2 test has only {ids.shape[0]} samples of "
+                         f"{args.seqlen} tokens")
     t0, per_sample = time.time(), []
     for i in range(lo, hi):
         nll, n = sample_nll(model, ids[i])
