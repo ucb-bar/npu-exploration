@@ -96,9 +96,11 @@ MERLIN_CHIPYARD) at a full chipyard checkout built with its build-setup.sh."
 # ---- postconditions (shared by the phases and the doctor) ----------------------------
 
 have_python()     { "$REPO/.venv/bin/python" -c 'import torch, numpy' >/dev/null 2>&1; }
-# What the code actually needs: app/mxq_golden.py imports end_to_end_linear/mx_block_quant.py
-# from the WORKING TREE (present on MXQuant main, NOT on every branch), while
-# grade/mxquant_ref.py reads prodacc files from the origin/chloe-branch-all REF via git show.
+# MXQuant is OPTIONAL (--with-mxquant) since 2026-09-24: app/mxq_golden.py takes the block quantizer
+# from models/mxquant/block.py (mxq). The clone serves the capture scripts and
+# tests/selftest_block.py --update, which import end_to_end_linear/mx_block_quant.py from the
+# WORKING TREE (present on MXQuant main, NOT on every branch), and grade/mxquant_ref.py
+# (--legacy-mxquant), which reads prodacc files from the origin/chloe-branch-all REF via git show.
 have_mxquant()    { [ -f "$REPO/MXQuant/end_to_end_linear/mx_block_quant.py" ]; }
 have_mxq_branch() { git -C "$REPO/MXQuant" rev-parse --verify -q "origin/$MXQUANT_BRANCH" >/dev/null 2>&1; }
 have_toolchain()  { [ -x "$RISCV_DIR/bin/riscv64-unknown-elf-gcc" ] \
@@ -153,9 +155,9 @@ phase_mxquant() {
         fi
     fi
     have_mxquant || die mxquant \
-        "$REPO/MXQuant exists but has no end_to_end_linear/mx_block_quant.py (app/mxq_golden.py \
-imports it). Its working tree must be on a branch that carries it -- MXQuant main does; \
-a fresh clone (drop --mxquant) is the easy fix."
+        "$REPO/MXQuant exists but has no end_to_end_linear/mx_block_quant.py (the capture scripts and \
+tests/selftest_block.py --update import it). Its working tree must be on a branch that carries it -- \
+MXQuant main does; a fresh clone (drop --mxquant) is the easy fix."
     if ! have_mxq_branch; then
         say mxquant "fetching origin/$MXQUANT_BRANCH (grade/mxquant_ref.py reads from it)"
         git -C "$REPO/MXQuant" fetch origin "$MXQUANT_BRANCH"

@@ -1,13 +1,14 @@
 # npu-exploration
 
 Define a model in PyTorch, compile it to Rocket-hosted MxGemmini RoCC instructions, run it, and grade
-it against the quantization reference. **One ELF per kernel, any MX datatype.**
+it bit for bit against the mxquant model of the same machine. **One ELF per kernel, any MX datatype.**
 
 ## Quickstart
 
 Prerequisites: Linux x86_64, `conda` (miniconda is fine), git SSH access to
-`ucb-bar/npu-exploration`, `ucb-bar/merlin`, `ucb-bar/gemmini` and `chooper1/MXQuant`
-(optionally `Rakanic/MxGemmini-workspace` for silicon-cost numbers), and ~10 GB of disk.
+`ucb-bar/npu-exploration`, `ucb-bar/merlin`, `ucb-bar/gemmini` and `chloe-wong/microscaling-quant`
+(optionally `Rakanic/MxGemmini-workspace` for silicon-cost numbers, `chooper1/MXQuant` for the
+capture scripts and the legacy reference, and a CUDA GPU for the accuracy model), and ~10 GB of disk.
 
 ```bash
 git clone --recurse-submodules git@github.com:ucb-bar/npu-exploration.git
@@ -18,19 +19,24 @@ source scripts/env.sh                       # sets MERLIN_CHIPYARD, RISCV, PATH
 ```
 
 `setup.sh` provisions, inside the clone: the python env (`.venv` + `requirements.txt`), the
-MXQuant checkout (`app/mxq_golden.py` imports it and nothing here works without it), the RISC-V
-toolchain (`riscv64-unknown-elf-gcc` and `dtc` from the `ucb-bar` conda channel, `spike` built
+`microscaling-quant` submodule (mxq, the quantization library every model here is built on), the
+RISC-V toolchain (`riscv64-unknown-elf-gcc` and `dtc` from the `ucb-bar` conda channel, `spike` built
 from `riscv-isa-sim` source — no chipyard build needed), the gemmini hardware sources, and a stock
 `libgemmini.so` built with the toolchain's own g++. `bash scripts/setup.sh --check` prints
 PASS/FAIL for every requirement.
 Details, phases and troubleshooting: [`scripts/README.md`](scripts/README.md).
 
-Without SSH keys for GitHub, switch the merlin submodule to HTTPS first:
+Without SSH keys for GitHub, switch the submodules to HTTPS first:
 
 ```bash
 git config submodule.merlin.url https://github.com/ucb-bar/merlin.git
-git submodule update --init merlin
+git config submodule.microscaling-quant.url https://github.com/chloe-wong/microscaling-quant.git
+git submodule update --init merlin microscaling-quant
 ```
+
+The MXQuant clone is optional (`bash scripts/setup.sh --with-mxquant`): the capture scripts, the
+legacy reference (`--legacy-mxquant`) and regenerating `tests/oracle/block_fixture.npz` need it;
+compiling and grading a kernel do not.
 
 Already have a chipyard tree? Skip the toolchain phases and point at it instead:
 `source scripts/env.sh /path/to/chipyard`. Hardware sources always come from that tree, with no
@@ -45,9 +51,12 @@ If something fails to start, it is almost always the environment — see
 .venv/bin/python run_kernel.py --list
 .venv/bin/python run_kernel.py --kernel llama_mlp
 .venv/bin/python run_kernel.py --kernel linear --dtype fp4_e2m1 --config wide_acc
+.venv/bin/python run_kernel.py --kernel linear --config wide_acc --models mxquant       # the model alone, no spike
+.venv/bin/python run_kernel.py --kernel linear --config wide_acc --models all --gpus 0,1,2,3   # + perplexity
 ```
 
-`run_kernel.py` is the single entry point: PyTorch → quantize → merlin → ELF → run → graded.
+`run_kernel.py` is the single entry point: PyTorch → quantize → merlin → ELF → run → graded, with
+every model of the recipe's machine ([`models/`](models/README.md)) run from the same command.
 
 ```
 [recipe  ] baseline  dim=16  operand=fp8->bf16  prod=e4m3  acc[e4..8 m4..7]  build_id=854265d5…
@@ -55,18 +64,23 @@ If something fails to start, it is almost always the environment — see
 [grade   ] finite 4096/4096  cycles 445
 ```
 
-The final `VERDICT` line states whether the hardware matched the reference bit for bit. Exit `0` on
-PASS, `1` on FAIL, `2` on error. Every run is recorded under `results/<timestamp>_<kernel>_<shape>/`.
+The final `VERDICT` line states whether the hardware matched the mxquant model bit for bit, followed
+by one line per model (`PPA`, `PERF`, `PPL`). Without spike there is no verdict, only the model's
+numbers (`MXQUANT … NO VERDICT`). Exit `0` on PASS or NO VERDICT, `1` on FAIL, `2` on error. Every run
+is recorded under `results/<timestamp>_<kernel>_<shape>/`.
 
 | flag | default | meaning |
 |---|---|---|
 | `--kernel` | `linear` | which kernel (`--list`) |
 | `--config` | `baseline` | which hardware recipe (`--list`) |
+| `--models` | `default` | which models run: `default` = reference, mxquant, spike, ppa, perf; `all` adds accuracy; or a comma list |
 | `--dtype` | `fp8_e4m3` | MX operand format |
 | `--m --k --h --n` | 64 | batch rows, in_features, hidden, out_features |
 | `--tol` | 0.15 | pass threshold on relative Frobenius error vs fp32 |
 | `--artifacts` | off | also write an RTL-replay bundle (MLIR + C + `operands.npz`) |
 | `--build-only` | off | stop at the ELF |
+| `--legacy-mxquant` | off | grade with the previous reference (`grade/mxquant_ref.py`, MXQuant bundle extracted from the clone on first use); for the equivalence test, removed in the next PR |
+| `--gpus --nsamples --model-id` | | accuracy model: GPUs to split the samples over, sample count, HF model |
 
 ### Tests
 
@@ -83,7 +97,8 @@ Each directory has its own README covering what it holds and what to do there.
 | [`app/`](app/README.md) | MX quantization, host ops, the format table, codebooks, interface MLIR |
 | [`kernels/`](kernels/README.md) | the kernel registry — a kernel is data, not code. **Add kernels here.** |
 | [`baremetal/`](baremetal/README.md) | hand-written application kernels per target (TinyLlama on MxGemmini) |
-| [`config/`](config/README.md) | hardware recipes: one JSON = one machine (`--config`) |
+| [`config/`](config/README.md) | hardware recipes: one JSON = one machine (`--config`); `scheme.py` maps a recipe onto mxq |
+| [`models/`](models/README.md) | one folder per model of that machine: reference, mxquant, spike, ppa, perf, accuracy |
 | [`compiler/`](compiler/README.md) | the out-of-tree merlin target: contract + backend |
 | [`grade/`](grade/README.md) | run, compare, record — and what the verdict means |
 | [`rtl_exact/`](rtl_exact/README.md) | the reference configuration that matches the hardware bit for bit |
@@ -93,6 +108,7 @@ Each directory has its own README covering what it holds and what to do there.
 | [`tools/`](tools/README.md) | one-off extraction utilities |
 | [`planning/`](planning/README.md) | plans, decisions, and the measurements behind them |
 | `merlin/` | the compiler framework, git submodule, **unforked** |
+| `microscaling-quant/` | mxq, the quantization library (block quantizers, the systolic arithmetic, `nn.patch`), git submodule pinned by SHA |
 | `out/`, `results/`, `.venv/` | build artifacts, run records, the environment (gitignored) |
 
 ## Two standing constraints
