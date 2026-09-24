@@ -9,3 +9,4 @@ datasets
 
 # Tests.
 pytest
+accelerate
