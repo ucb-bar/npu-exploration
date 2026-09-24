@@ -35,6 +35,7 @@ def main() -> int:
     ap.add_argument("--no-compiled", action="store_true", help="skip torch.compile (5-7x slower, same bits)")
     ap.add_argument("--force", action="store_true", help="measure again even if cached")
     ap.add_argument("--dry-run", action="store_true", help="print the patch table, run nothing")
+    ap.add_argument("--results-dir", type=Path, default=accuracy.RESULTS, help="cache directory")
     ap.add_argument("--json", action="store_true", help="print the full record")
     a = ap.parse_args()
 
@@ -46,7 +47,7 @@ def main() -> int:
                                     scale_floor=a.scale_floor, model_id=a.model_id, seqlen=a.seqlen)
         m = accuracy.run(recipe, model_id=a.model_id, nsamples=a.nsamples, seqlen=a.seqlen, seed=a.seed,
                          gpus=a.gpus, rules=a.rules, rounding_mode=a.rounding_mode, scale_floor=a.scale_floor,
-                         compiled=not a.no_compiled, force=a.force, tel=tel)
+                         compiled=not a.no_compiled, results_dir=a.results_dir, force=a.force, tel=tel)
     except RecipeError as exc:
         tel.log("error", f"bad recipe: {exc}")
         return 2

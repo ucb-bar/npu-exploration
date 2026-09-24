@@ -122,8 +122,32 @@ def main() -> int:
     check("line names the number, the baseline, the delta and [cached]",
           ln.startswith("PPL") and "7.3438" in ln and "7.1885" in ln and "+0.1554" in ln and "[cached]" in ln, ln)
 
+    print("\n[6] the standing numbers (tests/oracle/accuracy_baseline.json) ------------------")
+    import json
+    oracle = json.loads((REPO / "tests" / "oracle" / "accuracy_baseline.json").read_text())
+    env = accuracy.environment()
+    check("oracle names the recipe build_id it was taken on", oracle["build_id"] == base.build_id(), base.build_id())
+    n_checked = 0
+    for e in oracle["entries"]:
+        if (e["torch"], e["transformers"]) != (env["torch"], env["transformers"]):
+            continue
+        r = None if e["recipe"] is None else base
+        k = accuracy.key(r, nsamples=oracle["nsamples"], seqlen=oracle["seqlen"], seed=oracle["seed"],
+                         rules=oracle["rules"], rounding_mode=e["rounding_mode"] or scheme.ROUNDING,
+                         scale_floor=e["scale_floor"])
+        path = accuracy.RESULTS / f"{k}.json"
+        if not path.exists():
+            print(f"  skip  {e['name']}: not measured in this environment yet ({path.name})")
+            continue
+        n_checked += 1
+        got = json.loads(path.read_text())["perplexity"]
+        check(f"{e['name']} == {e['perplexity']!r}", got == e["perplexity"], f"measured {got!r}")
+    if n_checked == 0:
+        print(f"  (no cached measurement for torch {env['torch']} / transformers {env['transformers']}; "
+              f"python -m models.accuracy --config baseline --gpus 0,1,2,3 produces one)")
+
     if "--gpu" in sys.argv:
-        print("\n[6] one real sample on GPU 0 ---------------------------------------------------")
+        print("\n[7] one real sample on GPU 0 ---------------------------------------------------")
         if not ok:
             check("GPU run", False, why)
         else:
@@ -138,7 +162,7 @@ def main() -> int:
             check("second call is served from the cache with the same number",
                   m2["cached"] and m2["perplexity"] == m["perplexity"], accuracy.line(m2))
     else:
-        print("\n[6] skipped: pass --gpu to measure one real sample")
+        print("\n[7] skipped: pass --gpu to measure one real sample")
 
     print("\n" + "=" * 70)
     if FAILURES:

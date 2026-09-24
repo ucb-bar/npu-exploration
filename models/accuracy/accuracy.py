@@ -52,13 +52,23 @@ def available() -> tuple[bool, str]:
     return True, f"{n} GPU(s), mxq {models.mxq_commit()}"
 
 
+def environment() -> dict:
+    """The torch and transformers versions. The bf16 model's own loss moves with them (2026-09-24: 7.1885 under
+    torch 2.9.1 / transformers 4.57.3, 7.1989 under torch 2.14.0 / transformers 5.17.0, same samples), so a
+    perplexity is only comparable to another taken in the same environment; the key and the record carry it."""
+    import torch
+    import transformers
+    return {"torch": torch.__version__, "transformers": transformers.__version__}
+
+
 def _settings(recipe, *, model_id: str, nsamples: int, seqlen: int, seed: int, rules: str,
               rounding_mode: str, scale_floor: float) -> dict:
     """Everything the number depends on. The cache key hashes this; the record carries it.
 
-    ``compiled`` is not in it: torch.compile changes the speed, not the bits (mxq tests that)."""
+    ``compiled`` is not in it: torch.compile changes the speed, not the bits (mxq tests that).
+    The torch and transformers versions are (see :func:`environment`)."""
     d = {"model_id": model_id, "nsamples": nsamples, "seqlen": seqlen, "seed": seed,
-         "mxq_commit": models.mxq_commit()}
+         "mxq_commit": models.mxq_commit(), **environment()}
     if recipe is not None:
         d.update(recipe=recipe.name, build_id=recipe.build_id(), format=_scheme.format_name(recipe),
                  rules=rules, rounding_mode=rounding_mode, scale_floor=float(scale_floor))
@@ -97,7 +107,7 @@ def run(recipe, *, model_id: str = MODEL_ID, nsamples: int = 16, seqlen: int = 2
         "rounding_mode": rounding_mode, "scale_floor": floor, "compiled": compiled,
         "scheme": q["scheme"],
         "layers_quantized": sum(1 for row in q["layers"] if row[4]), "layers_total": len(q["layers"]),
-        "seconds": q["seconds"], "gpus": gpus, "mxq_commit": q["mxq_commit"],
+        "seconds": q["seconds"], "gpus": gpus, "mxq_commit": q["mxq_commit"], **environment(),
         "cached": q["cached"], "key": q["key"], "path": str(q["path"]),
         "bf16_key": b["key"], "bf16_path": str(b["path"]),
     }

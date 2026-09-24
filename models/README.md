@@ -62,11 +62,18 @@ mxq commit). The bf16 baseline is measured once the same way.
 .venv/bin/python run_kernel.py --kernel linear --config wide_acc --models all --gpus 0,1,2,3
 ```
 
-Reproduction: with `--rounding-mode ties_away --scale-floor 1e-38` (mxq's old defaults) the baseline
-recipe reproduces mxq's recorded `hw_fp8` run, and the unpatched model reproduces MXQuant's bf16
-number; see `tests/oracle/accuracy_baseline.json` for the standing numbers and the date they were
-taken. Recipes mxq cannot run at model level (codebook formats, non-uniform product lists) are
-refused before any GPU work; without a GPU the model reports UNAVAILABLE and the grade stands.
+Reproduction (2026-09-24, `tests/oracle/accuracy_baseline.json`): with `--rounding-mode ties_away
+--scale-floor 1e-38` (mxq's defaults) the baseline recipe reproduces mxq's recorded `hw_fp8` run
+exactly, 7.343833269506588, and the unpatched model reproduces MXQuant's bf16 number,
+7.188464705866791, when run under the interpreter those were taken with (torch 2.9.1, transformers
+4.57.3). Under the repo's `.venv` (torch 2.14.0, transformers 5.17.0) the same samples give 7.346034
+and 7.198868: the bf16 model's own loss moves with the torch and transformers versions, so the
+versions are part of the cache key and of every record, and a perplexity is only comparable to one
+taken in the same environment. The standing number for the hardware's rounding (rne, 2^-23 floor)
+in the `.venv` is 7.365560971111733; `tests/selftest_accuracy.py` checks a cached measurement
+against the oracle whenever one exists for the running environment. Recipes mxq cannot run at model
+level (codebook formats, non-uniform product lists) are refused before any GPU work; without a GPU
+the model reports UNAVAILABLE and the grade stands.
 
 ## What is not here yet
 

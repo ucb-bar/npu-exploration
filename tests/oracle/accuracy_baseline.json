@@ -1,0 +1,21 @@
+{
+  "what": "TinyLlama WikiText-2 perplexity with the baseline recipe's arithmetic in every linear layer except the attention projections, next to the unpatched bf16 model. models/accuracy measures it; tests/selftest_accuracy.py [6] checks a cached measurement in the same environment against these numbers exactly.",
+  "taken": "2026-09-24",
+  "machine": "firesim2, 4x L40S",
+  "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "nsamples": 16,
+  "seqlen": 2048,
+  "seed": 0,
+  "rules": "mxquant_layers",
+  "recipe_name": "baseline",
+  "build_id": "854265d56bd38674",
+  "mxq_commit": "5ee8bd4",
+  "note": "The bf16 model's own loss depends on the torch / transformers versions (same 16 samples, same token counts, per-token loss differs by up to 1e-2 either way), so every number is tied to its environment. Under torch 2.9.1 / transformers 4.57.3 the chain recipe -> config/scheme -> models/accuracy reproduces mxq's recorded runs exactly: hw_fp8 (block.mxgemmini ties_away, 1e-38 floor, HW_FINAL ladder, matmul.compiled(MXGEMMINI)) = 7.343833269506588 and the bf16 model = 7.188464705866791, which are MXQuant's published bf16 measurement conditions. The standing regression number for the hardware's rounding (rne, 2^-23 floor) is the .venv one; it is expected to differ from the ties_away number because bf16 activations tie on about 1 in 16 elements when rounded to e4m3.",
+  "entries": [
+    {"name": "bf16 model, .venv", "torch": "2.14.0+cu130", "transformers": "5.17.0", "recipe": null, "rounding_mode": null, "scale_floor": null, "perplexity": 7.198867975181179},
+    {"name": "baseline ties_away 1e-38, .venv", "torch": "2.14.0+cu130", "transformers": "5.17.0", "recipe": "baseline", "rounding_mode": "ties_away", "scale_floor": 1e-38, "perplexity": 7.346033921276218},
+    {"name": "baseline rne 2^-23 (the hardware), .venv", "torch": "2.14.0+cu130", "transformers": "5.17.0", "recipe": "baseline", "rounding_mode": "rne", "scale_floor": 1.1920928955078125e-07, "perplexity": 7.365560971111733},
+    {"name": "bf16 model, mxq's environment (== MXQuant published bf16 7.188465)", "torch": "2.9.1+cu128", "transformers": "4.57.3", "recipe": null, "rounding_mode": null, "scale_floor": null, "perplexity": 7.188464705866791},
+    {"name": "baseline ties_away 1e-38, mxq's environment (== mxq results/hw_fp8.json)", "torch": "2.9.1+cu128", "transformers": "4.57.3", "recipe": "baseline", "rounding_mode": "ties_away", "scale_floor": 1e-38, "perplexity": 7.343833269506588}
+  ]
+}
