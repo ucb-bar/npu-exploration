@@ -5,6 +5,10 @@ A results folder must stay interpretable months later, so it snapshots the
 resolved run configuration (shapes, seed, quantization settings, geometry the
 backend actually planned with, toolchain provenance) alongside the arrays —
 not just the metrics.
+
+Arrays: ``hardware_output.npy`` (when spike ran), ``fp32_reference.npy``, ``mxquant_output.npy``
+(when the mxquant model ran). Before 2026-09-24 the last was named ``golden_model.npy`` and never
+actually written.
 """
 
 from __future__ import annotations
@@ -18,6 +22,8 @@ import torch
 
 from .telemetry import Telemetry
 
+VERDICT = {True: "PASS", False: "FAIL", None: "NO VERDICT"}
+
 
 def make_run_id(kernel: str, shape: str) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -30,9 +36,9 @@ def write_report(
     run_id: str,
     run_config: dict,
     provenance: dict,
-    hardware_output: torch.Tensor,
+    hardware_output: torch.Tensor | None,
     fp32_reference: torch.Tensor,
-    golden_model_output: torch.Tensor | None = None,
+    mxquant_output: torch.Tensor | None = None,
     metrics: dict,
     artifacts: dict | None = None,
     telemetry: Telemetry | None = None,
@@ -49,17 +55,17 @@ def write_report(
             "artifacts": artifacts or {},
         }, f, indent=2)
 
-    np.save(run_dir / "hardware_output.npy", hardware_output.detach().cpu().numpy())
+    if hardware_output is not None:
+        np.save(run_dir / "hardware_output.npy", hardware_output.detach().cpu().numpy())
     np.save(run_dir / "fp32_reference.npy", fp32_reference.detach().cpu().numpy())
-    if golden_model_output is not None:
-        np.save(run_dir / "golden_model.npy", golden_model_output.detach().cpu().numpy())
+    if mxquant_output is not None:
+        np.save(run_dir / "mxquant_output.npy", mxquant_output.detach().cpu().numpy())
 
     with open(run_dir / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
 
     if telemetry is not None:
         telemetry.attach(run_dir / "log.jsonl")
-        verdict = "PASS" if metrics["pass"] else "FAIL"
-        telemetry.log("report", f"{verdict} (tier={metrics['tier']}) -- saved to {run_dir}")
+        telemetry.log("report", f"{VERDICT[metrics['pass']]} (tier={metrics['tier']}) -- saved to {run_dir}")
 
     return run_dir

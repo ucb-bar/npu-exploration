@@ -253,6 +253,29 @@ def _graph_command_buffer(spec, dtype: str = DEFAULT_DTYPE) -> tuple[dict, list[
     return cb, meta, edges
 
 
+def _edges_without_running(spec, dtype: str, *, graphed: bool, fused: bool,
+                           allow_lossy_chain: bool, tel) -> tuple[list[dict], dict]:
+    """The stage records and edge map the lowering WOULD produce, without building or running.
+
+    Used when the spike model is not selected: the mxquant model must still be told how each
+    intermediate reaches the mesh (host re-quantization vs the hardware requantizer), and that is
+    decided by the lowering, not by the graph shape.
+    """
+    if graphed:
+        cb, meta, edges = _graph_command_buffer(spec, dtype)
+        return meta, edges
+    if fused:
+        iface, cb, meta, edges = _fused_command_buffer(spec, dtype, allow_lossy_chain=allow_lossy_chain,
+                                                       tel=tel)
+        return meta, edges
+    mnk = spec.stage_mnk()
+    meta = [{"stage": i, "name": st.name, "where": "mesh",
+             "m": mnk[st.name][0], "k": mnk[st.name][1], "n": mnk[st.name][2], "out_dtype": "bf16"}
+            if st.on_mesh else {"stage": i, "name": st.name, "where": "host", "note": st.note}
+            for i, st in enumerate(spec.stages)]
+    return meta, {st.name: {"via": "host"} for st in spec.stages if st.on_mesh}
+
+
 _GEOMETRY_CHECKED: set[str] = set()
 
 
@@ -261,7 +284,7 @@ def _assert_geometry(console: str, recipe, simulator: str, tel) -> None:
 
     ``gemmini.cc:70-71`` prints ``Gemmini extension configured with: dim = N`` every
     run. Without this check a recipe naming a mesh the loaded model does not implement
-    would run anyway, the golden would honour the recipe, the device would not, and
+    would run anyway, the mxquant model would honour the recipe, the device would not, and
     the report would blame the hardware for a mismatch we caused.
     """
     key = f"{simulator}:{recipe.build_id()}"
@@ -304,19 +327,36 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
         per_stage_elf: bool = False,
         build_only: bool = False, artifacts: bool = False,
         workdir: Path | None = None, results_dir: Path | None = None,
-        repo: Path | None = None, telemetry=None) -> dict:
+        repo: Path | None = None, telemetry=None,
+        models: tuple[str, ...] | None = None, legacy_mxquant: bool = False,
+        accuracy_args: dict | None = None) -> dict:
     """Build, run and grade one KernelSpec (1..N stages). Returns the run record.
+
+    ``models`` names which models run on the recipe's machine (see ``models.NAMES``; default
+    ``models.DEFAULT``): the fp32 ``reference`` always; ``spike`` builds and runs the ELF; ``mxquant``
+    computes the bits it must match; ``ppa``, ``perf`` and ``accuracy`` are fail-soft extras. Without
+    ``spike`` there is no VERDICT: the record carries the model's numbers and ``pass = None``.
+    ``legacy_mxquant`` grades against grade/mxquant_ref.py (MXQuant's simulator, patched; recipe-blind)
+    for the equivalence test; it disappears in the next PR.
 
     ``per_stage_elf`` forces a chain onto the one-ELF-per-matmul path it would otherwise skip. The
     two are meant to agree bit-for-bit -- fusing changes how many programs run, not what is computed
     -- so the difference between them is a debugging instrument, not a mode.
     """
-    from .metrics import compare
-    try:
-        from . import mxquant_ref as mxquant
-    except Exception:            # MXQuant absent: the fp32 tier still works
-        mxquant = None
+    from .metrics import compare, mxquant_only
     from .report import make_run_id, write_report
+    import models as models_pkg                      # also puts the mxq submodule on sys.path
+    from models import mxquant as mxquant_model
+    from models import reference as reference_model
+    models = tuple(models_pkg.DEFAULT if models is None else models)
+    for _m in models:
+        if _m not in models_pkg.NAMES:
+            raise ValueError(f"unknown model {_m!r}; choose from {', '.join(models_pkg.NAMES)}")
+    if build_only and "spike" not in models:
+        raise ValueError("--build-only builds the ELF, which is the spike model: add spike to --models")
+    legacy = None
+    if legacy_mxquant:
+        from . import mxquant_ref as legacy          # MXQuant-patching implementation, until PR 2
     from .telemetry import Telemetry
 
     repo = repo or REPO
@@ -371,28 +411,29 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
         raise ValueError(f"{spec.name}: {len(errs)} shape violation(s); first: {errs[0]}")
 
     # --- (1) the FP32 reference the hardware is graded against ----------------------
-    ref_fp32 = spec.reference()
+    ref_fp32 = reference_model.run(spec)["y"]
     tel.log("reference", f"fp32 torch {tuple(ref_fp32.shape)}  "
                          f"range [{ref_fp32.min():.4g}, {ref_fp32.max():.4g}]")
 
-    if not build_only and not mx.available(simulator):
-        tel.log("toolchain", f"NOT AVAILABLE for {simulator} -- source scripts/env.sh")
-        raise RuntimeError(f"toolchain unavailable for simulator={simulator!r}")
-    # Point the oracle at the model built for THIS recipe. A recipe that matches the stock
-    # machine reuses the shipped libgemmini.so; anything else gets its own build, cached.
-    if not build_only:
-        from models.spike.build_spike import BuildError, resolve as resolve_build
-        try:
-            so = resolve_build(recipe)
-        except BuildError as exc:
-            raise RuntimeError(f"no spike model for recipe {recipe.name!r}: {exc}") from exc
-        if so is not None:
-            os.environ["MX_LIBGEMMINI"] = str(so)
-            tel.log("build", f"recipe model {recipe.build_id()} -> {so}")
-        else:
-            tel.log("build", f"recipe {recipe.name!r} matches the stock build; "
-                             "using the shipped libgemmini.so")
-    tel.log("toolchain", f"gcc={mx.runner.gcc_path()}  spike={mx.runner.spike_path()}")
+    if "spike" in models:
+        if not build_only and not mx.available(simulator):
+            tel.log("toolchain", f"NOT AVAILABLE for {simulator} -- source scripts/env.sh")
+            raise RuntimeError(f"toolchain unavailable for simulator={simulator!r}")
+        # Point the oracle at the model built for THIS recipe. A recipe that matches the stock
+        # machine reuses the shipped libgemmini.so; anything else gets its own build, cached.
+        if not build_only:
+            from models.spike.build_spike import BuildError, resolve as resolve_build
+            try:
+                so = resolve_build(recipe)
+            except BuildError as exc:
+                raise RuntimeError(f"no spike model for recipe {recipe.name!r}: {exc}") from exc
+            if so is not None:
+                os.environ["MX_LIBGEMMINI"] = str(so)
+                tel.log("build", f"recipe model {recipe.build_id()} -> {so}")
+            else:
+                tel.log("build", f"recipe {recipe.name!r} matches the stock build; "
+                                 "using the shipped libgemmini.so")
+        tel.log("toolchain", f"gcc={mx.runner.gcc_path()}  spike={mx.runner.spike_path()}")
 
     # --- (2) lower and run ------------------------------------------------------------
     art_dir = workdir / "artifacts"
@@ -410,8 +451,18 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     graphed = (not spec.is_chain) and not per_stage_elf and all(
         st.on_mesh or st.emittable for st in spec.stages)
     fused = spec.is_chain and not per_stage_elf
+    from app import mxformats as _mxf
+    _f = _mxf.get(dtype, where="kernel lowering")
+    INTERMEDIATE_DTYPE = _f.mlir or _f.name
+    hw = None
 
-    if graphed:
+    if "spike" not in models:
+        # No ELF, no run. The mxquant model still needs to know how each intermediate WOULD have
+        # reached the mesh, which is a property of the lowering, so ask the lowering without running.
+        stage_records, edges = _edges_without_running(
+            spec, dtype, graphed=graphed, fused=fused, allow_lossy_chain=allow_lossy_chain, tel=tel)
+        tel.log("spike", "not selected -- nothing built or run; there will be NO VERDICT")
+    elif graphed:
         cb, stage_records, edges = _graph_command_buffer(spec, dtype)
         gdir = workdir / "graph"
         n_mesh = sum(r["where"] == "mesh" for r in stage_records)
@@ -498,16 +549,12 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
                 for key, val in bundle.items():
                     saved[f"s{i}_{key}"] = np.asarray(val)
 
-    from app import mxformats as _mxf
-    _f = _mxf.get(dtype, where="kernel lowering")
-    INTERMEDIATE_DTYPE = _f.mlir or _f.name
-
-    if not (fused or graphed):
+    if "spike" in models and not (fused or graphed):
         # The per-stage path carries every intermediate through the HOST as float, so its edges are
         # host-re-quantized like the graph path's.
         edges = {st.name: {"via": "host"} for st in spec.stages if st.on_mesh}
 
-    if not fused:
+    if "spike" in models and not fused:
         a_codes = a_scales = None
         x_np = spec.x.numpy().astype(np.float32)
 
@@ -622,72 +669,112 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
         return {"metrics": None, "run_dir": None, "stages": stage_records}
 
     # --- (3) grade ------------------------------------------------------------------
-    tel.log("decode", f"bf16 bit patterns -> float32 {tuple(hw.shape)}")
+    if hw is not None:
+        tel.log("decode", f"bf16 bit patterns -> float32 {tuple(hw.shape)}")
 
-    # The reference is MXQuant, not fp32 (merlin_glue_port_plan.md D7). Both configurations are
-    # run from the SPEC WE JUST RAN, in this process -- never from a saved artifact, which is how
-    # a stale results directory once produced a 150% "divergence" that was two different seeds.
-    golden = shipped = None
-    if mxquant is not None:
-        ok, why = mxquant.available()
+    # The reference is the mxquant model, not fp32 (merlin_glue_port_plan.md D7): the bits the
+    # recipe's machine must produce, computed on mxq from the SPEC WE JUST RAN, in this process --
+    # never from a saved artifact, which is how a stale results directory once produced a 150%
+    # "divergence" that was two different seeds. The as-shipped run is MXQuant's published
+    # simulator on the same ladder; it is reported as the model-vs-silicon gap, never graded.
+    mxq_out = shipped = mxq_info = None
+    tier = mxquant_model.TIER
+    if "mxquant" in models:
+        impl = legacy or mxquant_model
+        ok, why = impl.available()
+        not_modelled = (mxquant_model.Unavailable,) + ((legacy.MxQuantUnavailable,) if legacy else ())
         if not ok:
             tel.log("mxquant", f"UNAVAILABLE -- {why}; grading falls back to the fp32 tier")
         else:
             try:
-                g = mxquant.simulate(spec, rtl_exact=True, dtype=dtype, edges=edges)
-                s = mxquant.simulate(spec, rtl_exact=False, dtype=dtype, edges=edges)
-            except mxquant.MxQuantUnavailable as exc:
-                # An edge the reference cannot reproduce degrades the TIER, never the numbers.
-                # Producing a confident wrong golden would be worse than producing none.
+                if legacy is not None:
+                    g = legacy.simulate(spec, rtl_exact=True, dtype=dtype, edges=edges)
+                    sh = legacy.simulate(spec, rtl_exact=False, dtype=dtype, edges=edges)
+                    y_model, y_ship, tier = g.y, sh.y, "mxquant_rtl_exact"
+                    mxq_info = {"source": "MXQuant prodacc via grade/mxquant_ref.py (legacy)",
+                                "recipe_aware": False}
+                else:
+                    r = mxquant_model.run(spec, recipe, dtype=dtype, edges=edges)
+                    y_model, y_ship, mxq_info, tier = r["y"], r["shipped_y"], r["model"], r["tier"]
+            except not_modelled as exc:
+                # An edge the model cannot reproduce degrades the TIER, never the numbers.
+                # A confident wrong reference would be worse than none.
                 tel.log("mxquant", f"NOT MODELLED -- {exc}")
                 tel.log("mxquant", "grading falls back to the fp32 tier for this kernel")
             else:
-                golden, shipped = torch.from_numpy(g.y), torch.from_numpy(s.y)
-                c = mxquant.compare(hw.numpy(), g.y)
-                tel.log("mxquant", f"rtl_exact   {c['n_identical']}/{c['total']} identical  "
-                                   f"max|d| {c['max_abs_diff']:.6g}"
-                                   + ("" if c["identical"] else "   <-- MISMATCH, see below"))
-                cs = mxquant.compare(hw.numpy(), s.y)
-                tel.log("mxquant", f"as-shipped  {cs['n_identical']}/{cs['total']} identical  "
-                                   f"rel {cs['rel_fro']:.4%}  "
-                                   f"(expected to differ -- this is the model-vs-silicon gap)")
+                mxq_out, shipped = torch.from_numpy(y_model), torch.from_numpy(y_ship)
+                if hw is not None:
+                    c = mxquant_model.compare(hw.numpy(), y_model)
+                    tel.log("mxquant", f"{tier}   {c['n_identical']}/{c['total']} identical  "
+                                       f"max|d| {c['max_abs_diff']:.6g}"
+                                       + ("" if c["identical"] else "   <-- MISMATCH, see below"))
+                    cs = mxquant_model.compare(hw.numpy(), y_ship)
+                    tel.log("mxquant", f"as-shipped  {cs['n_identical']}/{cs['total']} identical  "
+                                       f"rel {cs['rel_fro']:.4%}  "
+                                       f"(expected to differ -- this is the model-vs-silicon gap)")
+                else:
+                    tel.log("mxquant", f"{tier} computed: {mxq_info.get('arith')}, "
+                                       f"window {mxq_info.get('window')} (no hardware to compare)")
 
-    metrics = compare(hw, ref_fp32, golden, tol_rel_fro=tol, shipped_reference=shipped)
+    if hw is not None:
+        metrics = compare(hw, ref_fp32, mxq_out, tol_rel_fro=tol, shipped_reference=shipped, tier=tier)
+    elif mxq_out is not None:
+        metrics = mxquant_only(mxq_out, ref_fp32, shipped_reference=shipped, tier=tier)
+    else:
+        raise RuntimeError("nothing to grade: neither spike ran nor the mxquant model was available "
+                           "(--models must include spike or mxquant)")
+    metrics["mxquant"] = mxq_info
     metrics["stages"] = stage_records
-    # Fused: ONE measured window spanning every stage AND every seam, which is the honest number --
-    # summing the per-stage windows would silently drop the seams. Per-stage: the sum of the runs.
-    metrics["total_cycles"] = (fused_cycles if fused else
-                               sum((s.get("metrics") or {}).get("cycles", 0)
-                                   for s in stage_records))
-    if fused:
-        metrics["seam_cycles"] = sum(v for s in stage_records
-                                     for k, v in (s.get("metrics") or {}).items()
-                                     if k.startswith("seam_cycles_stage"))
+    if hw is not None:
+        # Fused: ONE measured window spanning every stage AND every seam, which is the honest number
+        # -- summing the per-stage windows would silently drop the seams. Per-stage: the sum of the
+        # runs.
+        metrics["total_cycles"] = (fused_cycles if fused else
+                                   sum((s.get("metrics") or {}).get("cycles", 0)
+                                       for s in stage_records))
+        if fused:
+            metrics["seam_cycles"] = sum(v for s in stage_records
+                                         for k, v in (s.get("metrics") or {}).items()
+                                         if k.startswith("seam_cycles_stage"))
+    else:
+        metrics["total_cycles"] = None
     # --- silicon cost: the PPA model. Analytical (no EDA tools, ~ms), consumes the
-    # recipe alone -- a fourth recipe consumer, independent of the spike run. Its
-    # absence is not a failure: the grade stands without it, like the mxquant tier.
-    try:
-        from models.ppa.ppa import run_ppa
-        ppa = metrics["ppa"] = run_ppa(recipe)
-        tel.log("ppa", f"{ppa['area_um2']/1e3:.1f}k um2  {ppa['power_mw']:.1f} mW  "
-                       f"{ppa['pj_per_op']:.2f} pJ/op  (post-syn model"
-                       f"{'' if ppa['model']['calibrated'] else ', UNCALIBRATED dim'})")
-    except Exception as exc:
-        tel.log("ppa", f"UNAVAILABLE -- {exc}")
+    # recipe alone -- independent of the spike run. Its absence is not a failure:
+    # the grade stands without it, like the mxquant model.
+    if "ppa" in models:
+        try:
+            from models.ppa.ppa import run_ppa
+            ppa = metrics["ppa"] = run_ppa(recipe)
+            tel.log("ppa", f"{ppa['area_um2']/1e3:.1f}k um2  {ppa['power_mw']:.1f} mW  "
+                           f"{ppa['pj_per_op']:.2f} pJ/op  (post-syn model"
+                           f"{'' if ppa['model']['calibrated'] else ', UNCALIBRATED dim'})")
+        except Exception as exc:
+            tel.log("ppa", f"UNAVAILABLE -- {exc}")
 
     # Predicted timeline of THIS kernel on that machine (RTL-calibrated; see
     # models/perf/perf.py for why it is not comparable to spike's functional count).
-    try:
-        from models.perf.perf import run_perf
-        perf = metrics["perf"] = run_perf(recipe, metrics["stages"])
-        perf["spike_functional_cycles"] = metrics.get("total_cycles")
-        e = perf.get("energy")
-        tel.log("perf", f"{perf['total_cycles_predicted']} cycles predicted "
-                        f"({perf['total_us']:.1f} us, util {perf['utilization_pct_min']:.1f}%"
-                        + (f", {e['uj_kernel']:.2f} uJ" if e else "") + ")  "
-                        "[spike's count is a functional op counter, not a timeline]")
-    except Exception as exc:
-        tel.log("perf", f"UNAVAILABLE -- {exc}")
+    if "perf" in models:
+        try:
+            from models.perf.perf import run_perf
+            perf = metrics["perf"] = run_perf(recipe, metrics["stages"])
+            perf["spike_functional_cycles"] = metrics.get("total_cycles")
+            e = perf.get("energy")
+            tel.log("perf", f"{perf['total_cycles_predicted']} cycles predicted "
+                            f"({perf['total_us']:.1f} us, util {perf['utilization_pct_min']:.1f}%"
+                            + (f", {e['uj_kernel']:.2f} uJ" if e else "") + ")  "
+                            "[spike's count is a functional op counter, not a timeline]")
+        except Exception as exc:
+            tel.log("perf", f"UNAVAILABLE -- {exc}")
+
+    # --- model-level accuracy: TinyLlama perplexity with the recipe's arithmetic in every linear
+    # layer (models/accuracy). Minutes on a GPU, cached by build_id, so it runs only when named.
+    if "accuracy" in models:
+        try:
+            from models import accuracy as accuracy_model
+            acc = metrics["accuracy"] = accuracy_model.run(recipe, tel=tel, **(accuracy_args or {}))
+            tel.log("accuracy", accuracy_model.line(acc).strip())
+        except Exception as exc:
+            tel.log("accuracy", f"UNAVAILABLE -- {exc}")
 
     acc = metrics["accuracy_vs_fp32_reference"]
     tel.log("grade", f"tier={metrics['tier']}  "
@@ -727,7 +814,10 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
             "mesh_stages": len(_mesh), "host_stages": len(spec.stages) - len(_mesh),
             "operand_format": dtype, "output_dtype": "bf16",
             "intermediate_dtype": INTERMEDIATE_DTYPE if n_stages > 1 else None,
-            "block_scale_group": w.BLOCK, "quantizer": "MXQuant/end_to_end_linear",
+            "block_scale_group": w.BLOCK,
+            "quantizer": f"mxq.block.mxgemmini@{models_pkg.mxq_commit()} rne floor=2^-23 "
+                         "(wire encoding: app/mxq_golden.py)",
+            "models": list(models),
             "geometry_defaults": mxgemm_emit.DEFAULT_GEOMETRY,
             "cb_params_override": None,
             "tol_rel_fro": tol,
@@ -735,13 +825,15 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
         provenance={
             "simulator": simulator, "oracle": mx.ORACLE.get(simulator),
             "repo_head": _git_head(repo), "merlin_head": _git_head(repo / "merlin"),
-            "gcc": str(mx.runner.gcc_path()), "spike": str(mx.runner.spike_path()),
-            "libgemmini": str(mx.runner.libgemmini_so()),
+            "mxq_head": models_pkg.mxq_commit(),
+            "gcc": str(mx.runner.gcc_path()) if hw is not None else None,
+            "spike": str(mx.runner.spike_path()) if hw is not None else None,
+            "libgemmini": str(mx.runner.libgemmini_so()) if hw is not None else None,
             # A path is not an identity: hash the .so that ran, so a stale build is visible in the
             # record rather than inferred later from a wrong answer.
-            "libgemmini_id": _libgemmini_fingerprint(mx),
+            "libgemmini_id": _libgemmini_fingerprint(mx) if hw is not None else None,
         },
-        hardware_output=hw, fp32_reference=ref_fp32, golden_model_output=None,
+        hardware_output=hw, fp32_reference=ref_fp32, mxquant_output=mxq_out,
         metrics=metrics, artifacts=artifact_paths, telemetry=tel)
 
     if artifacts:

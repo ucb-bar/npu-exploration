@@ -1,10 +1,10 @@
 """The three comparisons this framework makes.
 
-  - hardware vs MXQuant/rtl_exact -> hardware CORRECTNESS. Bit-identical or it is
-    a bug, in the RTL, in spike, or in our codegen. This is the verdict.
-  - hardware vs MXQuant as shipped -> how far the model the quantization work is
-    done in sits from the silicon. Reported, never a pass criterion.
-  - hardware vs FP32 reference -> the cost of the format at all. Context only.
+  - hardware vs mxquant           -> hardware CORRECTNESS. Bit-identical or it is a bug, in the
+                                     RTL, in spike, or in our codegen. This is the verdict.
+  - hardware vs MXQuant as shipped -> how far the simulator the quantization work is done in sits
+                                     from the silicon. Reported, never a pass criterion.
+  - hardware vs FP32 reference     -> the cost of the format at all. Context only.
 
 The fp32 comparison used to BE the verdict, keyed off a tolerance. It cannot
 distinguish "MX is lossy" from "the RTL is wrong", and it is too coarse to settle
@@ -12,6 +12,9 @@ real questions: a 0.63-point move at chain depth 8 sat inside a 0.90-point
 seed-to-seed band (merlin_glue_port_plan.md section 4.2). It stays as a labelled
 context line so a weaker grade is never mistaken for a stronger one, and the
 verdict keys off bit-identity whenever a reference is available.
+
+When spike did not run (``run_kernel.py --models mxquant``) there is no hardware output and so no
+verdict: :func:`mxquant_only` records the model against fp32 and as-shipped with ``pass = None``.
 """
 
 from __future__ import annotations
@@ -19,6 +22,9 @@ from __future__ import annotations
 import torch
 
 Tensor = torch.Tensor
+
+#: the tier string when the reference is models/mxquant (recipe-aware, on mxq)
+MXQUANT_TIER = "mxquant_recipe_exact"
 
 
 def bit_exact_diff(a: Tensor, b: Tensor) -> dict:
@@ -44,22 +50,24 @@ def accuracy_metrics(actual: Tensor, reference: Tensor) -> dict:
 
 
 def compare(hardware_output: Tensor, fp32_reference: Tensor,
-            golden_model_output: Tensor | None = None,
+            mxquant_output: Tensor | None = None,
             *, tol_rel_fro: float = 0.15,
-            shipped_reference: Tensor | None = None) -> dict:
+            shipped_reference: Tensor | None = None,
+            tier: str = MXQUANT_TIER) -> dict:
     """Grade one run.
 
-    ``golden_model_output`` is MXQuant under ``rtl_exact`` — the datapath's own arithmetic. When it
-    is present the verdict is BIT-IDENTITY, with no tolerance anywhere in it; ``tol_rel_fro`` then
-    applies to nothing and is recorded only so the fp32 context line can be read.
+    ``mxquant_output`` is the mxquant model's answer: the datapath's own arithmetic, from the
+    recipe. When it is present the verdict is BIT-IDENTITY, with no tolerance anywhere in it;
+    ``tol_rel_fro`` then applies to nothing and is recorded only so the fp32 context line can be
+    read. ``tier`` names which implementation produced it (the legacy tier passes its own string).
 
-    ``shipped_reference`` is MXQuant as a researcher would configure it. Purely reported: it is
+    ``shipped_reference`` is MXQuant as a researcher would run it. Purely reported: it is
     EXPECTED to differ, so it can never fail a run.
     """
     accuracy = accuracy_metrics(hardware_output, fp32_reference)
     finite = int(torch.isfinite(hardware_output).sum().item())
     out = {
-        "tier": "mxquant_rtl_exact" if golden_model_output is not None else "fp32",
+        "tier": tier if mxquant_output is not None else "fp32",
         "accuracy_vs_fp32_reference": accuracy,
         "finite": {"n_finite": finite, "total": hardware_output.numel(),
                    "all_finite": finite == hardware_output.numel()},
@@ -70,11 +78,32 @@ def compare(hardware_output: Tensor, fp32_reference: Tensor,
             **accuracy_metrics(hardware_output, shipped_reference),
             **bit_exact_diff(hardware_output, shipped_reference),
         }
-    if golden_model_output is not None:
-        correctness = bit_exact_diff(hardware_output, golden_model_output)
-        out["correctness_vs_golden_model"] = correctness
+    if mxquant_output is not None:
+        correctness = bit_exact_diff(hardware_output, mxquant_output)
+        out["correctness_vs_mxquant"] = correctness
         out["pass"] = correctness["bit_exact"] and out["finite"]["all_finite"]
     else:
-        out["correctness_vs_golden_model"] = None
+        out["correctness_vs_mxquant"] = None
         out["pass"] = out["finite"]["all_finite"] and accuracy["rel_fro"] <= tol_rel_fro
+    return out
+
+
+def mxquant_only(mxquant_output: Tensor, fp32_reference: Tensor,
+                 *, shipped_reference: Tensor | None = None, tier: str = MXQUANT_TIER) -> dict:
+    """The record of a run without hardware: the model against fp32 (context) and as-shipped (gap).
+    There is nothing to grade, so ``pass`` is ``None`` and the report says NO VERDICT."""
+    finite = int(torch.isfinite(mxquant_output).sum().item())
+    out = {
+        "tier": f"{tier} (no hardware)",
+        "accuracy_vs_fp32_reference": accuracy_metrics(mxquant_output, fp32_reference),
+        "finite": {"n_finite": finite, "total": mxquant_output.numel(),
+                   "all_finite": finite == mxquant_output.numel()},
+        "correctness_vs_mxquant": None,
+        "pass": None,
+    }
+    if shipped_reference is not None:
+        out["delta_vs_mxquant_as_shipped"] = {
+            **accuracy_metrics(mxquant_output, shipped_reference),
+            **bit_exact_diff(mxquant_output, shipped_reference),
+        }
     return out
