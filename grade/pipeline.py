@@ -80,6 +80,7 @@ def _wire_paths(repo: Path) -> list[str]:
         if p.exists() and s not in sys.path:
             sys.path.insert(0, s)
             added.append(s)
+    import models  # noqa: F401  -- the one place the mxq submodule (microscaling-quant/) joins sys.path
     return added
 
 

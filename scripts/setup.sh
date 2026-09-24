@@ -3,16 +3,20 @@
 #
 #   bash scripts/setup.sh                 # all phases, then the doctor
 #   bash scripts/setup.sh --check         # doctor only: PASS/FAIL per requirement
-#   bash scripts/setup.sh --phase <name>  # one phase: python mxquant toolchain
-#                                         #            spike gemmini libgemmini ppa
+#   bash scripts/setup.sh --phase <name>  # one phase: merlin mxq python toolchain spike
+#                                         #            gemmini libgemmini ppa mxquant
+#   bash scripts/setup.sh --with-mxquant  # also clone MXQuant (optional: capture scripts, legacy tier)
 #
 # Idempotent: every phase checks its postcondition first and skips if satisfied,
 # so re-running after a failure resumes where it left off.
 #
 # What each phase provides (and which code requires it):
 #   python     .venv + requirements.txt        (every documented .venv/bin/python command)
-#   mxquant    <repo>/MXQuant checkout          (app/mxq_golden.py imports it at load time;
-#                                                grade/mxquant_ref.py needs origin/chloe-branch-all)
+#   mxq        <repo>/microscaling-quant        git submodule, pinned: the quantization library the
+#                                                mxquant and accuracy models run on (models/, config/scheme.py)
+#   mxquant    <repo>/MXQuant checkout          OPTIONAL (--with-mxquant): app/capture_llama_*.py load the
+#                                                model through it; grade/mxquant_ref.py (legacy) reads
+#                                                origin/chloe-branch-all. Nothing graded needs it.
 #   toolchain  <root>/.conda-env with riscv64-unknown-elf-gcc, dtc, and a host g++
 #                                               (runner.py gate; spike shells out to dtc)
 #   spike      riscv-isa-sim built from source into <root>/.conda-env/riscv-tools
@@ -34,8 +38,8 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ---- The one place each external's origin is defined. -------------------------------
-# Quantizer: planned to move to the cleaned-up microscaling-quant once it is built out
-# (and app/mxq_golden.py is refactored to call only it) -- that swap is this line.
+# Quantizer: the mxq library is the git submodule microscaling-quant/ (pinned SHA in .gitmodules;
+# HTTPS fallback in phase_mxq). MXQuant is optional now: capture scripts and the legacy tier only.
 MXQUANT_URL="git@github.com:chooper1/MXQuant.git"
 MXQUANT_BRANCH="chloe-branch-all"    # grade/mxquant_ref.py extracts files from origin/<this>
 # Public repos over HTTPS so no SSH keys are needed for them.
@@ -51,6 +55,7 @@ TOOLCHAIN_PKGS=(riscv-tools dtc "gxx_linux-64=12")
 ROOT="$REPO/toolchain"
 MXQUANT_SRC="$MXQUANT_URL"
 NO_PPA=0
+WITH_MXQUANT=0
 ONLY_PHASE=""
 CHECK_ONLY=0
 
@@ -63,6 +68,7 @@ while [ $# -gt 0 ]; do
         --gemmini-ref) GEMMINI_REF="$2"; shift 2 ;;
         --spike-ref)   SPIKE_REF="$2"; shift 2 ;;
         --no-ppa)      NO_PPA=1; shift ;;
+        --with-mxquant) WITH_MXQUANT=1; shift ;;
         --phase)       ONLY_PHASE="$2"; shift 2 ;;
         --check)       CHECK_ONLY=1; shift ;;
         -h|--help)     usage ;;
@@ -101,6 +107,7 @@ have_spike()      { [ -x "$RISCV_DIR/bin/spike" ] && [ -f "$RISCV_DIR/include/ri
 have_gemmini()    { [ -f "$LIBGEMMINI_DIR/gemmini.cc" ] && [ -f "$LIBGEMMINI_DIR/mx_fp_math.h" ] \
                     && [ -d "$GEMMINI_DIR/software/gemmini-rocc-tests/bareMetalC" ]; }
 have_merlin()     { [ -e "$REPO/merlin/merlin/python" ]; }
+have_mxq()        { [ -f "$REPO/microscaling-quant/mxq/__init__.py" ]; }
 have_ppa()        { [ -f "${MX_PPA_ROOT:-$PPA_DIR/ppa}/compose_gemmini.py" ]; }
 have_libgemmini() {
     local so="$LIBGEMMINI_DIR/libgemmini.so"
@@ -131,6 +138,10 @@ phase_python() {
 }
 
 phase_mxquant() {
+    if [ "$WITH_MXQUANT" != 1 ]; then
+        say mxquant "skipped (optional; --with-mxquant clones it for the capture scripts and the legacy tier)"
+        return
+    fi
     if have_mxquant && have_mxq_branch; then skip mxquant; return; fi
     if [ ! -e "$REPO/MXQuant" ]; then
         if [ -d "$MXQUANT_SRC" ]; then
@@ -234,6 +245,14 @@ phase_merlin() {
 git config submodule.merlin.url https://github.com/ucb-bar/merlin.git  -- then re-run"
 }
 
+phase_mxq() {
+    if have_mxq; then return; fi
+    say mxq "git submodule update --init microscaling-quant"
+    git -C "$REPO" submodule update --init microscaling-quant || \
+        die mxq "submodule init failed. Without SSH keys for chloe-wong/microscaling-quant, run: \
+git config submodule.microscaling-quant.url https://github.com/chloe-wong/microscaling-quant.git  -- then re-run"
+}
+
 # ---- doctor --------------------------------------------------------------------------
 
 doctor() {
@@ -253,10 +272,11 @@ doctor() {
     row 1 "$(have_gemmini && echo 1)"                                     "gemmini sources + rocc-tests" "$GEMMINI_DIR"
     row 1 "$(have_libgemmini && echo 1)"                                  "libgemmini.so (fresh)" "$LIBGEMMINI_DIR"
     row 1 "$(have_merlin && echo 1)"                                      "merlin submodule"      "$REPO/merlin"
-    row 1 "$(have_mxquant && echo 1)"                                     "MXQuant (end_to_end_linear)" "$REPO/MXQuant"
-    row 1 "$(have_mxq_branch && echo 1)"                                  "MXQuant origin/$MXQUANT_BRANCH" "grade/mxquant_ref.py needs it"
+    row 1 "$(have_mxq && echo 1)"                                         "mxq submodule"         "$REPO/microscaling-quant"
     row 1 "$(have_python && echo 1)"                                      ".venv (torch, numpy)"  "$REPO/.venv"
     row 0 "$(have_ppa && echo 1)"                                         "PPA workspace (optional)" "${MX_PPA_ROOT:-$PPA_DIR/ppa}"
+    row 0 "$(command -v nvidia-smi >/dev/null 2>&1 && echo 1)"            "GPU (optional: accuracy model)" "nvidia-smi"
+    row 0 "$(have_mxquant && have_mxq_branch && echo 1)"                  "MXQuant (optional: capture, legacy)" "$REPO/MXQuant  (--with-mxquant)"
     echo
     if [ "$bad" = 0 ]; then
         echo "All required checks pass. Next:"
@@ -264,7 +284,7 @@ doctor() {
         echo "    .venv/bin/python run_kernel.py --kernel linear --config baseline"
     else
         echo "FAIL above. Re-run 'bash scripts/setup.sh' (idempotent) or the named phase:"
-        echo "    bash scripts/setup.sh --phase <python|mxquant|toolchain|spike|gemmini|libgemmini|ppa>"
+        echo "    bash scripts/setup.sh --phase <merlin|mxq|python|toolchain|spike|gemmini|libgemmini|ppa|mxquant>"
         return 1
     fi
 }
@@ -275,13 +295,14 @@ if [ "$CHECK_ONLY" = 1 ]; then doctor; exit $?; fi
 
 if [ -n "$ONLY_PHASE" ]; then
     case "$ONLY_PHASE" in
-        python|mxquant|toolchain|spike|gemmini|libgemmini|ppa|merlin) "phase_$ONLY_PHASE" ;;
+        python|mxquant|toolchain|spike|gemmini|libgemmini|ppa|merlin|mxq) "phase_$ONLY_PHASE" ;;
         *) die setup "unknown phase: $ONLY_PHASE" ;;
     esac
     exit 0
 fi
 
 phase_merlin
+phase_mxq
 phase_python
 phase_mxquant
 phase_toolchain
