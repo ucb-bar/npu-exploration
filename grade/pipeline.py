@@ -734,7 +734,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
         # Fused: ONE measured window spanning every stage AND every seam, which is the honest number
         # -- summing the per-stage windows would silently drop the seams. Per-stage: the sum of the
         # runs.
-        metrics["total_cycles"] = (fused_cycles if fused else
+        metrics["total_cycles"] = (fused_cycles if (fused or graphed) else
                                    sum((s.get("metrics") or {}).get("cycles", 0)
                                        for s in stage_records))
         if fused:
