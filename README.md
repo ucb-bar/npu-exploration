@@ -89,7 +89,80 @@ is recorded under `results/<timestamp>_<kernel>_<shape>/`.
 .venv/bin/python tests/selftest_grade.py       # and the rest — see tests/README.md
 ```
 
+## How it fits together
+
+```
+                       run_kernel.py   (one command, every model of one machine)
+                              │
+       ┌──────────────────────┼──────────────────────────┐
+       ▼                      ▼                          ▼
+ kernels/registry       config/recipe.py              --models
+ KernelSpec (x, stages) Recipe = one machine       which models run
+       │                      │
+       │            ┌─────────┴──────────┐
+       │            ▼                    ▼
+       │     config/scheme.py     models/spike/build_spike.py
+       │     recipe → mxq         recipe → libgemmini.so (per build_id)
+       ▼            ▼                    ▼
+ ┌───────────── grade/pipeline.run ────────────────────────────────────────┐
+ │ reference  fp32                                                         │
+ │ spike      LOWER: app/mxiface, mxgraph, mxhost → command buffer          │
+ │            (fused chain | graph | per-stage)   → compiler/targets backend│
+ │            mxgemm_emit / mxgraph_emit → main.c → ELF → spike             │
+ │ mxquant    models/mxquant on mxq, fed the same wire operands             │
+ │ ppa, perf  models/ppa, models/perf                                       │
+ │ accuracy   models/accuracy: TinyLlama perplexity on the recipe's Scheme  │
+ └──────────────────────────┬──────────────────────────────────────────────┘
+                            ▼
+              grade/metrics + report → results/<run>/  → VERDICT · PPA · PERF · PPL
+```
+
+The recipe is the only source of the machine: `config/scheme.py` turns it into mxq's quantizer and
+arithmetic for the mxquant and accuracy models, and `build_spike.py` turns the same JSON into the
+functional model spike loads. The kernel is data (`kernels/registry.py`); the pipeline lowers it,
+runs it, and grades the bits that came back against the mxquant model of the same recipe.
+
+The models run **one after another** inside `pipeline.run`, in the order above: the mxquant model
+needs the lowering's edges, grading needs both outputs, and ppa/perf take milliseconds. The only
+model worth parallelising is accuracy, and it already splits its samples over the GPUs named in
+`--gpus` (one worker process per GPU). To run many kernel × recipe combinations at once, launch
+several `run_kernel.py` processes; each run writes its own `results/<timestamp>_…/` directory.
+
+## Entry points
+
+| command | what it does |
+|---|---|
+| `run_kernel.py --kernel K --config R [--models …]` | the graded design loop; `--models mxquant` = the model alone in seconds; `--build-only` stops at the ELF |
+| `python -m models.accuracy --config R --gpus 0,1,2,3 [--dry-run]` | perplexity for one recipe; `--dry-run` prints which layers would be patched |
+| `python -m models.spike.build_spike --config R [--force \| --list]` | build or list the per-recipe functional models |
+| `python -m models.ppa.ppa --config R` | silicon cost of the recipe's machine |
+| `python -m models.perf.perf --config R --m --k --n` | predicted timeline for one matmul |
+| `tests/selftest_*.py`, `tests/test_recipe_drift.py` | the self-tests, one claim each |
+| `bash scripts/setup.sh [--check]`, `source scripts/env.sh` | provisioning and the environment |
+| `app/capture_llama_layer.py`, `app/capture_llama_tiles.py` | capture real TinyLlama tensors for the llama kernels (needs the MXQuant clone) |
+| `baremetal/mxgemmini/gen/gen_*.py` | generators for the hand-written TinyLlama kernels |
+| `rtl_exact/verify_rtl_exact.py`, `rtl_exact/make_fixture.py` | the frozen fixture and its verifier |
+| `tools/extract_model.py` | one-off extraction from the gemmini tree |
+
+Run everything with `.venv/bin/python` from the repo root after `source scripts/env.sh`.
+
 ## Where things are
+
+```
+run_kernel.py                 the entry point
+kernels/     registry.py spec.py                     the kernel IR; --list shows what is registered
+config/      recipe.py recipes/*.json scheme.py     one JSON = one machine; recipe → mxq
+models/      reference/ mxquant/ spike/ ppa/ perf/ accuracy/   one folder per model of the machine
+grade/       pipeline.py metrics.py report.py telemetry.py     run, compare, record
+app/         mxiface mxgraph mxhost (lowering front half); mxformats mxwire mxlut (the wire);
+             mxq_golden.py (operand quantizer, renamed in the next PR); mxmesh/; capture_*
+compiler/targets/mx_gemmini_rocket/   contracts/ backend/{mxgemm_emit,mxgraph_emit,runner} runtime/
+baremetal/   hand-written TinyLlama kernels and their generators
+rtl_exact/   the frozen fixture and verifier
+tests/       the self-tests        tools/ extraction        scripts/ setup.sh env.sh
+merlin/  microscaling-quant/       submodules             MXQuant/   optional clone
+out/  results/  .venv/  toolchain/ generated, gitignored
+```
 
 Each directory has its own README covering what it holds and what to do there.
 
