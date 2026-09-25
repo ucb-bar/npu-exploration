@@ -122,11 +122,12 @@ arithmetic for the mxquant and accuracy models, and `build_spike.py` turns the s
 functional model spike loads. The kernel is data (`kernels/registry.py`); the pipeline lowers it,
 runs it, and grades the bits that came back against the mxquant model of the same recipe.
 
-The models run **one after another** inside `pipeline.run`, in the order above: the mxquant model
-needs the lowering's edges, grading needs both outputs, and ppa/perf take milliseconds. The only
-model worth parallelising is accuracy, and it already splits its samples over the GPUs named in
-`--gpus` (one worker process per GPU). To run many kernel × recipe combinations at once, launch
-several `run_kernel.py` processes; each run writes its own `results/<timestamp>_…/` directory.
+Inside `pipeline.run` the spike run and the three models that do not need its output run **at the
+same time**: the mxquant model needs only the lowering's edges, ppa only the recipe, perf only the
+stage shapes, so they start the moment the lowering has decided the edges and the grade joins them
+after spike returns. The accuracy model runs after the grade and splits its samples over the GPUs
+named in `--gpus`, one worker process per GPU. To run many kernel × recipe combinations at once,
+launch several `run_kernel.py` processes; each run writes its own `results/<timestamp>_…/` directory.
 
 ## Entry points
 
