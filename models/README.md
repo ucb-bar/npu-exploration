@@ -10,6 +10,7 @@ the line `run_kernel.py` prints for it. `run_kernel.py --models` picks which one
 | `reference/` | what does the kernel compute in plain float32? | kernel | `y` | `VERDICT` on the fp32 tier when no mxquant model is available | ms |
 | `mxquant/` | which bits must the recipe's machine produce for this kernel? | kernel, recipe, operand format, edge map from the lowering | `y`, every intermediate, the as-shipped `y` | `VERDICT PASS/FAIL hardware == mxquant` with spike, `MXQUANT … NO VERDICT` without | seconds |
 | `spike/` | what does the functional model of that machine produce? | recipe (`build_spike.py` patches and builds `libgemmini.so` per `build_id`) | the run itself lives in `grade/pipeline.py` for now | — | seconds to build, seconds to run |
+| `spike/*.patch` | a fix the `libgemmini` tree needs until it is upstream: the MX loop's first K tile overwrites its result rows, as the RTL does (without it the second matmul of a one-ELF graph accumulates onto the first) | | | | |
 | `ppa/` | what does the machine cost in silicon? | recipe | area, power, pJ/op | `PPA` | ms |
 | `perf/` | how long does this kernel take on that machine? | recipe, stage shapes | predicted cycles, utilisation, energy | `PERF` | ms |
 | `accuracy/` | what does the machine's arithmetic do to a language model? | recipe | TinyLlama WikiText-2 perplexity next to bf16 | `PPL` | ~12 min on 4 GPUs, then cached |

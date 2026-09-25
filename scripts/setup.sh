@@ -278,6 +278,7 @@ doctor() {
     row 1 "$(have_python && echo 1)"                                      ".venv (torch, numpy)"  "$REPO/.venv"
     row 0 "$(have_ppa && echo 1)"                                         "PPA workspace (optional)" "${MX_PPA_ROOT:-$PPA_DIR/ppa}"
     row 0 "$(command -v nvidia-smi >/dev/null 2>&1 && echo 1)"            "GPU (optional: accuracy model)" "nvidia-smi"
+    row 0 "$(grep -q 'ex_accumulate = (rs1 & 1)' "$LIBGEMMINI_DIR/gemmini.cc" 2>/dev/null && echo 1)" "libgemmini MX first-tile overwrite (optional: one-ELF graphs)" "$LIBGEMMINI_DIR/gemmini.cc  (models/spike/libgemmini_mx_loop_first_tile_overwrite.patch, then --phase libgemmini)"
     row 0 "$(have_mxquant && have_mxq_branch && echo 1)"                  "MXQuant (optional: capture, legacy)" "$REPO/MXQuant  (--with-mxquant)"
     echo
     if [ "$bad" = 0 ]; then
