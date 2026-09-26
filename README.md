@@ -53,10 +53,16 @@ If something fails to start, it is almost always the environment — see
 .venv/bin/python run_kernel.py --kernel linear --dtype fp4_e2m1 --config wide_acc
 .venv/bin/python run_kernel.py --kernel linear --config wide_acc --models mxquant       # the model alone, no spike
 .venv/bin/python run_kernel.py --kernel linear --config wide_acc --models all --gpus 0,1,2,3   # + perplexity
+.venv/bin/python compile_kernel.py --kernel mlp3 --target mx_rocket                       # compile only: ELF + expected bits
+.venv/bin/python compile_kernel.py --module tests/fixtures/modules.py:Attn                # a plain PyTorch module
 ```
 
-`run_kernel.py` is the single entry point: PyTorch → quantize → merlin → ELF → run → graded, with
-every model of the recipe's machine ([`models/`](models/README.md)) run from the same command.
+`run_kernel.py` is the exploration entry point: PyTorch → quantize → lower → ELF → run → graded,
+with every model of the recipe's machine ([`models/`](models/README.md)) run from the same
+command. `compile_kernel.py` is the compile entry point: the same lowering and the same C, for the
+spike or the RTL build, plus the bits the ELF must print (`expected.npy`) and a manifest, with no
+spike run and no grade. Both take a registry kernel; `compile_kernel.py --module FILE.py:Name`
+also takes a plain PyTorch module through the tracer in `kernels/trace.py`.
 
 ```
 [recipe  ] baseline  dim=16  operand=fp8->bf16  prod=e4m3  acc[e4..8 m4..7]  build_id=854265d5…
@@ -77,7 +83,7 @@ is recorded under `results/<timestamp>_<kernel>_<shape>/`.
 | `--dtype` | `fp8_e4m3` | MX operand format |
 | `--m --k --h --n` | 64 | batch rows, in_features, hidden, out_features |
 | `--tol` | 0.15 | pass threshold on relative Frobenius error vs fp32 |
-| `--artifacts` | off | also write an RTL-replay bundle (MLIR + C + `operands.npz`) |
+| `--artifacts` | off | also write an RTL-replay bundle (C + `operands.npz`) |
 | `--build-only` | off | stop at the ELF |
 | `--per-stage-elf` | off | one ELF per matmul, intermediates carried by the host; the default fuses a chain or emits a graph as one ELF |
 | `--legacy-mxquant` | off | grade with the previous reference (`grade/mxquant_ref.py`, MXQuant bundle extracted from the clone on first use); for the equivalence test, removed in the next PR |
@@ -92,11 +98,11 @@ is recorded under `results/<timestamp>_<kernel>_<shape>/`.
 ## How it fits together
 
 ```
-                       run_kernel.py   (one command, every model of one machine)
-                              │
-       ┌──────────────────────┼──────────────────────────┐
-       ▼                      ▼                          ▼
- kernels/registry       config/recipe.py              --models
+    run_kernel.py  (every model of one machine)      compile_kernel.py  (ELF + expected bits, no run)
+                              │                                   │
+       ┌──────────────────────┼──────────────────────────┐        │
+       ▼                      ▼                          ▼        ▼
+ kernels/registry       config/recipe.py              --models   kernels/trace.py  (--module: a PyTorch module)
  KernelSpec (x, stages) Recipe = one machine       which models run
        │                      │
        │            ┌─────────┴──────────┐
@@ -106,7 +112,7 @@ is recorded under `results/<timestamp>_<kernel>_<shape>/`.
        ▼            ▼                    ▼
  ┌───────────── grade/pipeline.run ────────────────────────────────────────┐
  │ reference  fp32                                                         │
- │ spike      LOWER: app/mxiface, mxgraph, mxhost → command buffer          │
+ │ spike      LOWER: compiler/lower.py (app/mxgraph, mxhost) → command buffer│
  │            (fused chain | graph | per-stage)   → compiler/targets backend│
  │            mxgemm_emit / mxgraph_emit → main.c → ELF → spike             │
  │ mxquant    models/mxquant on mxq, fed the same wire operands             │
@@ -134,6 +140,7 @@ launch several `run_kernel.py` processes; each run writes its own `results/<time
 | command | what it does |
 |---|---|
 | `run_kernel.py --kernel K --config R [--models …]` | the graded design loop; `--models mxquant` = the model alone in seconds; `--build-only` stops at the ELF |
+| `compile_kernel.py --kernel K \| --module F.py:Name --config R [--target spike\|mx_rocket] [--out DIR]` | compile only: ELF, its C, the command buffer, operands, `expected.npy`, `manifest.json`; no spike, no grade |
 | `python -m models.accuracy --config R --gpus 0,1,2,3 [--dry-run]` | perplexity for one recipe; `--dry-run` prints which layers would be patched |
 | `python -m models.spike.build_spike --config R [--force \| --list]` | build or list the per-recipe functional models |
 | `python -m models.ppa.ppa --config R` | silicon cost of the recipe's machine |
@@ -150,14 +157,15 @@ Run everything with `.venv/bin/python` from the repo root after `source scripts/
 ## Where things are
 
 ```
-run_kernel.py                 the entry point
-kernels/     registry.py spec.py                     the kernel IR; --list shows what is registered
+run_kernel.py                 the exploration entry point (graded)
+compile_kernel.py             the compile entry point (ELF + expected bits)
+kernels/     registry.py spec.py trace.py            the kernel IR; --list shows what is registered; trace.py = PyTorch module -> KernelSpec
 config/      recipe.py recipes/*.json scheme.py     one JSON = one machine; recipe → mxq
 models/      reference/ mxquant/ spike/ ppa/ perf/ accuracy/   one folder per model of the machine
 grade/       pipeline.py metrics.py report.py telemetry.py     run, compare, record
 app/         mxiface mxgraph mxhost (lowering front half); mxformats mxwire mxlut (the wire);
              mxq_golden.py (operand quantizer, renamed in the next PR); mxmesh/; capture_*
-compiler/targets/mx_gemmini_rocket/   contracts/ backend/{mxgemm_emit,mxgraph_emit,runner} runtime/
+compiler/    lower.py (KernelSpec -> command buffer); targets/mx_gemmini_rocket/ backend/{mxgemm_emit,mxgraph_emit,runner} runtime/
 baremetal/   hand-written TinyLlama kernels and their generators
 rtl_exact/   the frozen fixture and verifier
 tests/       the self-tests        tools/ extraction        scripts/ setup.sh env.sh
@@ -174,7 +182,7 @@ Each directory has its own README covering what it holds and what to do there.
 | [`baremetal/`](baremetal/README.md) | hand-written application kernels per target (TinyLlama on MxGemmini) |
 | [`config/`](config/README.md) | hardware recipes: one JSON = one machine (`--config`); `scheme.py` maps a recipe onto mxq |
 | [`models/`](models/README.md) | one folder per model of that machine: reference, mxquant, spike, ppa, perf, accuracy |
-| [`compiler/`](compiler/README.md) | the out-of-tree merlin target: contract + backend |
+| [`compiler/`](compiler/README.md) | the lowering (`lower.py`) and the backend that emits, builds and runs the ELF |
 | [`grade/`](grade/README.md) | run, compare, record — and what the verdict means |
 | [`rtl_exact/`](rtl_exact/README.md) | the reference configuration that matches the hardware bit for bit |
 | [`sim/`](sim/README.md) | RTL simulation and FPGA emulation substrates |

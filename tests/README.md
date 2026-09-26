@@ -18,7 +18,7 @@ holds it up.
 | `selftest_extracted.py` | `app/mxmesh/` still equals the models it was extracted from |
 | `selftest_mx_rocket_build.py` | one C source builds for **both** spike and `MX_ROCKET` |
 | `selftest_lower.py` | `compiler/lower.py` builds the chain command buffer merlin's parser used to build (26 recorded cases, `tests/oracle/command_buffers.json`), picks the lowering the pipeline picks, imports no merlin |
-| `selftest_compile.py` | `compile_kernel.py` writes the same `main.c` as the graded path for every kernel × format and both targets, its spike ELF prints `expected.npy` bit for bit, and it refuses before any build |
+| `selftest_compile.py` (+ `fixtures/modules.py`) | `compile_kernel.py` writes the same `main.c` as the graded path for every kernel × format and both targets, its spike ELF prints `expected.npy` bit for bit, and it refuses before any build |
 | `test_recipe_drift.py` | a recipe JSON equals the Chisel it elaborates (see [`../config/`](../config/README.md)) |
 | `oracle/` | fixtures the above compare against |
 

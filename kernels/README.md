@@ -66,6 +66,9 @@ See [`../README.md`](../README.md) for install and the run command.
 ## Tracing a torch module (kernels/trace.py)
 
 `trace(module, x, name=...)` turns a plain PyTorch module into a KernelSpec via torch.fx --
-bias-free Linears, matmuls (rhs transpose folded to `.T`), scaled/causal softmax, add, and
-`silu(g)*u` (swiglu); custom modules via `kernels.trace.TRANSLATORS`. Anything else raises.
-Every traced spec satisfies `spec.reference() == module(x)` in fp32 (tests/selftest_trace.py).
+bias-free Linears, matmuls (rhs transpose folded to `.T`), scaled/causal softmax, add,
+`silu(g)*u` (swiglu), `nn.RMSNorm`, and `kernels.trace.RoPE` (rotary embedding with fixed
+`[M][H]` cos/sin tables). A custom module is lowered whole by registering its type in
+`kernels.trace.TRANSLATORS` (it is then an FX leaf, never inlined). Anything else raises, including
+a shape the mesh cannot take. Every traced spec satisfies `spec.reference() == module(x)` in fp32
+(tests/selftest_trace.py). `compile_kernel.py --module FILE.py:Name` compiles one straight to an ELF.

@@ -4,6 +4,7 @@ Takes a `KernelSpec` (from [`kernels/`](../kernels/README.md)), runs the models 
 `--models` on the recipe's machine ([`models/`](../models/README.md)), and compares spike's result
 against the mxquant model. Everything hardware-facing is a call into [`app/`](../app/README.md) and
 [`compiler/`](../compiler/README.md); nothing here reimplements quantization, lowering, or codegen.
+The lowering itself is `compiler/lower.py`; the pipeline calls it and then runs what it produced.
 
 | file | role |
 |---|---|
