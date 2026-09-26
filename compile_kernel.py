@@ -7,6 +7,13 @@ One command turns a kernel and a hardware recipe into a directory the RTL team c
     .venv/bin/python compile_kernel.py --kernel mlp3                            # out/compile/mlp3/spike/
     .venv/bin/python compile_kernel.py --kernel attention --target mx_rocket    # the RTL build
     .venv/bin/python compile_kernel.py --kernel linear --config wide_acc --dtype fp4_e2m1 --out /tmp/lin
+    .venv/bin/python compile_kernel.py --module tests/fixtures/modules.py:Attn --m 64 --k 64
+    .venv/bin/python compile_kernel.py --module my_model.py:Block --input x.npy      # a real input
+
+``--module FILE.py:Name`` traces a plain PyTorch module (``kernels/trace.py``: bias-free Linear,
+matmul, causal softmax, add, silu*mul, nn.RMSNorm, RoPE with fixed tables) instead of a registry
+kernel. ``Name`` is a class, instantiated with no arguments after ``torch.manual_seed(seed)``, or
+an instance; the input is ``randn(m, k)`` unless ``--input`` names a ``[M][K]`` .npy file.
 
 The directory holds ``mx_gemmini_rocket.elf`` and its ``main.c``, ``command_buffer.json`` (what the
 backend emitted from, minus the byte arrays), ``operands.npz`` (the input and every wire operand),
@@ -24,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
@@ -128,7 +136,7 @@ def compile(spec, recipe, *, dtype: str = DEFAULT_DTYPE, target: str = "spike", 
     mesh = spec.mesh_stages
     mnk = spec.stage_mnk()
     manifest = {
-        "kernel": spec.name,
+        "kernel": spec.name, "module": getattr(spec, "module", None),
         "lowering": low.kind, "target": target, "dtype": dtype,
         "intermediate_dtype": (cb["tensors"] and next(iter(cb["tensors"].values()))["dtype"]
                                if low.kind == "fused" and len(spec.stages) > 1 else None),
@@ -173,6 +181,39 @@ def _git_head(path: Path) -> str | None:
         return None
 
 
+def load_module(ref: str, *, m: int, k: int, seed: int, recipe, input_npy: Path | None = None):
+    """``FILE.py:Name`` -> a traced KernelSpec, named ``Name``. TraceError is a ValueError."""
+    import numpy as np
+    import torch
+    from kernels.trace import trace
+    file, _, attr = ref.rpartition(":")
+    if not file or not attr:
+        raise ValueError(f"--module must be FILE.py:Name, got {ref!r}")
+    path = Path(file)
+    if not path.exists():
+        raise ValueError(f"--module: {path} does not exist")
+    ms = importlib.util.spec_from_file_location(path.stem, path)
+    mod = importlib.util.module_from_spec(ms)
+    ms.loader.exec_module(mod)
+    obj = getattr(mod, attr, None)
+    if obj is None:
+        raise ValueError(f"--module: {path} has no attribute {attr!r}")
+    torch.manual_seed(seed)
+    module = obj() if isinstance(obj, type) else obj
+    if not isinstance(module, torch.nn.Module):
+        raise ValueError(f"--module: {ref} is not an nn.Module (got {type(module).__name__})")
+    if input_npy is not None:
+        x = np.load(input_npy)
+        if x.ndim != 2:
+            raise ValueError(f"--input {input_npy}: expected a 2-D [M][K] array, got shape {x.shape}")
+        x = torch.from_numpy(np.ascontiguousarray(x, np.float32))
+    else:
+        x = torch.randn(m, k)
+    spec = trace(module, x, name=attr, dim=recipe.dim, block=recipe.block)
+    spec.module = ref
+    return spec
+
+
 def main(argv: list[str] | None = None) -> int:
     from config.recipe import RecipeError, list_recipes
     from config.recipe import load as load_recipe
@@ -182,7 +223,13 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--list", action="store_true", help="list kernels, recipes and targets, then exit")
-    ap.add_argument("--kernel", default="linear", help="kernel name (see --list)")
+    src = ap.add_mutually_exclusive_group()
+    src.add_argument("--kernel", default=None, help="kernel name (see --list); default linear")
+    src.add_argument("--module", default=None,
+                     help="FILE.py:Name -- trace a PyTorch module instead of a registry kernel "
+                          "(--h/--n do not apply: the module fixes its own widths)")
+    ap.add_argument("--input", type=Path, default=None,
+                    help="with --module: a [M][K] float .npy to use as the input instead of randn")
     ap.add_argument("--config", default="baseline",
                     help="hardware recipe: a name in config/recipes/ or a path to a .json")
     ap.add_argument("--dtype", default=DEFAULT_DTYPE, help="MX operand format (app/mxformats.py)")
@@ -214,7 +261,12 @@ def main(argv: list[str] | None = None) -> int:
     from backend import MxEmitError, MxRunnerError
     try:
         recipe = load_recipe(a.config)
-        spec = build(a.kernel, m=a.m, k=a.k, h=a.h, n=a.n, seed=a.seed)
+        if a.input is not None and a.module is None:
+            raise ValueError("--input applies to --module only; registry kernels make their own input")
+        if a.module:
+            spec = load_module(a.module, m=a.m, k=a.k, seed=a.seed, recipe=recipe, input_npy=a.input)
+        else:
+            spec = build(a.kernel or "linear", m=a.m, k=a.k, h=a.h, n=a.n, seed=a.seed)
         out = a.out or REPO / "out" / "compile" / spec.name / a.target
         compile(spec, recipe, dtype=a.dtype, target=a.target, out=out,
                 allow_lossy_chain=a.allow_lossy_chain, tel=tel)

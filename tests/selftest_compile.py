@@ -7,7 +7,10 @@ Claims:
 2. The spike-target ELF, run through the backend runner, prints ``expected.npy`` bit for bit
    (linear, mlp2, attention on baseline): the compile product closes the loop without the pipeline.
 3. Refusals happen before any build and need no toolchain: a shape violation, a graph kernel in a
-   non-fp8 format, a host stage with a Python function, an unknown target.
+   non-fp8 format, a host stage with a Python function, an unknown target, a bad ``--module`` or
+   ``--input``.
+4. ``--module FILE.py:Name`` compiles a plain PyTorch module (tests/fixtures/modules.py: attention,
+   SwiGLU, a RoPE chain): the spike ELF prints its ``expected.npy`` bit for bit.
 
 Needs the RISC-V toolchain for 1 and spike for 2; each SKIPs with a reason otherwise.
 
@@ -79,6 +82,22 @@ def main() -> int:
           _raises(lambda: ck.compile(build("linear"), base, target="fpga", out=Path("/nonexistent/x"),
                                      tel=quiet), "fpga"))
     check("unknown kernel -> exit 2", ck.main(["--kernel", "nope"]) == 2)
+    check("--module with a missing attribute -> exit 2",
+          ck.main(["--module", "tests/fixtures/modules.py:Nope", "--out", "/nonexistent/x"]) == 2)
+    check("--module with a missing file -> exit 2",
+          ck.main(["--module", "tests/fixtures/none.py:Attn", "--out", "/nonexistent/x"]) == 2)
+    check("--module without a colon -> exit 2",
+          ck.main(["--module", "tests/fixtures/modules.py", "--out", "/nonexistent/x"]) == 2)
+    check("--input without --module -> exit 2",
+          ck.main(["--kernel", "linear", "--input", "x.npy", "--out", "/nonexistent/x"]) == 2)
+    with tempfile.TemporaryDirectory() as td:
+        bad = Path(td) / "x.npy"
+        np.save(bad, np.zeros((2, 64, 64), np.float32))
+        check("--input with the wrong rank -> exit 2",
+              ck.main(["--module", "tests/fixtures/modules.py:Attn", "--input", str(bad),
+                       "--out", "/nonexistent/x"]) == 2)
+    check("--module that the tracer refuses (bias) -> exit 2",
+          ck.main(["--module", "tests/fixtures/modules.py:Biased", "--out", "/nonexistent/x"]) == 2)
     check("merlin is not loaded in a compile_kernel process",
           sys.modules.get("merlin") is None and not any(m.startswith("merlin.") for m in sys.modules))
 
@@ -119,6 +138,27 @@ def main() -> int:
             got = w.bf16_bits_to_float(np.array(out["Y0"], dtype=np.uint16))
             exp = np.load(Path(td) / "expected.npy")
             check(f"{k}: ELF output == expected.npy ({exp.size} values)", same(got.reshape(exp.shape), exp))
+
+    print("\n[4] --module: a plain PyTorch module, traced, compiled, run ---------------")
+    for name in ("Attn", "SwiGLU", "RopeChain"):
+        with tempfile.TemporaryDirectory() as td:
+            rc = ck.main(["--module", "tests/fixtures/modules.py:" + name, "--out", td])
+            if rc != 0:
+                check(f"{name}: compiled", False, f"exit {rc}")
+                continue
+            import json
+            man = json.loads((Path(td) / "manifest.json").read_text())
+            out, _ = runner.parse_output(runner.run_elf(man["elf"]["path"]))
+            got = w.bf16_bits_to_float(np.array(out["Y0"], dtype=np.uint16))
+            exp = np.load(Path(td) / "expected.npy")
+            check(f"{name}: lowering {man['lowering']}, module recorded, ELF output == expected.npy",
+                  man["module"].endswith(":" + name) and same(got.reshape(exp.shape), exp))
+    with tempfile.TemporaryDirectory() as td:
+        xin = Path(td) / "x.npy"
+        np.save(xin, np.random.default_rng(1).standard_normal((64, 64)).astype(np.float32))
+        rc = ck.main(["--module", "tests/fixtures/modules.py:Attn", "--input", str(xin), "--out", td])
+        saved = np.load(Path(td) / "operands.npz")["x"] if rc == 0 else None
+        check("--input is the spec's x", rc == 0 and np.array_equal(saved, np.load(xin)))
     return _finish()
 
 
