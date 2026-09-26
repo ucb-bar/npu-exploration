@@ -30,7 +30,7 @@ sys.path.insert(0, str(REPO))
 
 from kernels.registry import build            # noqa: E402
 from kernels.spec import HostStage, Stage     # noqa: E402
-from kernels.trace import TraceError, trace   # noqa: E402
+from kernels.trace import TRANSLATORS, RoPE, TraceError, rmsnorm_translator, trace   # noqa: E402
 
 CHECKS = []
 
@@ -132,6 +132,56 @@ def main() -> int:
           [getattr(s, "op", None) for s in tw.stages if isinstance(s, HostStage)] == ["swiglu"])
     check("swiglu: fp32 reference == module(x)",
           close(tw.reference(), swi(xw).detach().numpy()))
+
+    print("translators: leaves, RMSNorm, RoPE, validate")
+
+    class MyNorm(nn.Module):                      # a custom module: inlined unless it is a leaf
+        def __init__(self, d=64, eps=1e-5):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(d) * 1.5)
+            self.eps = eps
+
+        def forward(self, x):
+            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+
+    TRANSLATORS[MyNorm] = rmsnorm_translator
+    torch.manual_seed(4)
+    normed = nn.Sequential(MyNorm(), nn.Linear(64, 64, bias=False))
+    xn = torch.randn(64, 64)
+    tn = trace(normed, xn, name="normed")
+    check("custom module with a translator is ONE rmsnorm stage, not inlined",
+          [getattr(s, "op", None) for s in tn.stages] == ["rmsnorm", None])
+    check("custom rmsnorm: fp32 reference == module(x)",
+          close(tn.reference(), normed(xn).detach().numpy()))
+    del TRANSLATORS[MyNorm]
+    if hasattr(nn, "RMSNorm"):
+        torch.manual_seed(5)
+        tnn = nn.Sequential(nn.RMSNorm(64, eps=1e-5), nn.Linear(64, 64, bias=False))
+        with torch.no_grad():
+            tnn[0].weight.mul_(0.5).add_(0.75)
+        xr = torch.randn(64, 64)
+        trn = trace(tnn, xr, name="rmsnorm")
+        check("nn.RMSNorm -> rmsnorm stage, fp32 reference == module(x)",
+              getattr(trn.stages[0], "op", None) == "rmsnorm"
+              and close(trn.reference(), tnn(xr).detach().numpy()))
+    torch.manual_seed(6)
+    pos = torch.arange(64).float()[:, None]
+    freq = 1.0 / (10000 ** (torch.arange(0, 64, 2).float() / 64))
+    ang = torch.cat([pos * freq, pos * freq], dim=-1)          # [64][64], duplicated halves as llama
+    roped = nn.Sequential(nn.Linear(64, 64, bias=False), RoPE(ang.cos(), ang.sin()),
+                          nn.Linear(64, 64, bias=False))
+    xp = torch.randn(64, 64)
+    tp = trace(roped, xp, name="roped")
+    check("RoPE module -> rope host stage between two mesh stages",
+          [getattr(s, "op", None) for s in tp.stages] == [None, "rope", None])
+    check("rope: fp32 reference == module(x)", close(tp.reference(), roped(xp).detach().numpy()))
+    from app import mxgraph
+    g = mxgraph.from_spec(tp)
+    rope_step = next(s for s in g.steps if getattr(s, "op", None) == "rope")
+    check("rope: graph bakes cos/sin as consts", set(rope_step.const_names) == {"cos", "sin"}
+          and all(n in g.consts for n in rope_step.const_names.values()))
+    raises("validate=True refuses a shape the mesh cannot take (60 rows)",
+           lambda: trace(nn.Linear(64, 64, bias=False), torch.randn(60, 64)))
 
     print("fail-closed")
     raises("bias refused",

@@ -12,9 +12,10 @@ a module and translates each FX node into the registry's vocabulary:
     ``masked_fill`` recognized as ``causal=True``
   * ``a + b``                                  -> ``HostStage(op="add")``
   * ``silu(g) * u``                            -> ``HostStage(op="swiglu")``
-  * any module type in ``TRANSLATORS``         -> whatever its translator returns
-    (register your RMSNorm/RoPE here; ``linear_translator``/``rmsnorm_translator``
-    are provided)
+  * any module type in ``TRANSLATORS``         -> whatever its translator returns.
+    Registered: ``nn.Linear``, ``nn.RMSNorm`` (-> ``rmsnorm``) and :class:`RoPE`
+    (-> ``rope``). A module with a translator is traced as ONE node, never
+    inlined, so a custom norm registered here is lowered as a whole.
 
 Everything else RAISES, naming the FX node -- same stance as ``spec.py``:
 anything this cannot express fails loudly instead of silently lowering
@@ -73,7 +74,51 @@ def rmsnorm_translator(name: str, mod: nn.Module, srcs: tuple[str, ...]) -> Host
                      params={"weight": w.detach().float().numpy(), "eps": float(eps)})
 
 
+class RoPE(nn.Module):
+    """Rotary embedding with fixed tables, the form the tracer recognises.
+
+    ``cos`` and ``sin`` are ``[M][H]`` tables, one row per position, over the full width; the
+    arithmetic is ``app.mxhost.rope`` exactly (split-half rotation), so ``module(x)`` and the
+    spec's reference agree. Build one from a model's tables and call it on a ``[M][H]`` value.
+    """
+
+    def __init__(self, cos: torch.Tensor, sin: torch.Tensor) -> None:
+        super().__init__()
+        self.register_buffer("cos", cos.detach().float())
+        self.register_buffer("sin", sin.detach().float())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = x.shape[-1] // 2
+        rot = torch.cat([-x[:, h:], x[:, :h]], dim=-1)
+        return x * self.cos + rot * self.sin
+
+
+def rope_translator(name: str, mod: RoPE, srcs: tuple[str, ...]) -> HostStage:
+    return HostStage(name, op="rope", src=srcs[0],
+                     params={"cos": mod.cos.numpy(), "sin": mod.sin.numpy()})
+
+
 TRANSLATORS[nn.Linear] = linear_translator
+TRANSLATORS[RoPE] = rope_translator
+if hasattr(nn, "RMSNorm"):                      # torch >= 2.4
+    TRANSLATORS[nn.RMSNorm] = rmsnorm_translator
+
+
+def _translator(mod: nn.Module) -> Callable | None:
+    fn = TRANSLATORS.get(type(mod))
+    if fn is None:
+        for klass, f in TRANSLATORS.items():
+            if isinstance(mod, klass):
+                return f
+    return fn
+
+
+class _Tracer(fx.Tracer):
+    """A module with a translator is a leaf: symbolic_trace would otherwise inline any module that
+    is not from torch.nn and the translator table would never see it."""
+
+    def is_leaf_module(self, m: nn.Module, qualname: str) -> bool:
+        return _translator(m) is not None or super().is_leaf_module(m, qualname)
 
 
 # ---- FX-graph helpers ------------------------------------------------------------------
@@ -165,9 +210,9 @@ def trace(module: nn.Module, x: torch.Tensor, *, name: str = "traced",
 
     ``x`` is the real input tensor the spec will carry ([M][K] fp32). Raises
     :class:`TraceError` on anything the datapath + host-op vocabulary cannot
-    express. With ``validate=True`` the spec's shape legality is checked too.
+    express, and, with ``validate=True``, on a shape the mesh cannot take.
     """
-    gm = fx.symbolic_trace(module)
+    gm = fx.GraphModule(module, _Tracer().trace(module))
     modules = dict(gm.named_modules())
 
     stages: list[AnyStage] = []
@@ -233,12 +278,7 @@ def trace(module: nn.Module, x: torch.Tensor, *, name: str = "traced",
 
         elif node.op == "call_module":
             mod = modules[str(node.target)]
-            fn = TRANSLATORS.get(type(mod))
-            if fn is None:
-                for klass, f in TRANSLATORS.items():
-                    if isinstance(mod, klass):
-                        fn = f
-                        break
+            fn = _translator(mod)
             if fn is None:
                 if isinstance(mod, nn.SiLU):
                     pending_silu[node] = node.args[0]
@@ -321,5 +361,7 @@ def trace(module: nn.Module, x: torch.Tensor, *, name: str = "traced",
 
     spec = KernelSpec(name=name, x=x.detach().float(), stages=stages)
     if validate:
-        spec.validate(dim=dim, block=block)
+        errs = spec.validate(dim=dim, block=block)
+        if errs:
+            raise TraceError(f"{name}: {len(errs)} shape violation(s): " + "; ".join(errs))
     return spec
