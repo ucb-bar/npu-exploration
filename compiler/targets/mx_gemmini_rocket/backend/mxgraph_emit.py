@@ -157,6 +157,12 @@ def generate_graph_driver(cb: dict[str, Any], *, dtype: str = "fp8_e4m3") -> str
 
     steps, shapes, uses = graph["steps"], graph["shapes"], graph["uses"]
     consts = cb.get("graph_consts") or {}
+    # A mesh output a host op reads as fp32 (rmsnorm, swiglu and add read `<v>_f32`; softmax and
+    # rope read the bf16 directly) needs its bf16 -> f32 conversion even when no later matmul
+    # consumes it. `uses` records mesh-side consumers only, so without this the host op read a
+    # zeroed buffer (found 2026-09-25 by compiling a SwiGLU module: g and u were never converted).
+    host_f32 = {s for st in steps if st["kind"] == "host" and st["op"] not in ("softmax", "rope")
+                for s in st["srcs"]}
     leaves = set(graph["leaves"])
     result = graph["result"]
 
@@ -214,7 +220,7 @@ def generate_graph_driver(cb: dict[str, Any], *, dtype: str = "fp8_e4m3") -> str
         if st["kind"] == "host":
             body += _emit_host_step(st, uses)
             continue
-        body += _emit_mesh_step({**st, "_uses": uses}, shapes, leaves, dim,
+        body += _emit_mesh_step({**st, "_uses": uses, "_host_f32": host_f32}, shapes, leaves, dim,
                                 a_spad, spad_dest, spad_rows, f)
     body += ["", "  c1 = read_cycles();"]
 
@@ -309,7 +315,8 @@ def _emit_host_step(st: dict, uses: dict) -> list[str]:
     return lines + _emit_uses(out, m, n, uses, from_bf16=False) + [""]
 
 
-def _emit_uses(name: str, m: int, n: int, uses: dict, *, from_bf16: bool) -> list[str]:
+def _emit_uses(name: str, m: int, n: int, uses: dict, *, from_bf16: bool,
+               host_f32: bool = False) -> list[str]:
     """Hand a produced value back to the mesh, on whichever side(s) it is consumed.
 
     THE host seam, and unavoidable rather than lazy: the value is in host memory because either a
@@ -320,7 +327,7 @@ def _emit_uses(name: str, m: int, n: int, uses: dict, *, from_bf16: bool) -> lis
     columns. Getting that wrong is silent, so the side is part of every buffer's name.
     """
     how_set = sorted(uses.get(name, []))
-    if not how_set:
+    if not how_set and not host_f32:
         return []
     lines = []
     if from_bf16:
@@ -403,4 +410,5 @@ def _emit_mesh_step(st: dict, shapes: dict, leaves: set, dim: int,
             f"{spad_dest}, (uint64_t)scale_factors);",
             f"  mvout_bf16({out}_bf16, {spad_dest}, {m}, {n});",
         ]
-    return lines + _emit_uses(out, m, n, st["_uses"], from_bf16=True) + [""]
+    return lines + _emit_uses(out, m, n, st["_uses"], from_bf16=True,
+                              host_f32=out in st.get("_host_f32", ())) + [""]
