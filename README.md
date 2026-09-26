@@ -137,16 +137,31 @@ launch several `run_kernel.py` processes; each run writes its own `results/<time
 
 ## Entry points
 
+| what you want | command |
+|---|---|
+| grade a kernel on a machine, every model at once | `run_kernel.py --kernel attention --config wide_acc` |
+| the same, with TinyLlama perplexity for that machine | `run_kernel.py --kernel linear --config wide_acc --models all --gpus 0,1,2,3` |
+| just the bits a machine must produce, no spike, seconds | `run_kernel.py --kernel mlp3 --config narrow_prod --models mxquant` |
+| compile a kernel to an ELF for spike or the RTL build | `compile_kernel.py --kernel mlp3 --target mx_rocket` |
+| compile a plain PyTorch module, no registry entry | `compile_kernel.py --module my.py:Block --input x.npy` |
+| perplexity of one machine on its own | `python -m models.accuracy --config baseline --gpus 0,1,2,3` |
+| silicon cost of one machine | `python -m models.ppa.ppa --config baseline` |
+| predicted timeline of one matmul on it | `python -m models.perf.perf --config baseline --m 64 --k 64 --n 64` |
+| build or list the per-recipe functional models | `python -m models.spike.build_spike --config R --force` |
+| the claims, one test each | `tests/selftest_*.py` (17 of them) and `tests/test_recipe_drift.py` |
+| environment | `bash scripts/setup.sh --check`, `source scripts/env.sh` |
+
+Kernels by name: `linear`, `mlp2` … `mlp8`, `attention`, and `llama_attention` / `llama_mlp` once a
+capture exists. Machines: `baseline`, `flat_acc4`, `wide_acc`, `narrow_prod`, or any recipe JSON.
+Formats: every entry of `app/mxformats.py` on chains; `fp8_e4m3` only on graph kernels.
+`compile_kernel.py` builds and writes `expected.npy` but runs nothing; running the `mx_rocket` ELF
+on VCS or FPGA is the hardware team's step.
+
+Less common:
+
 | command | what it does |
 |---|---|
-| `run_kernel.py --kernel K --config R [--models …]` | the graded design loop; `--models mxquant` = the model alone in seconds; `--build-only` stops at the ELF |
-| `compile_kernel.py --kernel K \| --module F.py:Name --config R [--target spike\|mx_rocket] [--out DIR]` | compile only: ELF, its C, the command buffer, operands, `expected.npy`, `manifest.json`; no spike, no grade |
-| `python -m models.accuracy --config R --gpus 0,1,2,3 [--dry-run]` | perplexity for one recipe; `--dry-run` prints which layers would be patched |
-| `python -m models.spike.build_spike --config R [--force \| --list]` | build or list the per-recipe functional models |
-| `python -m models.ppa.ppa --config R` | silicon cost of the recipe's machine |
-| `python -m models.perf.perf --config R --m --k --n` | predicted timeline for one matmul |
-| `tests/selftest_*.py`, `tests/test_recipe_drift.py` | the self-tests, one claim each |
-| `bash scripts/setup.sh [--check]`, `source scripts/env.sh` | provisioning and the environment |
+| `python -m models.accuracy --config R --dry-run` | which layers the accuracy model would patch |
 | `app/capture_llama_layer.py`, `app/capture_llama_tiles.py` | capture real TinyLlama tensors for the llama kernels (needs the MXQuant clone) |
 | `baremetal/mxgemmini/gen/gen_*.py` | generators for the hand-written TinyLlama kernels |
 | `rtl_exact/verify_rtl_exact.py`, `rtl_exact/make_fixture.py` | the frozen fixture and its verifier |
