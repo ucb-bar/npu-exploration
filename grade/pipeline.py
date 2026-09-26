@@ -25,7 +25,7 @@ the format, not correctness. ``--models`` selects which models run; without spik
 is no verdict.
 
 Every hardware step is a call into this repo's own modules (``app/mxq_golden.py``
-for quantization — MXQuant, never transcribed — ``app/mxiface.py`` for lowering,
+for quantization — MXQuant, never transcribed — ``compiler/lower.py`` for lowering,
 and the ``mx_gemmini_rocket`` backend for codegen). Nothing here reimplements any
 of the three.
 """
@@ -44,9 +44,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
-#: Default operand format. Every other format is selected with --dtype and gated by
-#: app/mxformats.py, which refuses one this repo has not proven end to end.
-DEFAULT_DTYPE = "fp8_e4m3"
+from compiler.lower import DEFAULT_DTYPE, MatmulStage, command_buffer, lower  # noqa: F401
 SPEC_INPUT = "x"
 
 # THE SEAM CONSTANTS ARE GONE, deliberately (merlin_glue_port_plan.md D3, Step 1).
@@ -95,187 +93,6 @@ def _git_head(path: Path) -> str | None:
         return None
 
 
-def _fused_command_buffer(spec, dtype: str = DEFAULT_DTYPE, *,
-                          allow_lossy_chain: bool = False,
-                          tel=None) -> tuple[str, dict, list[dict], dict]:
-    """Lower a WHOLE matmul chain to one interface module + one command buffer.
-
-    Only stage 0 supplies an A operand. Every later stage's A is the previous stage's requantizer
-    output, produced on device and consumed in place — it never travels through the host, so it
-    never appears in the ``mx_operands`` side channel (the backend refuses one that does).
-
-    **There is no seam compensation any more**, and that is the point: every operand here is
-    quantized exactly once, by MXQuant, at its natural block scale. The two seams that used to be
-    chosen at this call site both existed to survive a requantizer that filled the element format's
-    range; it no longer does (see the note where their constants used to live).
-    """
-    import numpy as np
-
-    import mxiface
-    from app import mxformats, mxlut, mxq_golden
-    from app.mxq_golden import quantize_operand
-
-    f = mxformats.get(dtype, where="kernel lowering")
-    intermediate = f.mlir or f.name
-    mnk = spec.stage_mnk()
-
-    # A chained CODEBOOK format needs one thing a direct format does not: the table stage i's
-    # requantizer writes indices into (its C book) IS the table stage i+1 reads them with (its A
-    # book). Nothing on the host ever sees that intermediate -- it is produced on device -- so the
-    # table has to be chosen up front, from an ESTIMATE of the output.
-    #
-    # An fp32 matmul is a good enough estimate, and this is not a compromise: the reference
-    # generator does not estimate at all. `lut_mapping_demo.py:489` builds every C book with
-    # `make_lut`, which samples torch.randn and keeps the first 16 distinct values in-format. That
-    # works because the requantizer divides by the block scale BEFORE projecting, so the values a C
-    # book must span are already normalized (MXQuant puts a block max in [1,2)). Estimating from
-    # fp32 keeps that property and additionally shapes the 16 signposts to this kernel's data.
-    #
-    # Getting it WRONG costs accuracy, not correctness -- the hardware rounds to the nearest entry
-    # of whatever table it is given, and the other side decodes with the same one.
-    from .telemetry import Telemetry
-    tel = tel or Telemetry()
-    est = spec.x.numpy().astype(np.float32) if f.lut and len(spec.stages) > 1 else None
-    prev_c_book = None
-    if est is not None:
-        # The refusal lives HERE, not in the backend. The emitter drives a codebook chain correctly
-        # -- tests/selftest_formats.py proves it bit-exact against the reference's own tables. What
-        # cannot be done for some formats is CHOOSING the table: see mxformats.chain_refusal.
-        why = mxformats.chain_refusal(f)
-        if why and not allow_lossy_chain:
-            raise ValueError(
-                f"cannot chain {dtype}: {why}\n"
-                "        Pass allow_lossy_chain=True (--allow-lossy-chain) to run it anyway. The "
-                "REFERENCE has the same behaviour -- its own FP6 chain measures 58% against exact "
-                "arithmetic on its own operands -- so this is worth running deliberately, just not "
-                "by accident.")
-        if why:
-            tel.log("warning", f"LOSSY CHAIN accepted for {dtype}: {why.splitlines()[0]}")
-    stages = spec.stages                      # is_chain => every stage is a mesh matmul
-    n = len(stages)
-
-    ms: list = []
-    bundles: list[dict] = []
-    meta: list[dict] = []
-    for i, st in enumerate(stages):
-        m_, k_, n_ = mnk[st.name]
-        last = i == n - 1
-        out_name = "Y0" if last else f"T{i}"
-        # side="b" blocks along B's own K axis and returns [K/32][N] scales -- the layout the
-        # device indexes as b_off = group * N + col. No transpose here: the operand entry point
-        # answers that question, and it is verified against the shipped baremetal headers
-        # (tests/selftest_quantizer.py).
-        b_codes, b_scales, b_lut = quantize_operand(
-            st.weight.numpy().astype(np.float32), side="b", dtype=dtype)
-        bundle: dict = {"b_codes": b_codes, "b_scales": b_scales}
-        if i == 0:
-            a_codes, a_scales, a_lut = quantize_operand(
-                spec.x.numpy().astype(np.float32), side="a", dtype=dtype)
-            bundle |= {"a_codes": a_codes, "a_scales": a_scales}
-        if b_lut is not None:
-            # A book: stage 0 quantizes X itself; a chained stage inherits the previous stage's C.
-            a_book = a_lut if i == 0 else prev_c_book
-            # C book: only meaningful when a later stage will read this output. Estimate it.
-            if last:
-                c_book = a_book                     # unused by a bf16 commit; the load is still made
-            else:
-                est = est @ st.weight.numpy().astype(np.float32)
-                # pmax_shift is ESSENTIAL, not a detail. The requantizer divides by
-                # 2**(floor(log2 amax) - out_pmax), so its normalized output spans
-                # [2**out_pmax, 2**(out_pmax+1)) -- [16,32) for E3M2, not the [1,2) MXQuant's own
-                # convention produces. A codebook built without the shift spans +-2 while the
-                # hardware feeds it +-32, and every value saturates onto the top entry.
-                P = mxq_golden.normalized(est, fmt=f.mxq, axis="row", pmax_shift=f.out_pmax)
-                c_book = mxlut.pack_codebooks(
-                    mxlut.build_codebooks(P, axis="row", fmt=f), fmt=f)
-            bundle |= {"a_lut": a_book, "b_lut": b_lut, "c_lut": c_book}
-            prev_c_book = c_book
-        bundles.append(bundle)
-
-        ms.append(mxiface.MatmulStage(
-            m=m_, k=k_, n=n_, weight=f"W{i}", out=out_name,
-            lhs="X" if i == 0 else f"T{i - 1}",
-            out_dtype="bf16" if last else intermediate))
-        meta.append({"stage": i, "name": st.name, "where": "mesh", "out": out_name,
-                     "m": m_, "k": k_, "n": n_,
-                     "out_dtype": "bf16" if last else intermediate,
-                     # The OUTPUT codebook, when there is one. The mxquant model needs it to
-                     # reproduce a chained intermediate: the requantizer projects onto this table
-                     # and the next stage reads it back with the same one.
-                     "fused": True})
-
-    # Edge provenance, returned SEPARATELY from the stage records — those are serialized to
-    # metrics.json and a codebook is a numpy array. Every intermediate of a fused chain is written
-    # by the HARDWARE requantizer and never reaches the host, which is what the reference must
-    # model; `books` is the output codebook it was projected onto, when the format has one.
-    edges = {r["name"]: {"via": "requant", "books": b.get("c_lut")}
-             for r, b in zip(meta, bundles)}
-    iface = mxiface.chain_interface_mlir(ms, operand_fmt=dtype)
-    return iface, mxiface.to_command_buffer(iface, bundles), meta, edges
-
-
-def _graph_command_buffer(spec, dtype: str = DEFAULT_DTYPE) -> tuple[dict, list[dict], dict]:
-    """Lower a NON-CHAIN kernel to one command buffer carrying its graph on a side channel.
-
-    ``merlin_iface`` v0.1 cannot express attention (three live values, computed B operands, a
-    softmax it has no op for), so the graph travels alongside — the same decision, for the same
-    reason, as ``mx_operands`` carrying raw codes the tensor table cannot hold. Labelled as ours.
-    """
-    from dataclasses import asdict
-
-    from app import mxgraph
-
-    g = mxgraph.from_spec(spec)
-    ops = mxgraph.operand_bundles(g, dtype=dtype)
-    cb = {
-        "commands": [],                       # nothing merlin lowers: the graph IS the program
-        "tensors": {},
-        "graph": {
-            "steps": [{**asdict(st), "kind": st.kind} for st in g.steps],
-            "shapes": {k: list(v) for k, v in g.shapes.items()},
-            "uses": {k: sorted(v) for k, v in g.uses.items()},
-            "leaves": sorted(g.leaves),
-            "result": g.result,
-        },
-        "graph_operands": {k: {kk: vv for kk, vv in v.items() if vv is not None}
-                           for k, v in ops.items()},
-        "graph_consts": {k: v for k, v in g.consts.items()},
-    }
-    # Every edge of the graph lowering is drained to bf16 and re-quantized ON THE HOST
-    # (mxgraph_emit._emit_uses), so the reference must model host re-quantization -- NOT the
-    # hardware requantizer, which only the fused chain path uses.
-    meta = [{"stage": i, "name": st.name, "where": st.kind,
-             **({"m": st.m, "k": st.k, "n": st.n, "out_dtype": "bf16"}
-                if st.kind == "mesh" else {"note": st.op}),
-             "fused": True}
-            for i, st in enumerate(g.steps)]
-    # Every edge here is drained to bf16 and re-quantized ON THE HOST (mxgraph_emit._emit_uses) --
-    # NOT by the hardware requantizer, which only the fused chain uses.
-    edges = {st.name: {"via": "host"} for st in g.steps if st.kind == "mesh"}
-    return cb, meta, edges
-
-
-def _edges_without_running(spec, dtype: str, *, graphed: bool, fused: bool,
-                           allow_lossy_chain: bool, tel) -> tuple[list[dict], dict]:
-    """The stage records and edge map the lowering WOULD produce, without building or running.
-
-    Used when the spike model is not selected: the mxquant model must still be told how each
-    intermediate reaches the mesh (host re-quantization vs the hardware requantizer), and that is
-    decided by the lowering, not by the graph shape.
-    """
-    if graphed:
-        cb, meta, edges = _graph_command_buffer(spec, dtype)
-        return meta, edges
-    if fused:
-        iface, cb, meta, edges = _fused_command_buffer(spec, dtype, allow_lossy_chain=allow_lossy_chain,
-                                                       tel=tel)
-        return meta, edges
-    mnk = spec.stage_mnk()
-    meta = [{"stage": i, "name": st.name, "where": "mesh",
-             "m": mnk[st.name][0], "k": mnk[st.name][1], "n": mnk[st.name][2], "out_dtype": "bf16"}
-            if st.on_mesh else {"stage": i, "name": st.name, "where": "host", "note": st.note}
-            for i, st in enumerate(spec.stages)]
-    return meta, {st.name: {"via": "host"} for st in spec.stages if st.on_mesh}
 
 
 _GEOMETRY_CHECKED: set[str] = set()
@@ -372,7 +189,6 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     import torch
 
     import backend as mx          # the OOT merlin target package
-    import mxiface
     from app import mxwire as w
     from app.mxq_golden import quantize_operand
     from backend import mxgemm_emit
@@ -451,13 +267,13 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     # command buffer per matmul, carrying values as float.
     # A non-chain kernel whose every host stage is emittable becomes ONE ELF too, via the graph
     # emitter. That is D4 for attention: no numpy between two stages, ever.
-    graphed = (not spec.is_chain) and not per_stage_elf and all(
-        st.on_mesh or st.emittable for st in spec.stages)
-    fused = spec.is_chain and not per_stage_elf
     from app import mxformats as _mxf
     _f = _mxf.get(dtype, where="kernel lowering")
     INTERMEDIATE_DTYPE = _f.mlir or _f.name
     hw = None
+    low = lower(spec, dtype, per_stage=per_stage_elf, allow_lossy_chain=allow_lossy_chain,
+                warn=lambda m: tel.log("warning", m))
+    graphed, fused = low.kind == "graph", low.kind == "fused"
 
     # --- the models that do not need the hardware output run WHILE spike does ----------------
     # mxquant needs the lowering's edges, ppa the recipe, perf the stage shapes: none of them the
@@ -496,12 +312,11 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     if "spike" not in models:
         # No ELF, no run. The mxquant model still needs to know how each intermediate WOULD have
         # reached the mesh, which is a property of the lowering, so ask the lowering without running.
-        stage_records, edges = _edges_without_running(
-            spec, dtype, graphed=graphed, fused=fused, allow_lossy_chain=allow_lossy_chain, tel=tel)
+        stage_records, edges = low.stages, low.edges
         tel.log("spike", "not selected -- nothing built or run; there will be NO VERDICT")
         start_models(edges, stage_records)
     elif graphed:
-        cb, stage_records, edges = _graph_command_buffer(spec, dtype)
+        cb, stage_records, edges = low.cb, low.stages, low.edges
         gdir = workdir / "graph"
         n_mesh = sum(r["where"] == "mesh" for r in stage_records)
         n_host = len(stage_records) - n_mesh
@@ -529,8 +344,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
         hw = torch.from_numpy(w.bf16_bits_to_float(bits).copy()).reshape(
             *[int(v) for v in cb["graph"]["shapes"][cb["graph"]["result"]]])
     elif fused:
-        iface, cb, stage_records, edges = _fused_command_buffer(
-            spec, dtype, allow_lossy_chain=allow_lossy_chain, tel=tel)
+        cb, stage_records, edges = low.cb, low.stages, low.edges
         chain_dir = workdir / "chain"
         tel.log("lower", f"{len(stage_records)} stage(s) -> ONE command buffer "
                          f"({len(cb['commands'])} commands, {len(cb['tensors'])} leaf tensors)"
@@ -582,7 +396,6 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
         hw = torch.from_numpy(w.bf16_bits_to_float(bits).copy())
         if artifacts:
             art_dir.mkdir(parents=True, exist_ok=True)
-            (art_dir / "chain.interface.mlir").write_text(iface, encoding="utf-8")
             src = chain_dir / "main.c"
             if src.exists():
                 shutil.copy(src, art_dir / "chain.c")
@@ -659,11 +472,10 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
             # A mesh stage commits through the requantizer only when a later stage will consume it in
             # that form; everything else reads back as bf16.
             emit_fp8 = requant_chain and not last
-            iface = mxiface.matmul_interface_mlir(
-                m_, n_, k_, out_dtype=INTERMEDIATE_DTYPE if emit_fp8 else "bf16",
-                operand_fmt=dtype,
-                lhs=lhs_name, weight=f"W{i}", out=out_name)
-            cb = mxiface.to_command_buffer(iface, ops)
+            cb = command_buffer(
+                [MatmulStage(m=m_, k=k_, n=n_, weight=f"W{i}", out=out_name, lhs=lhs_name,
+                             out_dtype=INTERMEDIATE_DTYPE if emit_fp8 else "bf16")],
+                [ops], operand_fmt=dtype)
             stage_dir = workdir / f"stage{i}"
 
             if build_only:
@@ -685,7 +497,6 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
 
             if artifacts:
                 art_dir.mkdir(parents=True, exist_ok=True)
-                (art_dir / f"stage{i}.interface.mlir").write_text(iface, encoding="utf-8")
                 src = stage_dir / "main.c"
                 if src.exists():
                     shutil.copy(src, art_dir / f"stage{i}.c")
@@ -844,7 +655,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     if artifacts:
         np.savez_compressed(art_dir / "operands.npz", **saved)
         artifact_paths["rtl_replay_bundle"] = str(art_dir)
-        tel.log("artifacts", f"RTL replay bundle -> {art_dir} (interface.mlir + .c"
+        tel.log("artifacts", f"RTL replay bundle -> {art_dir} (.c"
                              f"{' for the fused chain' if fused else ' per stage'}, operands.npz)")
 
     run_dir = write_report(

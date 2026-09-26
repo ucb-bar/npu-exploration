@@ -40,12 +40,9 @@ def same(a, b) -> bool:
 
 
 def edges_for(pipeline, spec, dtype):
-    """Exactly what grade/pipeline.run hands the model, built by the same lowering functions."""
-    if spec.is_chain:
-        return pipeline._fused_command_buffer(spec, dtype, allow_lossy_chain=True)[3]
-    if all(st.on_mesh or st.emittable for st in spec.stages):
-        return pipeline._graph_command_buffer(spec, dtype)[2]
-    return {st.name: {"via": "host"} for st in spec.stages if st.on_mesh}
+    """Exactly what grade/pipeline.run hands the model, built by the same lowering."""
+    from compiler.lower import lower
+    return lower(spec, dtype, allow_lossy_chain=True).edges
 
 
 def main() -> int:

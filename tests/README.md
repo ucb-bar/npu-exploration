@@ -17,6 +17,7 @@ holds it up.
 | `selftest_requant.py` | the chained requantizer, per step, against a C oracle |
 | `selftest_extracted.py` | `app/mxmesh/` still equals the models it was extracted from |
 | `selftest_mx_rocket_build.py` | one C source builds for **both** spike and `MX_ROCKET` |
+| `selftest_lower.py` | `compiler/lower.py` builds the chain command buffer merlin's parser used to build (26 recorded cases, `tests/oracle/command_buffers.json`), picks the lowering the pipeline picks, imports no merlin |
 | `test_recipe_drift.py` | a recipe JSON equals the Chisel it elaborates (see [`../config/`](../config/README.md)) |
 | `oracle/` | fixtures the above compare against |
 
