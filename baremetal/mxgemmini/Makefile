@@ -27,8 +27,28 @@ OBJCOPY   := riscv$(XLEN)-unknown-elf-objcopy
 BENCH     := $(ROCC)/riscv-tests/benchmarks/common
 OUT       := $(REPO)/out/baremetal
 
-KERNELS   := llama_mlp llama_mlp_small llama_mlp_tiny \
-             llama_attention llama_attention_small llama_attention_tiny llama_attention_full
+KERNELS   := llama_mlp llama_mlp_small llama_mlp_tiny llama_mlp_full \
+             llama_attention llama_attention_small llama_attention_tiny llama_attention_full \
+             llama_qkv_tiny llama_proj_q llama_proj_k llama_proj_v llama_sep_qkv llama_two_mm llama_two_mm_micro \
+             llama_layer_full
+
+# Kernels whose data is a linked binary blob rather than C initializers, and the blob each uses.
+# See the objcopy rule below for why the basenames matter.
+BLOB_KERNELS := llama_attention_full llama_mlp_full llama_layer_full llama_model llama_model_l2
+BLOBS        := llama_attn_full llama_mlp_full llama_layer_full llama_model llama_model_l2
+blob_llama_attention_full := llama_attn_full
+blob_llama_mlp_full       := llama_mlp_full
+blob_llama_layer_full     := llama_layer_full
+blob_llama_model          := llama_model
+blob_llama_model_l2       := llama_model_l2
+blob_of = $(blob_$(1))
+
+# `llama_model_l2` is llama_model.c against a 2-layer data header -- the bring-up build. The layer
+# count lives in the generated data, so both are the same source; src/llama_model_l2.c is a shim
+# that selects the header, exactly as llama_mlp_small.c does. The shim is the pattern rule's own
+# prerequisite, so the real source has to be named as an extra one.
+$(foreach d,spike mx_rocket,\
+  $(eval $(OUT)/$(d)/llama_model_l2: $(CURDIR)/src/llama_model.c))
 
 # The MX bisection ladder: fifteen tiny self-checking ELFs. mxl0..mxl9 each take ONE delta from
 # the 64x64 ISA shape that passes, walking to the llama projection that does not; mxl10..mxl14 are
@@ -73,32 +93,42 @@ $(foreach k,$(LADDER),$(eval $(OUT)/spike/$(k) $(OUT)/mx_rocket/$(k): $(CURDIR)/
 
 # The sliced variants are the base kernel with a different data header selected, so the pattern
 # rule's own prerequisite misses the source that actually carries the kernel.
-$(foreach k,llama_attention_small llama_attention_tiny,\
+$(foreach k,llama_attention_small llama_attention_tiny llama_qkv_tiny llama_proj_q llama_proj_k llama_proj_v llama_sep_qkv llama_two_mm llama_two_mm_micro,\
   $(eval $(OUT)/spike/$(k) $(OUT)/mx_rocket/$(k): $(CURDIR)/src/llama_attention.c))
 $(foreach k,llama_mlp_small llama_mlp_tiny,\
   $(eval $(OUT)/spike/$(k) $(OUT)/mx_rocket/$(k): $(CURDIR)/src/llama_mlp.c))
 
-# llama_attention_full carries 10.8 MB of weights. As C initializers that is ~56 MB of source, so
-# the data is a binary blob linked as its own section. objcopy derives the symbol names from the
-# input PATH, so the `cd data` is load-bearing: it is what makes them
-# _binary_llama_attn_full_bin_*. Default section alignment is 1, but the header casts to uint16_t*.
-$(OUT)/%/llama_attn_full_blob.o: $(CURDIR)/data/llama_attn_full.bin
-	@mkdir -p $(dir $@)
+# The full sub-layer kernels carry their weights as a linked BINARY BLOB, not C initializers:
+# 10.8 MB (attention) and 37.2 MB (MLP), which as `0x%02x, ` text would be ~56 MB and ~220 MB of
+# source -- minutes of GCC and gigabytes of RAM, if it compiled at all. objcopy derives the symbol
+# names from the input PATH, so the `cd data` is load-bearing: it is what makes them
+# _binary_<name>_bin_*. Default section alignment is 1, but the headers cast to uint16_t*.
+define BLOB_RULE
+$(OUT)/$(1)/$(2)_blob.o: $(CURDIR)/data/$(2).bin
+	@mkdir -p $$(dir $$@)
 	cd $(CURDIR)/data && $(OBJCOPY) -I binary -O elf64-littleriscv -B riscv \
-		--set-section-alignment .data=64 llama_attn_full.bin $@
-
-$(OUT)/spike/llama_attention_full:     $(OUT)/spike/llama_attn_full_blob.o
-$(OUT)/mx_rocket/llama_attention_full: $(OUT)/mx_rocket/llama_attn_full_blob.o
+		--set-section-alignment .data=64 $(2).bin $$@
+endef
+$(foreach d,spike mx_rocket,$(foreach b,$(BLOBS),$(eval $(call BLOB_RULE,$(d),$(b)))))
+$(foreach d,spike mx_rocket,$(foreach k,$(BLOB_KERNELS),\
+  $(eval $(OUT)/$(d)/$(k): $(OUT)/$(d)/$(call blob_of,$(k))_blob.o)))
 
 $(OUT)/spike/%: $(CURDIR)/src/%.c $(DEPS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS_BM) -DSPIKE_SIM $< -o $@ $(RUNTIME) \
-		$(if $(filter llama_attention_full,$*),$(OUT)/spike/llama_attn_full_blob.o,) $(LIBS)
+	$(CC) $(CFLAGS_BM) -DSPIKE_SIM $(EXTRA_$*) $< -o $@ $(RUNTIME) \
+		$(if $(filter $(BLOB_KERNELS),$*),$(OUT)/spike/$(call blob_of,$*)_blob.o,) $(LIBS)
 
 $(OUT)/mx_rocket/%: $(CURDIR)/src/%.c $(DEPS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS_BM) -DMX_ROCKET $< -o $@ $(RUNTIME) \
-		$(if $(filter llama_attention_full,$*),$(OUT)/mx_rocket/llama_attn_full_blob.o,) $(LIBS)
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET $(EXTRA_$*) $< -o $@ $(RUNTIME) \
+		$(if $(filter $(BLOB_KERNELS),$*),$(OUT)/mx_rocket/$(call blob_of,$*)_blob.o,) $(LIBS)
+
+# The stacked-model kernels are kept OUT of the default KERNELS list: the full one carries ~1 GB of
+# weights, so `make` should not build it incidentally, and both need data that only
+# `gen_llama_model.py` produces.
+.PHONY: model model-l2
+model:    $(OUT)/spike/llama_model    $(OUT)/mx_rocket/llama_model
+model-l2: $(OUT)/spike/llama_model_l2 $(OUT)/mx_rocket/llama_model_l2
 
 # Regenerate every data header from the newest capture. The full-attention one needs an
 # --all-heads capture; see gen/gen_llama_attn_full.py.
@@ -108,6 +138,8 @@ data:
 	cd $(CURDIR)/gen && $(VENV) gen_llama_layer.py attn --d 256 --tag _small
 	cd $(CURDIR)/gen && $(VENV) gen_llama_layer.py mlp attn --d 64 --tag _tiny
 	cd $(CURDIR)/gen && $(VENV) gen_llama_attn_full.py
+	cd $(CURDIR)/gen && $(VENV) gen_llama_mlp_full.py
+	cd $(CURDIR)/gen && $(VENV) gen_llama_layer_full.py
 	cd $(CURDIR)/gen && $(VENV) gen_mx_ladder.py
 
 run: spike

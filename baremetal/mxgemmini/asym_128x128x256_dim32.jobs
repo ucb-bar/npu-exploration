@@ -1,0 +1,19 @@
+# DIM=32 ASYMMETRIC MX tests at 128x128x256 (M=128, N=128, K=256; tiles I=2 J=2 Kt=8 quad, I=4 single-act):
+# a sample of quad-throughput + dual-throughput combos. Deeper K + multi I/J + 2nd super-block on the asym
+# path. All PASS on spike (--extension=gemmini_dim32) as of 2026-09-21. These live in the bareMetalC ISA
+# suite; simq resolves the names against build_mx_rocket/bareMetalC/<name>-baremetal.
+#
+#   tools/simq run CONFIG=MxDim32AllAsymGemminiRocketConfig BINARY=baremetal/mxgemmini/asym_128x128x256_dim32.jobs JOBS=8
+#
+# Run under CONFIG=MxDim32AllAsymGemminiRocketConfig (dim32 + ALL 12 PE modes). Build the ELFs first:
+#   ../../software/gemmini-rocc-tests/build_mx_rocket.sh bareMetalC
+# Spike cross-check: spike --extension=gemmini_dim32 build_spike/bareMetalC/<name>-baremetal
+# Goldens: gen_asym.py (unified, DIM-aware, Spike-consistent).
+
+# --- quad throughput ---
+matmul_tiled_asym_fp4_fp6_128x128x256_dim32       # fp4-act (direct) x fp6-E3M2-wei (LUT)
+matmul_tiled_asym_e2m3_e5m2_128x128x256_dim32     # fp6-E2M3-act x fp8-E5M2-wei (dual-LUT, altfmt)
+
+# --- dual throughput (E4M3-single act x quad wei) ---
+matmul_tiled_asym_e4m3s_fp4_128x128x256_dim32     # E4M3-single act x fp4-wei
+matmul_tiled_asym_e4m3s_e5m2_128x128x256_dim32    # E4M3-single act x E5M2-wei

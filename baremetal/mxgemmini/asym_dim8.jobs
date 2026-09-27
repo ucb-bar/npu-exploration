@@ -1,0 +1,38 @@
+# The DIM=8 ASYMMETRIC MX tests (8x8 widen mesh): different-format activation x weight, BF16 output.
+# DIM=8 port of asym_dim32.jobs. These live in the bareMetalC ISA suite; simq resolves the names against
+# build_mx_rocket/bareMetalC/<name>-baremetal.
+#
+#   tools/simq run CONFIG=MxDim8AllAsymGemminiRocketConfig BINARY=baremetal/mxgemmini/asym_dim8.jobs JOBS=8
+#
+# IMPORTANT: run under CONFIG=MxDim8AllAsymGemminiRocketConfig (the 8x8 all-format asym mesh, all-bf16 acc).
+# Build the ELFs first: ../../software/gemmini-rocc-tests/build_mx_rocket.sh bareMetalC
+# Goldens: gen_asym.py --dim 8 (precision_for_dim(8) = all bf16), unified DIM-aware / Spike-consistent.
+# Tests: copied from the *_dim32 asym tests, only #define DIM 8 + the _dim8 golden include changed.
+#
+# EXCLUDED (same as dim32 -- weight=E4M3 x fp4/fp6 activation, never worked, out of scope): fp4_e4m3,
+# fp4_e4m3s, e3m2_e4m3, e3m2_e4m3s, e2m3_e4m3.
+
+# --- quad x quad combos (both operands nibble/LUT) ---
+matmul_tiled_asym_fp4_fp6_64x64_dim8
+matmul_tiled_asym_fp6_fp4_64x64_dim8
+matmul_tiled_asym_e2m3_e3m2_64x64_dim8
+matmul_tiled_asym_e3m2_e2m3_64x64_dim8
+matmul_tiled_asym_e2m3_e5m2_64x64_dim8
+matmul_tiled_asym_e5m2_e2m3_64x64_dim8
+matmul_tiled_asym_e2m3_fp4_64x64_dim8
+matmul_tiled_asym_fp4_e2m3_64x64_dim8
+matmul_tiled_asym_e3m2_e5m2_64x64_dim8
+matmul_tiled_asym_e5m2_e3m2_64x64_dim8
+matmul_tiled_asym_e4m3_e2m3_64x64_dim8
+matmul_tiled_asym_e4m3_e3m2_64x64_dim8
+matmul_tiled_asym_e4m3_e5m2_64x64_dim8
+matmul_tiled_asym_e4m3_fp4_64x64_dim8
+matmul_tiled_asym_e5m2_e4m3_64x64_dim8
+matmul_tiled_asym_e5m2_fp4_64x64_dim8
+matmul_tiled_asym_fp4_e5m2_64x64_dim8
+
+# --- e4m3-single dual-throughput combos (single act x quad wei) ---
+matmul_tiled_asym_e4m3s_fp4_64x64_dim8
+matmul_tiled_asym_e4m3s_e3m2_64x64_dim8
+matmul_tiled_asym_e4m3s_e5m2_64x64_dim8
+matmul_tiled_asym_e5m2_e4m3s_64x64_dim8

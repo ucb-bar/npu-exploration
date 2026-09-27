@@ -68,6 +68,43 @@ PASS, `1` on FAIL, `2` on error. Every run is recorded under `results/<timestamp
 | `--artifacts` | off | also write an RTL-replay bundle (MLIR + C + `operands.npz`) |
 | `--build-only` | off | stop at the ELF |
 
+### Running RTL simulations: `simq`
+
+[`tools/simq`](tools/README.md) queues VCS runs so you do not hand-drive `make run-binary`. It
+elaborates each config **once**, serially — sbt holds a lock — and runs everything else 8 at a time.
+
+```bash
+tools/simq build      CONFIG=MxGemminiRocketConfig
+tools/simq run-debug  CONFIG=MxGemminiRocketConfig BINARY=mxl4
+tools/simq run        CONFIG=MxGemminiRocketConfig BINARY=baremetal/mxgemmini/ladder.jobs JOBS=8
+```
+
+`BINARY=` takes one binary, a comma-separated list, or a `.jobs` file of them. `CONFIG=` and
+`BINARY=` cross-multiply. Other variables: `TIMEOUT= MAX_CYCLES= JOBS= OUT=`.
+
+`run-debug` also **dumps an FSDB** next to each job's log. Those are GB-scale, one per job, never
+cleaned up — so give a big waved batch its own `OUT=`, or use `--no-waves` for the debug simv
+without the dump.
+
+A run verb **queues and returns in about a second**, starting a background daemon on first use, so
+you can keep appending. Add `--wait` to block in this terminal instead — that is the only form with
+a meaningful exit code, since queueing returns before the work happens.
+
+```bash
+tools/simq run-debug CONFIG=MxGemminiRocketConfig BINARY=baremetal/mxgemmini/ladder.jobs
+tools/simq run       CONFIG=MxDim32AllGemminiRocketConfig BINARY=matmul_tiled_fp8_64x64
+tools/simq status        # queued / running / done, and which ones did not pass
+tools/simq watch         # follow progress live (ctrl-C stops watching, not the daemon)
+tools/simq clear         # retire finished records (--logs also drops their FSDBs)
+tools/simq stop          # claim no new jobs, exit once in-flight runs finish
+tools/simq stop --now    # also kill the simulations that are mid-run
+```
+
+A queued job for a not-yet-built config elaborates it *while the already-built configs keep
+running*. A simv older than its Scala is re-elaborated by default, so you cannot accidentally
+measure stale RTL — the mistake that cost two days in
+[`planning/rtl_mx_faults_handoff.md`](planning/rtl_mx_faults_handoff.md).
+
 ### Tests
 
 ```bash
@@ -90,7 +127,7 @@ Each directory has its own README covering what it holds and what to do there.
 | [`sim/`](sim/README.md) | RTL simulation and FPGA emulation substrates |
 | [`tests/`](tests/README.md) | the self-tests, and which claim each one defends |
 | [`scripts/`](scripts/README.md) | environment setup, and the errors it exists to prevent |
-| [`tools/`](tools/README.md) | one-off extraction utilities |
+| [`tools/`](tools/README.md) | `simq`, the VCS simulation queue; one-off extraction utilities |
 | [`planning/`](planning/README.md) | plans, decisions, and the measurements behind them |
 | `merlin/` | the compiler framework, git submodule, **unforked** |
 | `out/`, `results/`, `.venv/` | build artifacts, run records, the environment (gitignored) |

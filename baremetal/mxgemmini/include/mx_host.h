@@ -287,6 +287,19 @@ static float mx_rel_fro_bf16(const uint16_t *a, const uint16_t *b, int n) {
   return (den > 0.0f) ? sqrtf(num) / sqrtf(den) : 0.0f;
 }
 
+// Same, against an FP32 reference. The logits are the one place a device BF16 result is graded
+// against a tensor that was never quantized -- torch's own -- so rounding the reference down to
+// BF16 first would hide part of the error being measured.
+static float mx_rel_fro_bf16_f32(const uint16_t *a, const float *b, int n) {
+  float num = 0.0f, den = 0.0f;
+  for (int i = 0; i < n; i++) {
+    float x = mx_bf16_to_f32(a[i]), y = b[i];
+    num += (x - y) * (x - y);
+    den += y * y;
+  }
+  return (den > 0.0f) ? sqrtf(num) / sqrtf(den) : 0.0f;
+}
+
 static int mx_count_diff_u8(const uint8_t *a, const uint8_t *b, int n) {
   int d = 0;
   for (int i = 0; i < n; i++) if (a[i] != b[i]) d++;

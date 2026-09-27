@@ -36,6 +36,12 @@ Run it with the npu-exploration venv:
 
     .venv/bin/python3 -m app.capture_llama_layer                     # layer 5, head 0, neurons 0..63
     .venv/bin/python3 -m app.capture_llama_layer --layer 10 --nf 128
+    .venv/bin/python3 -m app.capture_llama_layer --all-heads --all-neurons   # a WHOLE layer
+
+`--all-heads` and `--all-neurons` each remove one of the two slices, and each buys a reference the
+sliced capture cannot have: the module's own forward output (`attn_torch`, `mlp_torch`). With both,
+nothing is truncated anywhere and `h_out` is the layer's true output -- so a kernel computing the
+complete layer can be graded against TinyLlama itself rather than against a numpy reimplementation.
 """
 from __future__ import annotations
 
@@ -170,10 +176,15 @@ def main() -> int:
                     help="keep EVERY attention head and the full q/k/v/o projections, so the\n"
                          "result is the layer's real attention output and can be graded\n"
                          "against the model's own forward pass. The MLP slice is unaffected.")
+    ap.add_argument("--all-neurons", action="store_true",
+                    help="keep EVERY FFN neuron (--nf becomes intermediate_size, --neuron0 0), so\n"
+                         "`down_proj` is a complete reduction and the result is the layer's real\n"
+                         "MLP output -- gradeable against the model's own `mlp` module, exactly as\n"
+                         "--all-heads does for attention. Combine the two for a whole layer.")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = ap.parse_args()
 
-    if args.nf % 32:
+    if args.nf % 32 and not args.all_neurons:
         raise SystemExit(f"--nf {args.nf} must be a multiple of 32 (the E8M0 block)")
     if args.seq % 16:
         raise SystemExit(f"--seq {args.seq} must be a multiple of 16 (the PE tile)")
@@ -189,6 +200,11 @@ def main() -> int:
     cfg = model.config
     D, H = cfg.hidden_size, cfg.hidden_size // cfg.num_attention_heads
     kv_head = args.head // (cfg.num_attention_heads // cfg.num_key_value_heads)
+    if args.all_neurons:                       # the whole FFN: down_proj becomes a full reduction
+        args.neuron0, args.nf = 0, int(cfg.intermediate_size)
+        if args.nf % 32:
+            raise SystemExit(f"intermediate_size {args.nf} is not a multiple of 32 (the E8M0 "
+                             f"block); --all-neurons cannot be used with this model")
     print(f"[model] D={D} heads={cfg.num_attention_heads} kv_heads={cfg.num_key_value_heads} "
           f"head_dim={H} intermediate={cfg.intermediate_size} layers={cfg.num_hidden_layers}")
     print(f"[slice] layer={args.layer} head={args.head} (kv head {kv_head})  "
@@ -236,6 +252,7 @@ def main() -> int:
         layer.input_layernorm.register_forward_hook(post("xn_attn_torch")),
         layer.post_attention_layernorm.register_forward_hook(post("xn_mlp_torch")),
         layer.mlp.gate_proj.register_forward_hook(post("gate_torch")),
+        layer.mlp.register_forward_hook(post("mlp_torch")),
     ]
     print(f"[run] one forward pass, input_ids {tuple(ids.shape)}")
     with torch.no_grad():
@@ -313,6 +330,26 @@ def main() -> int:
                 f"Suspect the head ordering, the GQA mapping (q head h -> kv head h//"
                 f"{nh // nkv}), or the o_proj [out][in] -> [in][out] transpose.")
 
+    # THE gate for --all-neurons, and the mirror of the --all-heads one above: with every neuron
+    # present `down_proj` is a complete reduction, so `ref_mlp` IS the layer's real MLP output and
+    # the `mlp` module's own forward hook is a reference this capture could not otherwise write
+    # down. A wrong neuron slice or a transposed down_proj gives plausible numbers and survives
+    # every other check here; neither survives this one. No cancellation worry, unlike attention:
+    # this compares the MLP output directly, never a residual-stream difference.
+    if args.all_neurons:
+        if "mlp_torch" not in grab:
+            raise SystemExit("the layer.mlp forward hook did not fire; transformers "
+                             f"{__import__('transformers').__version__} layer API may have moved")
+        t["mlp_torch"] = grab["mlp_torch"].numpy()
+        rel = float(np.linalg.norm(t["ref_mlp"] - t["mlp_torch"])
+                    / np.linalg.norm(t["mlp_torch"]))
+        print(f"[check] full MLP vs the model's own mlp output: rel_fro = {rel:.3e}  "
+              f"(bf16 forward vs fp32 here, so ~1e-3 is expected)")
+        if rel > 0.02:
+            raise SystemExit(
+                f"full MLP does not reproduce the model's own output (rel_fro {rel:.3e}). "
+                f"Suspect the neuron slicing or the down_proj [out][in] -> [in][out] transpose.")
+
     # ---- gates: the slicing and the transposes, which fail silently with plausible numbers ----
     xn = rmsnorm(t["h_mid"], t["w_post_ln"], eps)
     xn_torch = grab["xn_mlp_torch"].numpy()
@@ -329,6 +366,7 @@ def main() -> int:
 
     meta = dict(model_id=args.model_id, layer=args.layer, seq=args.seq, tok0=args.tok0,
                 head=args.head, kv_head=kv_head, all_heads=int(args.all_heads),
+                all_neurons=int(args.all_neurons),
                 neuron0=n0, nf=nf, d_model=D, head_dim=H,
                 n_heads=cfg.num_attention_heads, n_kv_heads=cfg.num_key_value_heads,
                 intermediate=cfg.intermediate_size, rms_eps=eps, rope_theta=_rope_theta(cfg),
@@ -336,7 +374,8 @@ def main() -> int:
 
     args.out.mkdir(parents=True, exist_ok=True)
     tag = "allheads" if args.all_heads else f"h{args.head}"
-    path = args.out / (f"layer{args.layer}_{tag}_n{n0}-{n0 + nf}"
+    ntag = "alln" if args.all_neurons else f"n{n0}-{n0 + nf}"
+    path = args.out / (f"layer{args.layer}_{tag}_{ntag}"
                        f"_s{args.seq}t{args.tok0}.npz")
     np.savez(path, **{k: v.astype(np.float32) for k, v in t.items()},
              **{f"meta_{k}": np.asarray(v) for k, v in meta.items()})

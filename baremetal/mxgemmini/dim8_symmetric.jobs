@@ -1,0 +1,22 @@
+# DIM=8 (8x8 mesh) symmetric MX LUT-format requant tests. ALL-BF16 accumulator (design assumption).
+# These live in the bareMetalC ISA suite; simq resolves the names against build_mx_rocket/bareMetalC/<name>-baremetal.
+#
+#   tools/simq run CONFIG=MxDim8AllGemminiRocketConfig BINARY=baremetal/mxgemmini/dim8_symmetric.jobs JOBS=8
+#
+# Run under CONFIG=MxDim8AllGemminiRocketConfig (the 8x8 all-format LUT mesh, all-bf16 acc). Build the ELFs
+# first: ../../software/gemmini-rocc-tests/build_mx_rocket.sh bareMetalC
+#
+# NOTES:
+#  - The tests hardcode `#define DIM 8`; their b_base (BANK_NUM*BANK_ROWS = 4*2048 = 8192 from the current
+#    DIM=32 test-side gemmini_params.h) fits the dim8 RTL scratchpad, so NO gemmini_params.h switch is needed
+#    to build these ELFs.
+#  - All 4 PASS on the functional model: spike --extension=gemmini_dim8 build_spike/bareMetalC/<name>-baremetal
+#    (libgemmini_dim8.so, built from software/libgemmini with -DGEMMINI_DIM=8; acc ramp all-bf16 at DIM=8).
+#  - This is the FIRST RTL run of the dim8 config -- if MxDim8AllGemminiRocketConfig fails to ELABORATE,
+#    that's a config-sizing issue at DIM=8 (e.g. scale_mem subbank=8, numOutputLanes=16), not a test bug.
+#  - Goldens: gen_mx_lut.py --dim 8 (precision_for_dim(8) = all bf16). RTL fix: QuantLut.scala DIM-general.
+
+matmul_tiled_fp8_e4m3_lut_64x64_requant_dim8      # E4M3-quad LUT
+# matmul_tiled_fp8_e5m2_64x64_requant_dim8          # E5M2 (altfmt1)
+# matmul_tiled_fp6_e2m3_lut_64x64_requant_dim8      # E2M3 (fp6/altfmt1)
+# matmul_tiled_fp6_e3m2_lut_64x64_requant_dim8      # E3M2 (fp6/altfmt0)
