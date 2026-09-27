@@ -77,10 +77,11 @@ run cost seven spike runs). Graded, its second matmul came out as Q+K: libgemmin
 previous contents of its result memory unconditionally, and that memory is zeroed only at reset, so
 one matmul per process was right and any second one landed on top of the first. The RTL overwrites
 on the first K tile (`LoopMatmul.scala` `accumulate = req.accumulate || k =/= 0`, `AccumulatorMem`
-`wdata := Mux(acc, adder_sum, data)`); the C model now does the same
-(`models/spike/libgemmini_mx_loop_first_tile_overwrite.patch`, applied to the `libgemmini` tree
-`setup.sh` builds from until it is upstream). Every previously passing result is unchanged by the
-patch, because a first tile added to zero is the tile.
+`wdata := Mux(acc, adder_sum, data)`); the C model now does the same. The fix is in the
+`libgemmini` tree itself (`software/libgemmini`, branch `mxgemmini-functional-model`, commit
+`9f10afe`): `mx_loop_ws_spad` reads `ex_accumulate` from rs1 bit 0 and clears the output region
+when it is 0. Every previously passing result is unchanged by it, because a first tile added to
+zero is the tile.
 
 For what has and has not run on RTL, see [`../sim/README.md`](../sim/README.md).
 

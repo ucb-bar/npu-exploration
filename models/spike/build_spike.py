@@ -69,8 +69,8 @@ def chipyard_root() -> Path:
     cy = os.environ.get("MERLIN_CHIPYARD") or os.environ.get("CHIPYARD_ROOT")
     if cy:
         return Path(cy)
-    # config / npu-exploration / gemmini / generators / <chipyard root>
-    return Path(__file__).resolve().parents[4]
+    # spike / models / npu-exploration / gemmini / generators / <chipyard root>
+    return Path(__file__).resolve().parents[5]
 
 
 def gemmini_root() -> Path:
