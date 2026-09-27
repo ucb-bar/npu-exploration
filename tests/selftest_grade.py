@@ -19,8 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch  # noqa: E402
 
-from grade.metrics import accuracy_metrics, bit_exact_diff, compare  # noqa: E402
-from grade.report import make_run_id, write_report  # noqa: E402
+from grade.metrics import MXQUANT_TIER, accuracy_metrics, bit_exact_diff, compare, mxquant_only  # noqa: E402
+from grade.report import VERDICT, make_run_id, write_report  # noqa: E402
 from grade.telemetry import Telemetry  # noqa: E402
 
 FAILURES: list[str] = []
@@ -52,7 +52,7 @@ def main() -> int:
         g_pass = compare(noisy, ref, None, tol_rel_fro=0.15)
         check("fp32 tier passes inside tolerance", g_pass["pass"] is True)
         check("tier is reported as fp32", g_pass["tier"] == "fp32")
-        check("golden slot is empty in phase 1", g_pass["correctness_vs_golden_model"] is None)
+        check("mxquant slot is empty on the fp32 tier", g_pass["correctness_vs_mxquant"] is None)
 
         g_fail = compare(noisy, ref, None, tol_rel_fro=0.0001)
         check("fp32 tier fails outside tolerance", g_fail["pass"] is False)
@@ -64,23 +64,33 @@ def main() -> int:
               f"finite {g_nan['finite']['n_finite']}/{g_nan['finite']['total']}")
 
         g_gold = compare(exact, ref, exact, tol_rel_fro=0.15)
-        check("golden tier reports bit-exact pass", g_gold["pass"] is True)
-        check("tier switches to mxquant_rtl_exact when a golden is supplied",
-              g_gold["tier"] == "mxquant_rtl_exact")
+        check("mxquant tier reports bit-exact pass", g_gold["pass"] is True)
+        check("tier switches to mxquant_recipe_exact when the model output is supplied",
+              g_gold["tier"] == MXQUANT_TIER == "mxquant_recipe_exact")
+        g_legacy = compare(exact, ref, exact, tol_rel_fro=0.15, tier="mxquant_rtl_exact")
+        check("the legacy implementation names its own tier", g_legacy["tier"] == "mxquant_rtl_exact")
 
-        # The golden verdict must be BIT-identity, with no tolerance anywhere in it: a run that is
+        # The mxquant verdict must be BIT-identity, with no tolerance anywhere in it: a run that is
         # numerically excellent but not identical still fails, and a huge tolerance cannot save it.
         off = ref.clone()
         off.view(-1)[0] += 1e-6
         g_off = compare(off, ref, ref, tol_rel_fro=1.0)
-        check("a near-miss fails the golden tier no matter the tolerance", g_off["pass"] is False,
-              f"{g_off['correctness_vs_golden_model']['n_mismatch']} element(s) differ")
+        check("a near-miss fails the mxquant tier no matter the tolerance", g_off["pass"] is False,
+              f"{g_off['correctness_vs_mxquant']['n_mismatch']} element(s) differ")
 
         # The as-shipped reference is reported, never a pass criterion -- it is EXPECTED to differ.
         g_ship = compare(exact, ref, exact, tol_rel_fro=0.15, shipped_reference=off)
         check("as-shipped delta is reported", "delta_vs_mxquant_as_shipped" in g_ship)
         check("as-shipped delta cannot fail a run", g_ship["pass"] is True,
               f"differs on {g_ship['delta_vs_mxquant_as_shipped']['n_mismatch']}, still PASS")
+
+        # No hardware (run_kernel.py --models mxquant): the model is recorded, nothing is graded.
+        g_only = mxquant_only(exact, ref, shipped_reference=off)
+        check("without hardware there is no verdict", g_only["pass"] is None)
+        check("the tier says so", g_only["tier"] == "mxquant_recipe_exact (no hardware)")
+        check("model vs fp32 and vs as-shipped are still recorded",
+              "accuracy_vs_fp32_reference" in g_only and "delta_vs_mxquant_as_shipped" in g_only)
+        check("VERDICT text for pass=None is NO VERDICT", VERDICT[None] == "NO VERDICT")
 
         print("\n[3] telemetry buffering -----------------------------------------")
         tel = Telemetry()
@@ -96,13 +106,24 @@ def main() -> int:
             results_dir=tmp, run_id=run_id,
             run_config={"kernel": "selftest", "m": 16, "k": 16, "n": 16},
             provenance={"simulator": "none", "note": "self-test, no hardware"},
-            hardware_output=noisy, fp32_reference=ref, golden_model_output=None,
+            hardware_output=noisy, fp32_reference=ref, mxquant_output=None,
             metrics=g_pass, artifacts={"elf": "n/a"}, telemetry=tel)
 
         for fn in ("config.json", "metrics.json", "log.jsonl",
                    "hardware_output.npy", "fp32_reference.npy"):
             check(f"{fn} written", (run_dir / fn).exists())
-        check("golden npy absent in phase 1", not (run_dir / "golden_model.npy").exists())
+        check("mxquant_output.npy absent when the model did not run",
+              not (run_dir / "mxquant_output.npy").exists())
+        run_dir2 = write_report(
+            results_dir=tmp, run_id=run_id + "_model_only",
+            run_config={"kernel": "selftest", "m": 16, "k": 16, "n": 16, "models": ["reference", "mxquant"]},
+            provenance={"simulator": "none"},
+            hardware_output=None, fp32_reference=ref, mxquant_output=exact,
+            metrics=g_only, artifacts={}, telemetry=Telemetry())
+        check("model-only report writes mxquant_output.npy and no hardware_output.npy",
+              (run_dir2 / "mxquant_output.npy").exists() and not (run_dir2 / "hardware_output.npy").exists())
+        check("model-only log says NO VERDICT",
+              "NO VERDICT" in (run_dir2 / "log.jsonl").read_text())
 
         lines = [json.loads(x) for x in
                  (run_dir / "log.jsonl").read_text().strip().splitlines()]

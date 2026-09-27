@@ -1,3 +1,6 @@
 [submodule "merlin"]
 	path = merlin
 	url = git@github.com:ucb-bar/merlin.git
+[submodule "microscaling-quant"]
+	path = microscaling-quant
+	url = git@github.com:chloe-wong/microscaling-quant.git

@@ -1,4 +1,4 @@
-"""Self-test of the recipe -> performance-model adapter (config/perf.py).
+"""Self-test of the recipe -> performance-model adapter (models/perf/perf.py).
 
 Same three layers as tests/selftest_ppa.py:
   1. the MAPPING: recipe + GEMM shape -> exactly the model's CLI spelling;
@@ -18,7 +18,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from config.perf import PerfError, perf_args, perf_model_path, run_perf  # noqa: E402
+from models.perf.perf import PerfError, perf_args, perf_model_path, run_perf  # noqa: E402
 from config.recipe import load  # noqa: E402
 
 CHECKS = []

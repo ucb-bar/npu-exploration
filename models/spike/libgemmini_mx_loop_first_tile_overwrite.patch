@@ -1,0 +1,47 @@
+diff --git a/gemmini.cc b/gemmini.cc
+index 9649748..3be07bd 100644
+--- a/gemmini.cc
++++ b/gemmini.cc
+@@ -1166,7 +1166,11 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
+   // C8.3: mx_loop_scale_resident is no longer sourced here (rs2 bit11). It now comes from
+   // gemmini_mxquant_config_mvout rs1 bit 62 (see mxquant_config_mvout), so the RTL requantizer
+   // can see the same flag on the scale-config path. rs2 bit11 is left free.
+-  (void)rs1;
++  // LOOP_WS rs1 bit 0 (ex_accumulate), as loop_ws() reads it: unless set, the first K tile of a
++  // matmul OVERWRITES its result rows. RTL: LoopMatmul.scala `accumulate = req.accumulate || k =/= 0`,
++  // AccumulatorMem `wdata := Mux(acc, adder_sum, data)`. Reading mx_smem unconditionally made the
++  // second MX matmul of a process land on top of the first (mx_smem is zeroed only at reset).
++  const bool ex_accumulate = (rs1 & 1) != 0;
+ 
+   const uint32_t C_spad = (uint32_t)((rs2 >> 32) & 0xFFFFFFFFu);
+   const uint16_t TI = gemmini_state.loop_ws_I;
+@@ -1290,7 +1294,8 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
+               float scaled = bf16_round(Ct[r][c] * s);
+               const size_t idx = smem_base + (size_t)(i*TM + r) * N_DIM + (j*TN + c);
+               if (idx >= gemmini_state.mx_smem.size()) continue;
+-              float prev = bf16_to_f32(gemmini_state.mx_smem[idx]);
++              float prev = (k_outer == 0 && !ex_accumulate) ? 0.0f
++                                                          : bf16_to_f32(gemmini_state.mx_smem[idx]);
+               gemmini_state.mx_smem[idx] = f32_to_bf16_rne(bf16_accum_add(prev, scaled));
+             }
+         }
+@@ -1445,7 +1450,8 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
+               float scaled = bf16_round(Ct[r][c] * s);
+               const size_t idx = smem_base + (size_t)(i*TM + r) * N_DIM + (j*TN + c);
+               if (idx >= gemmini_state.mx_smem.size()) continue;
+-              float prev = bf16_to_f32(gemmini_state.mx_smem[idx]);
++              float prev = (k_outer == 0 && !ex_accumulate) ? 0.0f
++                                                          : bf16_to_f32(gemmini_state.mx_smem[idx]);
+               gemmini_state.mx_smem[idx] = f32_to_bf16_rne(bf16_accum_add(prev, scaled));
+             }
+         }
+@@ -1592,7 +1598,8 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
+               float scaled = bf16_round(Ct[r][c] * s);
+               const size_t idx = smem_base + (size_t)(i*TM + r) * N_DIM + (j*TN + c);
+               if (idx >= gemmini_state.mx_smem.size()) continue;
+-              float prev = bf16_to_f32(gemmini_state.mx_smem[idx]);
++              float prev = (k_outer == 0 && !ex_accumulate) ? 0.0f
++                                                          : bf16_to_f32(gemmini_state.mx_smem[idx]);
+               gemmini_state.mx_smem[idx] = f32_to_bf16_rne(bf16_accum_add(prev, scaled));
+             }
+         }

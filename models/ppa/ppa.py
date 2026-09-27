@@ -23,7 +23,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 
 #: Defaults matching the model's own tapeout-baseline invocation (ppa/README.md
 #: "Quick start"): --util 0.965 --blocks-variant new --calib new at 2.0 ns.
@@ -149,6 +149,13 @@ def run_ppa(recipe, *, util: float = DEFAULT_UTIL,
         "workspace_head": _workspace_head(root),
     }
     return out
+
+
+def line(ppa: dict) -> str:
+    """The PPA line run_kernel.py prints: the recipe machine's silicon cost."""
+    return (f"PPA      {ppa['area_um2']/1e3:.1f}k um2   {ppa['power_mw']:.1f} mW   "
+            f"{ppa['pj_per_op']:.2f} pJ/op   "
+            f"(post-syn {ppa['model']['tech']} model, calibrated={ppa['model']['calibrated']})")
 
 
 def main() -> int:

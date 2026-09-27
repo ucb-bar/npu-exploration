@@ -2,8 +2,9 @@
 
 This is the **single source of truth** for what the spike model and the RTL requantizer are
 supposed to produce. It does not reimplement any quantization arithmetic: it calls
-``MXQuant/end_to_end_linear/mx_block_quant.quantize_mx_block32`` directly, so it cannot drift
-from the reference the LLM evaluations use.
+``quantize_mx_block32`` -- MXQuant's API, computed by the mxq library through
+``models/mxquant/block.py`` and proved bit-identical to MXQuant's own quantizer on every format
+(``tests/selftest_block.py``) -- so it cannot drift from the reference the LLM evaluations use.
 
 ``quantize_mx_block32`` returns *values* — ``(P, X)`` with ``V_hat = P * broadcast(X)``. The
 hardware instead emits a **wire format**: one E8M0 scale byte per block plus one E4M3 code byte
@@ -44,29 +45,25 @@ from typing import Literal
 
 import numpy as np
 
-# --- the reference, imported rather than transcribed ----------------------------------------------
+# --- the reference quantizer: MXQuant's API, computed by mxq ---------------------------------------
+# ``models/mxquant/block.py`` provides ``quantize_mx_block32`` / ``_broadcast_scales`` / ``BLOCK`` with
+# MXQuant's shapes and numerics (round-to-nearest-even, block max floored at FLT_EPSILON) on the mxq
+# submodule, so the MXQuant clone is no longer needed to compile a kernel. ``MXQ_ROOT`` is kept only
+# for the optional real-tile data that ``_llama_tiles`` / ``self_check`` read when it is present.
 
 MXQ_ROOT = Path(__file__).resolve().parent.parent / "MXQuant"
-if not (MXQ_ROOT / "end_to_end_linear" / "mx_block_quant.py").exists():
-    raise ImportError(
-        f"MXQuant repo not found at {MXQ_ROOT}. This module is a thin wrapper around it and has "
-        "no fallback -- reimplementing the reference here is exactly what it exists to avoid.")
-if str(MXQ_ROOT) not in sys.path:
-    sys.path.insert(0, str(MXQ_ROOT))
 
-import torch  # noqa: E402  (after sys.path setup, as the reference needs it)
-from end_to_end_linear.mx_block_quant import (  # noqa: E402
-    BLOCK, quantize_mx_block32, _broadcast_scales,
-)
+import torch  # noqa: E402
+from models.mxquant.block import BLOCK, _broadcast_scales, quantize_mx_block32  # noqa: E402
 
 from . import mxformats  # noqa: E402
 from .mxwire import E8M0_BIAS, fp8_e4m3_decode  # noqa: E402
 
-# The block size is stated in three places -- the reference, our format table, and the RTL. Two of
+# The block size is stated in three places -- the quantizer, our format table, and the RTL. Two of
 # them are importable, so check them against each other rather than trusting that they agree.
 if BLOCK != mxformats.BLOCK:
     raise ImportError(
-        f"block-scale group disagreement: MXQuant says {BLOCK}, app/mxformats.py says "
+        f"block-scale group disagreement: models/mxquant/block.py says {BLOCK}, app/mxformats.py says "
         f"{mxformats.BLOCK}. One of them is wrong about the hardware.")
 
 Axis = Literal["row", "col"]

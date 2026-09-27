@@ -1,6 +1,6 @@
 """Predicted kernel timeline: adapter to the MxGemmini performance model.
 
-Where ``config/ppa.py`` prices the MACHINE (area/power, kernel-independent),
+Where ``models/ppa/ppa.py`` prices the MACHINE (area/power, kernel-independent),
 this prices the RUN: cycles, wall time, utilization and energy of each GEMM
 stage on the machine the recipe describes. The model is Amanda Shi's
 ``MxGemmini-workspace/ppa/perf/perf_model.py`` -- RTL-FSDB-calibrated
@@ -21,7 +21,7 @@ mvins, GPU-written scales, no overlap -- which is the configuration the FSDB
 validation covered. ``--energy`` re-runs compose_gemmini at the ACHIEVED
 utilization, giving energy per stage and pJ/op including idle.
 
-Root discovery reuses ``config.ppa.ppa_root()`` (``$MX_PPA_ROOT`` override);
+Root discovery reuses ``models.ppa.ppa.ppa_root()`` (``$MX_PPA_ROOT`` override);
 absence raises :class:`PerfError`, which callers treat as "skip, log".
 """
 from __future__ import annotations
@@ -31,9 +31,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from config.ppa import DEFAULT_CLOCK_NS, PpaError, ppa_root, _workspace_head
+from models.ppa.ppa import DEFAULT_CLOCK_NS, PpaError, ppa_root, _workspace_head
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 
 
 class PerfError(RuntimeError):
@@ -153,6 +153,8 @@ def run_perf(recipe, stages, *, as_measured: bool = True, energy: bool = True,
     script = perf_model_path()   # fail before any work if the model is absent
     per_stage = []
     for s in stages:
+        if s.get("where", "mesh") != "mesh":       # host stages run on Rocket; the model prices the mesh
+            continue
         res = _run_one(recipe, int(s["m"]), int(s["n"]), int(s["k"]),
                        str(s.get("out_dtype", "bf16")),
                        as_measured=as_measured, energy=energy, clock_ns=clock_ns)
@@ -181,6 +183,15 @@ def run_perf(recipe, stages, *, as_measured: bool = True, energy: bool = True,
         "workspace_head": _workspace_head(script.parents[1]),
     }
     return out
+
+
+def line(perf: dict) -> str:
+    """The PERF line run_kernel.py prints: the predicted timeline of this kernel on that machine."""
+    e = perf.get("energy")
+    return (f"PERF     {perf['total_cycles_predicted']} cycles predicted   "
+            f"{perf['total_us']:.1f} us   util {perf['utilization_pct_min']:.1f}%"
+            + (f"   {e['uj_kernel']:.2f} uJ ({e['pj_per_op_achieved']:.1f} pJ/op achieved)" if e else "")
+            + f"   [spike functional count: {perf.get('spike_functional_cycles')}]")
 
 
 def main() -> int:

@@ -2,8 +2,8 @@
 
 A recipe is consumed by THREE models of the same machine:
 
-  * ``grade/golden.py``            — the Python model (what we expect)
-  * ``config/build_spike.py``      — patches libgemmini's C model, seconds to build
+  * ``models/mxquant/mxquant.py``  — the Python model on mxq (the bits we expect)
+  * ``models/spike/build_spike.py`` — patches libgemmini's C model, seconds to build
   * ``config/scala/JsonGemminiConfig.scala`` — Chisel elaboration, tens of minutes
 
 so the schema is the one the Scala parser already enforces (``array`` / ``types`` /

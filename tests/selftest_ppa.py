@@ -1,4 +1,4 @@
-"""Self-test of the recipe -> PPA-model adapter (config/ppa.py).
+"""Self-test of the recipe -> PPA-model adapter (models/ppa/ppa.py).
 
 Three layers, mirroring the other selftests:
   1. the MAPPING, pinned to the model's own documented tapeout invocation --
@@ -19,7 +19,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from config.ppa import PpaError, ppa_args, ppa_root, run_ppa  # noqa: E402
+from models.ppa.ppa import PpaError, ppa_args, ppa_root, run_ppa  # noqa: E402
 from config.recipe import load  # noqa: E402
 
 CHECKS = []
