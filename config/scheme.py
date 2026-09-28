@@ -33,6 +33,7 @@ through the wire operands the compiler emitted, ``models/mxquant/kernel.py`` ``_
 """
 from __future__ import annotations
 
+import os
 from functools import partial
 
 import models  # noqa: F401  -- puts the mxq submodule on sys.path
@@ -117,7 +118,27 @@ def datapath(recipe: Recipe):
     """``(Arithmetic, schedule, window)`` of the hardware this recipe describes."""
     from mxq import matmul
     pe, pm = product(recipe)
-    return matmul.MXGEMMINI(pe, pm), schedule(recipe), recipe.dim
+    return mxgemmini(pe, pm), schedule(recipe), recipe.dim
+
+
+#: MxFPMul PROD_FLOOR: the hardware flushes a product below 2^-16 to zero (rtl_exact.rtl_datapath.PROD_FLOOR).
+PROD_FLOOR = -16
+
+
+def mxgemmini(pe: int, pm: int, prod_floor: int | None = PROD_FLOOR):
+    """mxq's MXGEMMINI arithmetic for one product format, with the hardware's product flush.
+
+    The flush reaches mxq only when the pinned mxq takes ``prod_floor`` -- f6f94d2 does not; that
+    change is still local to Nicolas's checkout -- so until the pin moves the model does NOT flush
+    and mxq and rtl_exact differ on products below 2^-16. ``MXG_PROD_FLOOR=none`` is the A/B switch
+    (off = the pre-flush datapath)."""
+    import inspect
+    from mxq import matmul
+    if os.environ.get("MXG_PROD_FLOOR") == "none":
+        prod_floor = None
+    if "prod_floor" in inspect.signature(matmul.MXGEMMINI).parameters:
+        return matmul.MXGEMMINI(pe, pm, prod_floor=prod_floor)
+    return matmul.MXGEMMINI(pe, pm)
 
 
 def shipped_datapath(recipe: Recipe):

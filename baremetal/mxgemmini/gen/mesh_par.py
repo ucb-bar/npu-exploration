@@ -61,11 +61,31 @@ def _init(fmt):
     _FMT = fmt
 
 
+def run_mesh(A_P: np.ndarray, A_scales: np.ndarray, B_P: np.ndarray, B_scales: np.ndarray, fmt,
+             prod_floor: int | None = int(os.environ.get("MESH_PROD_FLOOR", "-16"))
+             if os.environ.get("MESH_PROD_FLOOR", "-16") != "none" else None) -> np.ndarray:
+    """The mesh golden on mxq's MXGEMMINI: same arguments and result as `gen_matmul_llama._run_mesh`
+    (A_P [M][K], A_scales E8M0 [M][K/32], B_P [K][N], B_scales E8M0 [K/32][N]). prod_floor=None is
+    the pre-flush datapath, bit-identical to `_run_mesh`."""
+    import torch
+    import models  # noqa: F401  -- puts mxq on sys.path
+    import gen_matmul_llama as G
+    from mxq import matmul
+    from config.scheme import mxgemmini   # passes prod_floor only once the pinned mxq takes it
+    x = lambda s: torch.from_numpy(G.e8m0_decode(s).astype(np.float32))
+    C = matmul.systolic(torch.from_numpy(np.ascontiguousarray(A_P.T)), x(A_scales).T.contiguous(),
+                        torch.from_numpy(np.ascontiguousarray(B_P)), x(B_scales),
+                        mxgemmini(*G.PROD_PRECISION[0], prod_floor=prod_floor),
+                        list(G.ACC_PRECISION)).numpy().astype(np.float32)
+    if not np.isfinite(C).all():
+        raise SystemExit("mesh golden produced non-finite output -- operands exceed the accumulator bound")
+    return C
+
+
 def _chunk(arg):
     """One work item: columns [n0, n1) of the product. Runs in a worker process."""
     n0, n1, A_P, A_scales, B_P_c, B_scales_c = arg
-    import gen_matmul_llama as G
-    return n0, n1, G._run_mesh(A_P, A_scales, B_P_c, B_scales_c, _FMT)
+    return n0, n1, run_mesh(A_P, A_scales, B_P_c, B_scales_c, _FMT)
 
 
 def mesh_parallel(A_P: np.ndarray, A_scales: np.ndarray,
@@ -77,11 +97,10 @@ def mesh_parallel(A_P: np.ndarray, A_scales: np.ndarray,
     Falls back to a direct call when the product is small enough that process startup dominates,
     so a caller never has to decide.
     """
-    import gen_matmul_llama as G
     M, K = A_P.shape
     N = B_P.shape[1]
     if N % chunk_n or N <= chunk_n:
-        return G._run_mesh(A_P, A_scales, B_P, B_scales, fmt)
+        return run_mesh(A_P, A_scales, B_P, B_scales, fmt)
 
     workers = workers or min(len(os.sched_getaffinity(0)), N // chunk_n)
     items = [(n0, min(n0 + chunk_n, N), A_P, A_scales,

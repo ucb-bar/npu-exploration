@@ -222,15 +222,26 @@ uintptr_t handle_trap(uintptr_t cause, uintptr_t epc, uintptr_t regs[32]) {
   return 0;
 }
 
+// k-/j-tiles per mvin: rows of DIM*w bytes (64B at w=4 = one full DMA read), block stride DIM keeps the
+// per-tile slots. w = largest of MVIN_TILES_MAX/2/1 dividing the tile count. -DMVIN_TILES_MAX=1: 1-tile.
+#ifndef MVIN_TILES_MAX
+#define MVIN_TILES_MAX 4
+#endif
+static int mvin_width(int tiles) {
+  int w = MVIN_TILES_MAX;
+  while (w > 1 && tiles % w) w >>= 1;
+  return w;
+}
+
 // `stride` is the SOURCE row pitch, which differs from K when the tile is a column slice of a
 // wider array -- that is how a K-tile of Xn[M][D] moves in without being copied out first.
 static void mvin_A_strided(const uint8_t *A, int M, int K, int stride, uint32_t a_spad) {
   gemmini_config_ld(stride * sizeof(uint8_t));
-  int tiles_I = M / DIM, tiles_K = K / DIM;
+  int tiles_I = M / DIM, tiles_K = K / DIM, w = mvin_width(tiles_K);
   for (int i = 0; i < tiles_I; i++)
-    for (int k = 0; k < tiles_K; k++)
+    for (int k = 0; k < tiles_K; k += w)
       gemmini_extended_mvin((void *) (A + (size_t) i * DIM * stride + (size_t) k * DIM),
-                            a_spad + (i * tiles_K + k) * DIM, DIM, DIM);
+                            a_spad + (i * tiles_K + k) * DIM, DIM * w, DIM);
 }
 
 static void mvin_A(const uint8_t *A, int M, int K, uint32_t a_spad) {
@@ -239,11 +250,11 @@ static void mvin_A(const uint8_t *A, int M, int K, uint32_t a_spad) {
 
 static void mvin_B(const uint8_t *B, int K, int N_full, int n0, int N, uint32_t b_spad) {
   gemmini_config_ld(N_full * sizeof(uint8_t));
-  int tiles_K = K / DIM, tiles_J = N / DIM;
+  int tiles_K = K / DIM, tiles_J = N / DIM, w = mvin_width(tiles_J);
   for (int k = 0; k < tiles_K; k++)
-    for (int j = 0; j < tiles_J; j++)
+    for (int j = 0; j < tiles_J; j += w)
       gemmini_extended_mvin((void *) (B + (size_t) k * DIM * N_full + (size_t) (n0 + j * DIM)),
-                            b_spad + (k * tiles_J + j) * DIM, DIM, DIM);
+                            b_spad + (k * tiles_J + j) * DIM, DIM * w, DIM);
 }
 
 static void mvout_bf16(uint16_t *dst, uint32_t spad, int M, int N) {

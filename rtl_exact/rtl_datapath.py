@@ -134,9 +134,14 @@ def _golden(cfg: RtlConfig | None = None):
 
 # --- the three hardware behaviours ---------------------------------------------------------------
 
+#: MxFPMul PROD_FLOOR: a product below 2^-16 is flushed to zero (mxq MXGEMMINI prod_floor).
+PROD_FLOOR = -16
+
+
 def product_quantize(x: torch.Tensor, exp: int, man: int, FM) -> torch.Tensor:
-    """(1) The PE product: mantissa truncation, no exponent clamp, no subnormal grid."""
-    return FM.mx_product_quantize_trunc(x, exp, man)
+    """(1) The PE product: mantissa truncation, flushed below 2^PROD_FLOOR, no subnormal grid."""
+    q = FM.mx_product_quantize_trunc(x, exp, man)
+    return torch.where(q.abs() < 2.0 ** PROD_FLOOR, torch.zeros_like(q), q)
 
 
 def accumulate(acc: torch.Tensor, prod: torch.Tensor, e: int, m: int, FM) -> torch.Tensor:
@@ -171,7 +176,8 @@ def _compiled_ops(FM):
     lane precision, and there are only four distinct pairs in the schedule.
     """
     def prod(x, exp: int, man: int):
-        return FM.mx_product_quantize_trunc(x, exp, man)
+        q = FM.mx_product_quantize_trunc(x, exp, man)
+        return torch.where(q.abs() < 2.0 ** PROD_FLOOR, torch.zeros_like(q), q)
 
     def acc(a, prod_t, e: int, m: int):
         return FM.fp_add_exact(FM.fp_quantize_rne(a, e, m), FM.fp_quantize_rne(prod_t, e, m), e, m)

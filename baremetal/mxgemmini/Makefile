@@ -27,16 +27,18 @@ OBJCOPY   := riscv$(XLEN)-unknown-elf-objcopy
 BENCH     := $(ROCC)/riscv-tests/benchmarks/common
 OUT       := $(REPO)/out/baremetal
 
-KERNELS   := llama_mlp llama_mlp_small llama_mlp_tiny llama_mlp_full \
-             llama_attention llama_attention_small llama_attention_tiny llama_attention_full \
+KERNELS   := llama_mlp llama_mlp_small llama_mlp_tiny llama_mlp_tiny_t1 llama_mlp_full \
+             llama_attention llama_attention_small llama_attention_tiny llama_attention_tiny_t1 llama_attention_full \
+             llama_attention_full_dgb \
              llama_qkv_tiny llama_proj_q llama_proj_k llama_proj_v llama_sep_qkv llama_two_mm llama_two_mm_micro \
              llama_layer_full
 
 # Kernels whose data is a linked binary blob rather than C initializers, and the blob each uses.
 # See the objcopy rule below for why the basenames matter.
-BLOB_KERNELS := llama_attention_full llama_mlp_full llama_layer_full llama_model llama_model_l2
+BLOB_KERNELS := llama_attention_full llama_attention_full_dgb llama_mlp_full llama_layer_full llama_model llama_model_l2
 BLOBS        := llama_attn_full llama_mlp_full llama_layer_full llama_model llama_model_l2
 blob_llama_attention_full := llama_attn_full
+blob_llama_attention_full_dgb := llama_attn_full
 blob_llama_mlp_full       := llama_mlp_full
 blob_llama_layer_full     := llama_layer_full
 blob_llama_model          := llama_model
@@ -56,7 +58,7 @@ $(foreach d,spike mx_rocket,\
 # order; the first that fails names the feature. See src/mx_ladder.c and gen/gen_mx_ladder.py.
 LADDER    := mxl0 mxl1 mxl2 mxl3 mxl4 mxl5 mxl6 mxl7 mxl8 mxl9 \
              mxl10 mxl11 mxl12 mxl13 mxl14 \
-             mxl15 mxl16 mxl17 mxl18
+             mxl15 mxl16 mxl17 mxl18 mxl19 mxl20
 
 # Matches gemmini-rocc-tests/bareMetalC/Makefile's flags; -I order puts our headers first so
 # mx_host.h and data/*.h resolve here, while "include/gemmini_testutils.h" resolves in $(ROCC).
@@ -93,9 +95,9 @@ $(foreach k,$(LADDER),$(eval $(OUT)/spike/$(k) $(OUT)/mx_rocket/$(k): $(CURDIR)/
 
 # The sliced variants are the base kernel with a different data header selected, so the pattern
 # rule's own prerequisite misses the source that actually carries the kernel.
-$(foreach k,llama_attention_small llama_attention_tiny llama_qkv_tiny llama_proj_q llama_proj_k llama_proj_v llama_sep_qkv llama_two_mm llama_two_mm_micro,\
+$(foreach k,llama_attention_small llama_attention_tiny llama_attention_tiny_t1 llama_qkv_tiny llama_proj_q llama_proj_k llama_proj_v llama_sep_qkv llama_two_mm llama_two_mm_micro,\
   $(eval $(OUT)/spike/$(k) $(OUT)/mx_rocket/$(k): $(CURDIR)/src/llama_attention.c))
-$(foreach k,llama_mlp_small llama_mlp_tiny,\
+$(foreach k,llama_mlp_small llama_mlp_tiny llama_mlp_tiny_t1,\
   $(eval $(OUT)/spike/$(k) $(OUT)/mx_rocket/$(k): $(CURDIR)/src/llama_mlp.c))
 
 # The full sub-layer kernels carry their weights as a linked BINARY BLOB, not C initializers:

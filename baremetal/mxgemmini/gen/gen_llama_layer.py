@@ -170,7 +170,8 @@ def bf16_exact(x: np.ndarray, what: str) -> np.ndarray:
 
 def mesh(A_P: np.ndarray, A_scales: np.ndarray, B_P: np.ndarray, B_scales: np.ndarray) -> np.ndarray:
     """One matmul through the bit-exact mesh model: raw code products, block scales applied after."""
-    C = G._run_mesh(A_P, A_scales, B_P, B_scales, FMT)
+    from mesh_par import run_mesh
+    C = run_mesh(A_P, A_scales, B_P, B_scales, FMT)
     return C
 
 
