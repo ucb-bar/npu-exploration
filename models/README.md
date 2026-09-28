@@ -3,16 +3,15 @@
 A **recipe** (`config/recipes/*.json`) defines one MX-Gemmini. Each folder here is one model of that
 machine: it takes the recipe (and, where it applies, the kernel), answers one question, and owns
 the line `run_kernel.py` prints for it. `run_kernel.py --models` picks which ones run:
-`default` is `reference,mxquant,spike,ppa,perf`; `all` adds `accuracy`; any comma list works.
+all five run by default; any comma list works.
 
 | folder | question it answers | inputs | output | its line | cost |
 |---|---|---|---|---|---|
 | `reference/` | what does the kernel compute in plain float32? | kernel | `y` | `VERDICT` on the fp32 tier when no mxquant model is available | ms |
-| `mxquant/` | which bits must the recipe's machine produce for this kernel? | kernel, recipe, operand format, edge map from the lowering | `y`, every intermediate, the as-shipped `y` | `VERDICT PASS/FAIL hardware == mxquant` with spike, `MXQUANT … NO VERDICT` without | seconds |
+| `mxquant/` | which bits must the recipe's machine produce for this kernel? and, through `evaluate`, what does that arithmetic do to a language model? | kernel (or workload), recipe, operand format, edge map from the lowering | `y`, every intermediate, the as-shipped `y`; perplexity next to bf16 | `VERDICT PASS/FAIL hardware == mxquant` with spike, `MXQUANT … NO VERDICT` without | seconds |
 | `spike/` | what does the functional model of that machine produce? | recipe (`build_spike.py` patches and builds `libgemmini.so` per `build_id`) | the run itself lives in `grade/pipeline.py` for now | — | seconds to build, seconds to run |
 | `ppa/` | what does the machine cost in silicon? | recipe | area, power, pJ/op | `PPA` | ms |
 | `perf/` | how long does this kernel take on that machine? | recipe, stage shapes | predicted cycles, utilisation, energy | `PERF` | ms |
-| `accuracy/` | what does the machine's arithmetic do to a language model? | recipe | TinyLlama WikiText-2 perplexity next to bf16 | `PPL` | ~12 min on 4 GPUs, then cached |
 
 `__init__.py` is the registry (`NAMES`, `DEFAULT`, `select`) and the one place the
 `microscaling-quant/` submodule is put on `sys.path` (`paths()`), so every model imports `mxq` the
@@ -45,35 +44,41 @@ numerics; compile shares it on purpose.
 `run_kernel.py --legacy-mxquant` grades with it; `tests/selftest_mxquant.py` proves the two
 identical on every kernel × format (24 pairs). It goes away in the next PR.
 
-## The accuracy model
+## The perplexity path
 
-`accuracy/accuracy.py` puts the recipe's Scheme (`config/scheme.scheme`, the same functions the
-mxquant model grades spike against) into TinyLlama's linear layers with `mxq.nn.patch` and measures
-WikiText-2 perplexity the way MXQuant's published numbers were measured: 16 samples × 2048 tokens,
-seed 0, attention projections left in bf16 (`rules.py: mxquant_layers`). One subprocess per GPU
-(`_worker.py`, `--gpus 0,1,2,3`), always a subprocess, so the pipeline never initialises CUDA.
-Results are cached under `results/accuracy/<key>.json`; the key hashes everything the number
-depends on (model, samples, seed, rules, recipe `build_id`, operand format, rounding, scale floor,
-mxq commit). The bf16 baseline is measured once the same way.
+`mxquant/workload.py` puts the recipe's Scheme (`config/scheme.scheme`, the same functions the bit
+path grades spike against) into a language model's linear layers with `mxq.nn.patch` and measures
+WikiText-2 perplexity the way MXQuant's published numbers were measured. `workloads.py` registers
+what can run (`tinyllama`: 16 samples × 2048 tokens, seed 0, attention projections left in bf16,
+`rules.py: mxquant_layers`). One subprocess per GPU (`_worker.py`, on mxq's `experiments/llm_ppl.py`,
+`--gpus 0,1,2,3`), always a subprocess, so the caller never initialises CUDA. Results are cached
+under `results/accuracy/<key>.json`; the key hashes everything the number depends on (model, samples,
+seed, rules, recipe `build_id`, operand format, rounding, scale floor, mxq commit, torch and
+transformers versions). The bf16 baseline is measured once the same way. `--dtype` picks the operand
+format (default: the recipe's); every format runs on its full element grid, and for the four
+codebook formats the record says `codebook: not modelled`, since the hardware sends those through a
+16-entry table that mxq does not have (the bit path grades them through the wire operands).
 
 ```bash
-.venv/bin/python -m models.accuracy --config baseline --dry-run            # which layers get the Scheme
-.venv/bin/python -m models.accuracy --config baseline --gpus 0,1,2,3
-.venv/bin/python run_kernel.py --kernel linear --config wide_acc --models all --gpus 0,1,2,3
+.venv/bin/python -m models.mxquant --list
+.venv/bin/python -m models.mxquant --workload tinyllama --config baseline --dry-run       # which layers get the Scheme
+.venv/bin/python -m models.mxquant --workload tinyllama --config baseline --gpus 0,1,2,3
+.venv/bin/python -m models.mxquant --workload tinyllama --config wide_acc --dtype fp4_e2m1 --gpus 0,1 --nsamples 4
 ```
 
-Reproduction (2026-09-24, `tests/oracle/accuracy_baseline.json`): with `--rounding-mode ties_away
---scale-floor 1e-38` (mxq's defaults) the baseline recipe reproduces mxq's recorded `hw_fp8` run
-exactly, 7.343833269506588, and the unpatched model reproduces MXQuant's bf16 number,
-7.188464705866791, when run under the interpreter those were taken with (torch 2.9.1, transformers
+`tests/selftest_workload.py` holds the two paths to the same bits: a `linear` kernel through
+`mxquant.run` equals `MXLinear` on the same tensors, and an `mlp2` chain equals two `MXLinear` with
+the bf16 accumulator between. Reproduction (2026-09-24, `tests/oracle/accuracy_baseline.json`): with
+`--rounding-mode ties_away --scale-floor 1e-38` (mxq's defaults) the baseline recipe reproduces mxq's
+recorded `hw_fp8` run exactly, 7.343833269506588, and the unpatched model reproduces MXQuant's bf16
+number, 7.188464705866791, under the interpreter those were taken with (torch 2.9.1, transformers
 4.57.3). Under the repo's `.venv` (torch 2.14.0, transformers 5.17.0) the same samples give 7.346034
 and 7.198868: the bf16 model's own loss moves with the torch and transformers versions, so the
-versions are part of the cache key and of every record, and a perplexity is only comparable to one
-taken in the same environment. The standing number for the hardware's rounding (rne, 2^-23 floor)
-in the `.venv` is 7.365560971111733; `tests/selftest_accuracy.py` checks a cached measurement
-against the oracle whenever one exists for the running environment. Recipes mxq cannot run at model
-level (codebook formats, non-uniform product lists) are refused before any GPU work; without a GPU
-the model reports UNAVAILABLE and the grade stands.
+versions are part of the cache key and of every record. The standing number for the hardware's
+rounding (rne, 2^-23 floor) in the `.venv` on mxq 5ee8bd4 was 7.365560971111733; the selftest checks
+a cached measurement against the oracle whenever one exists for the running environment and mxq
+commit. Recipes mxq cannot run (non-uniform product lists) are refused before any GPU work; without
+a GPU the path reports why.
 
 ## What is not here yet
 

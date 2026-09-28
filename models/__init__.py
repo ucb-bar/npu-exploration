@@ -5,11 +5,12 @@
     spike       the functional device model: a compiled ELF run on spike         (the thing being graded)
     ppa         silicon cost of the machine: area, power, pJ/op                  (post-synthesis model)
     perf        predicted timeline of this kernel on that machine                (RTL-calibrated model)
-    accuracy    TinyLlama perplexity with the recipe's arithmetic in every linear layer (minutes, GPU)
+
+mxquant has a second path, ``evaluate(workload, recipe)``: a whole language model with the same
+arithmetic in its linear layers, measured as perplexity (GPU, minutes; ``python -m models.mxquant``).
 
 Each folder exposes ``run(...) -> dict`` and ``line(metrics) -> str``, the one terminal line it prints.
-``run_kernel.py --models`` picks which ones run; ``DEFAULT`` is today's five, in seconds; ``accuracy``
-is minutes on a GPU, so it runs only when named.
+``run_kernel.py --models`` picks which ones run; all five take seconds.
 
 The mxq library (git submodule ``microscaling-quant/``) is put on ``sys.path`` HERE and nowhere else.
 The directory is hyphenated on purpose: a directory called ``mxq`` at the repo root would shadow the
@@ -24,8 +25,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 MXQ_ROOT = REPO / "microscaling-quant"
 
-NAMES = ("reference", "mxquant", "spike", "ppa", "perf", "accuracy")
-DEFAULT = NAMES[:-1]
+NAMES = ("reference", "mxquant", "spike", "ppa", "perf")
+DEFAULT = NAMES
 GROUPS = {"default": DEFAULT, "all": NAMES}
 
 

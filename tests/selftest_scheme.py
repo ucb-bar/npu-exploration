@@ -107,17 +107,27 @@ def main() -> int:
     def lut_on(raw):
         raw["runtime"]["use_lut"] = True
         raw["mx"]["enable_lut"] = True
-    refused("use_lut recipe is refused at model level", raw_variant(lut_on), scheme.scheme)
+    try:
+        scheme.scheme(parse(raw_variant(lut_on), path=base.path))
+        check("use_lut recipe builds a Scheme (the perplexity path runs the full element grid)", True)
+    except RecipeError as exc:
+        check("use_lut recipe builds a Scheme (the perplexity path runs the full element grid)", False, str(exc)[:90])
 
     # config/recipe.parse refuses operand_fmt=fp6 itself today (the fp6 encoder is not wired), so the
     # codebook refusal is exercised on a Recipe object: the same field, past the parser.
     import dataclasses
     fp6_recipe = dataclasses.replace(base, operand_fmt="fp6")
+    s6 = scheme.scheme(fp6_recipe)
+    check("fp6 recipe builds a Scheme on the full MXFP6_E3M2 grid", s6.a.keywords["fmt"] == "MXFP6_E3M2")
+    check("is_codebook knows the four table-indexed formats",
+          [d for d in scheme.MXQ_FORMAT if scheme.is_codebook(d)] == ["fp8_e4m3_quad", "fp8_e5m2", "fp6_e3m2", "fp6_e2m3"])
+    check("scheme(dtype=) picks the format, the recipe the arithmetic",
+          scheme.scheme(base, dtype="fp4_e2m1").a.keywords["fmt"] == "MXFP4" and scheme.recipe_dtype(base) == "fp8_e4m3")
     try:
-        scheme.scheme(fp6_recipe)
-        check("fp6 (codebook-indexed) operands are refused at model level", False, "no RecipeError")
+        scheme.mxq_format("fp9")
+        check("an unknown dtype is refused", False)
     except RecipeError as exc:
-        check("fp6 (codebook-indexed) operands are refused at model level", True, str(exc)[:90])
+        check("an unknown dtype is refused", "fp9" in str(exc))
 
     # datapath() must NOT refuse fp6: the mxquant model grades codebook formats through wire operands.
     try:
@@ -130,7 +140,7 @@ def main() -> int:
     check("default group", models.select("default") == ("reference", "mxquant", "spike", "ppa", "perf"))
     check("all group", models.select("all") == models.NAMES)
     check("a list, canonical order", models.select("perf,mxquant") == ("mxquant", "perf"))
-    check("group plus a name", models.select("default,accuracy") == models.NAMES)
+    check("group plus a name", models.select("default,perf") == models.NAMES)
     try:
         models.select("bogus")
         check("unknown name is refused", False)

@@ -147,13 +147,12 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
         build_only: bool = False, artifacts: bool = False,
         workdir: Path | None = None, results_dir: Path | None = None,
         repo: Path | None = None, telemetry=None,
-        models: tuple[str, ...] | None = None, legacy_mxquant: bool = False,
-        accuracy_args: dict | None = None) -> dict:
+        models: tuple[str, ...] | None = None, legacy_mxquant: bool = False) -> dict:
     """Build, run and grade one KernelSpec (1..N stages). Returns the run record.
 
     ``models`` names which models run on the recipe's machine (see ``models.NAMES``; default
     ``models.DEFAULT``): the fp32 ``reference`` always; ``spike`` builds and runs the ELF; ``mxquant``
-    computes the bits it must match; ``ppa``, ``perf`` and ``accuracy`` are fail-soft extras. Without
+    computes the bits it must match; ``ppa`` and ``perf`` are fail-soft extras. Without
     ``spike`` there is no VERDICT: the record carries the model's numbers and ``pass = None``.
     ``legacy_mxquant`` grades against grade/mxquant_ref.py (MXQuant's simulator, patched; recipe-blind)
     for the equivalence test; it disappears in the next PR.
@@ -623,21 +622,6 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
         except Exception as exc:
             tel.log("perf", f"UNAVAILABLE -- {exc}")
     pool.shutdown(wait=False)
-
-    # --- model-level accuracy: TinyLlama perplexity with the recipe's arithmetic in every linear
-    # layer (models/accuracy). Minutes on a GPU, cached by build_id, so it runs only when named.
-    if "accuracy" in models and dtype != recipe.operand_mlir_dtype:
-        # The accuracy model runs the RECIPE's operand format in every layer; this kernel ran --dtype.
-        # One record must not carry a VERDICT in one format and a perplexity in another.
-        tel.log("accuracy", f"SKIPPED -- the model runs the recipe's operand format "
-                            f"({recipe.operand_mlir_dtype}), this kernel ran {dtype}")
-    elif "accuracy" in models:
-        try:
-            from models import accuracy as accuracy_model
-            acc = metrics["accuracy"] = accuracy_model.run(recipe, tel=tel, **(accuracy_args or {}))
-            tel.log("accuracy", accuracy_model.line(acc).strip())
-        except Exception as exc:
-            tel.log("accuracy", f"UNAVAILABLE -- {exc}")
 
     acc = metrics["accuracy_vs_fp32_reference"]
     tel.log("grade", f"tier={metrics['tier']}  "

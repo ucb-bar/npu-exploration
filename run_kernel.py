@@ -12,7 +12,7 @@ layer and a stitched model. ``--models`` picks which models run on the recipe's 
     .venv/bin/python run_kernel.py --kernel mlp2 --h 128 --artifacts
     .venv/bin/python run_kernel.py --kernel linear --build-only            # stop at the ELF
     .venv/bin/python run_kernel.py --kernel linear --models mxquant        # the model alone, no spike, seconds
-    .venv/bin/python run_kernel.py --kernel linear --models all --gpus 0,1,2,3   # + TinyLlama perplexity (minutes)
+    .venv/bin/python -m models.mxquant --workload tinyllama --config wide_acc --gpus 0,1,2,3   # perplexity (minutes)
 
 VERDICT is bit-identity between spike and the mxquant model (models/mxquant), built from the recipe.
 The fp32 reference is context: it measures the cost of the MX format, not the correctness of the
@@ -42,7 +42,7 @@ def main() -> int:
                          "Defines the MX-Gemmini the kernel runs on, and is the single "
                          "definition shared by every model, spike and Verilator")
     ap.add_argument("--models", default="default",
-                    help="which models run: 'default' (%s), 'all' (adds accuracy), or a comma list of "
+                    help="which models run: 'default' (%s), 'all' (the same today), or a comma list of "
                          "%s" % (",".join(models.DEFAULT), ", ".join(models.NAMES)))
     ap.add_argument("--m", type=int, default=64, help="batch rows")
     ap.add_argument("--k", type=int, default=64, help="in_features")
@@ -71,9 +71,6 @@ def main() -> int:
                     help="grade against the legacy implementation (grade/mxquant_ref.py: MXQuant's "
                          "simulator patched at runtime; needs the MXQuant clone; recipe-blind). "
                          "For the equivalence test only; removed in the next PR")
-    ap.add_argument("--gpus", default=None, help="accuracy model: GPUs to split the samples over, e.g. 0,1,2,3")
-    ap.add_argument("--nsamples", type=int, default=16, help="accuracy model: WikiText-2 samples of 2048 tokens")
-    ap.add_argument("--model-id", default=None, help="accuracy model: HF model id (default TinyLlama-1.1B-Chat)")
     ap.add_argument("--workdir", type=Path, default=None)
     ap.add_argument("--results-dir", type=Path, default=None)
     a = ap.parse_args()
@@ -94,14 +91,11 @@ def main() -> int:
         selected = models.select(a.models)
         recipe = load_recipe(a.config)
         spec = build(a.kernel, m=a.m, k=a.k, h=a.h, n=a.n, seed=a.seed)
-        acc_args = {"nsamples": a.nsamples, "gpus": a.gpus}
-        if a.model_id:
-            acc_args["model_id"] = a.model_id
         res = run(spec, recipe=recipe, tol=a.tol, simulator=a.simulator, seam=a.seam,
                   dtype=a.dtype, allow_lossy_chain=a.allow_lossy_chain,
                   build_only=a.build_only, artifacts=a.artifacts, per_stage_elf=a.per_stage_elf,
                   workdir=a.workdir, results_dir=a.results_dir, telemetry=tel,
-                  models=selected, legacy_mxquant=a.legacy_mxquant, accuracy_args=acc_args)
+                  models=selected, legacy_mxquant=a.legacy_mxquant)
     except RecipeError as exc:
         tel.log("error", f"bad recipe: {exc}")
         return 2
@@ -130,9 +124,6 @@ def main() -> int:
     if m.get("perf"):
         from models.perf import perf
         print(perf.line(m["perf"]))
-    if m.get("accuracy"):
-        from models.accuracy import accuracy
-        print(accuracy.line(m["accuracy"]))
     print(f"RESULTS  {res['run_dir']}")
     return {True: 0, False: 1, None: 0}[m["pass"]]
 

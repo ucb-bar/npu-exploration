@@ -4,8 +4,8 @@ A recipe (``config/recipes/*.json``) says WHICH MX-Gemmini this is. mxq (``micro
 computes what such a machine's matmul does, given four things: how each operand is block-quantized,
 the *Arithmetic* (how a product, a lane add and a block add are rounded), the *schedule* (one
 accumulator format per PE lane) and the *window* (the PE column depth). This module derives all four
-from the recipe and nothing else, so the mxquant model (``models/mxquant``) and the accuracy model
-(``models/accuracy``) run the same numbers, and a perplexity is tied to the ``build_id`` that VERDICT
+from the recipe and nothing else, so the mxquant model's two paths (``models/mxquant``: bits per kernel,
+perplexity per workload) run the same numbers, and a perplexity is tied to the ``build_id`` that VERDICT
 was proved against.
 
     recipe field                              mxq argument
@@ -26,10 +26,10 @@ Deliberately ignored, because none of them changes a matmul's value: ``array.til
 ``runtime.out_dtype``, ``supported_backends``.
 
 Refused (``RecipeError``): a per-lane product list that is not uniform (mxq has one product format
-per Arithmetic); an accumulator list whose length is not the mesh dimension; and, for a MODEL-LEVEL
-Scheme only, a codebook (LUT) operand path -- mxq has no codebooks, so the accuracy model cannot run
-those formats. The mxquant model still grades them, through the wire operands the compiler emitted
-(``models/mxquant/kernel.py`` ``_device_operands``).
+per Arithmetic); an accumulator list whose length is not the mesh dimension. A codebook (LUT) format
+is not refused: mxq has no codebooks, so a Scheme quantizes it on the format's full element grid
+(``is_codebook`` says which formats the hardware sends through a table; the bit path grades those
+through the wire operands the compiler emitted, ``models/mxquant/kernel.py`` ``_device_operands``).
 """
 from __future__ import annotations
 
@@ -73,15 +73,25 @@ def is_codebook(dtype: str) -> bool:
     return dtype in CODEBOOK
 
 
+def recipe_dtype(recipe: Recipe) -> str:
+    """The recipe's default operand format, spelled the compiler's way."""
+    try:
+        return _RECIPE_DTYPE[recipe.operand_fmt]
+    except KeyError:
+        raise RecipeError(f"{recipe.name}: operand_fmt {recipe.operand_fmt!r} has no format; known: {sorted(_RECIPE_DTYPE)}") from None
+
+
 def scale_floor_default() -> float:
     from mxq import scale_factor
     return scale_factor.HARDWARE_FLOOR
 
 
-def quantizer(recipe: Recipe, *, rounding_mode: str = ROUNDING, scale_floor: float | None = None):
-    """``V -> (P, X)`` for one operand, blocks along axis 0 (K), in the hardware's convention."""
+def quantizer(recipe: Recipe, *, fmt: str | None = None, rounding_mode: str = ROUNDING,
+              scale_floor: float | None = None):
+    """``V -> (P, X)`` for one operand, blocks along axis 0 (K), in the hardware's convention.
+    ``fmt`` is an mxq format name (default: the recipe's operand format)."""
     from mxq import block
-    return partial(block.mxgemmini.quantize, fmt=format_name(recipe), axis=0, block_size=recipe.block,
+    return partial(block.mxgemmini.quantize, fmt=fmt or format_name(recipe), axis=0, block_size=recipe.block,
                    rounding_mode=rounding_mode,
                    scale_floor=scale_floor_default() if scale_floor is None else scale_floor)
 
@@ -118,26 +128,15 @@ def shipped_datapath(recipe: Recipe):
     return matmul.MXQUANT(pe, pm), schedule(recipe), recipe.dim
 
 
-def refuse_codebooks(recipe: Recipe) -> None:
-    """A model-level Scheme cannot run a codebook (LUT) operand path: mxq has no codebooks."""
-    raw = recipe.raw
-    if raw.get("runtime", {}).get("use_lut") or raw.get("mx", {}).get("enable_lut"):
-        raise RecipeError(f"{recipe.name}: use_lut/enable_lut is set; mxq has no codebooks, so this recipe "
-                          "cannot run at model level (the mxquant model still grades it via wire operands)")
-    dtype = _RECIPE_DTYPE.get(recipe.operand_fmt, recipe.operand_fmt)
-    if is_codebook(dtype):
-        raise RecipeError(f"{recipe.name}: operand format {dtype} is codebook-indexed on this hardware; "
-                          "mxq has no codebooks, so it cannot run at model level")
-
-
-def scheme(recipe: Recipe, *, compiled: bool = False, rounding_mode: str = ROUNDING,
+def scheme(recipe: Recipe, *, dtype: str | None = None, compiled: bool = False, rounding_mode: str = ROUNDING,
            scale_floor: float | None = None):
     """The recipe as one mxq ``Scheme``: quantizer for both operands, the hardware Arithmetic, the
-    recipe's schedule and window. ``compiled=True`` fuses the arithmetic through torch.compile
-    (GPU; bit-identical, 5-7x faster per layer)."""
+    recipe's schedule and window. ``dtype`` is the operand format (default: the recipe's); a codebook
+    format runs on its full element grid, see ``is_codebook``. ``compiled=True`` fuses the arithmetic
+    through torch.compile (GPU; bit-identical, 5-7x faster per layer)."""
     from mxq import Scheme, matmul
-    refuse_codebooks(recipe)
-    q = quantizer(recipe, rounding_mode=rounding_mode, scale_floor=scale_floor)
+    q = quantizer(recipe, fmt=mxq_format(dtype) if dtype else None, rounding_mode=rounding_mode,
+                  scale_floor=scale_floor)
     arith, sched, window = datapath(recipe)
     if compiled:
         arith = matmul.compiled(arith)
