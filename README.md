@@ -213,7 +213,7 @@ kernels/     registry.py spec.py trace.py            the kernel IR; --list shows
 config/      recipe.py recipes/*.json scheme.py     one JSON = one machine; recipe → mxq
 models/      reference/ mxquant/ (bits + perplexity) spike/ ppa/ perf/   one folder per model of the machine
 grade/       pipeline.py metrics.py report.py telemetry.py     run, compare, record
-app/         ppl_datapath eval_ppl ablate_mx   Nicolas's perplexity scripts (their place is being decided)
+app/         ppl_datapath eval_ppl   Nicolas's perplexity scripts, until models/mxquant covers them
 compiler/    lower.py (KernelSpec -> command buffer); targets/mx_gemmini_rocket/ backend/{mxgemm_emit,mxgraph_emit,runner} runtime/
 baremetal/   hand-written TinyLlama kernels and their generators
 rtl_exact/   the MXQuant config that is the hardware (rtl_datapath.py, mxgemmini_rtl.json)
