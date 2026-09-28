@@ -126,19 +126,13 @@ PROD_FLOOR = -16
 
 
 def mxgemmini(pe: int, pm: int, prod_floor: int | None = PROD_FLOOR):
-    """mxq's MXGEMMINI arithmetic for one product format, with the hardware's product flush.
-
-    The flush reaches mxq only when the pinned mxq takes ``prod_floor`` -- f6f94d2 does not; that
-    change is still local to Nicolas's checkout -- so until the pin moves the model does NOT flush
-    and mxq and rtl_exact differ on products below 2^-16. ``MXG_PROD_FLOOR=none`` is the A/B switch
-    (off = the pre-flush datapath)."""
-    import inspect
+    """mxq's MXGEMMINI arithmetic for one product format, with the hardware's product flush
+    (mxq 93c7047 and later). ``MXG_PROD_FLOOR=none`` switches the flush off, Nicolas's A/B control
+    for the FPGA runs; a hidden knob until the recipe carries it."""
     from mxq import matmul
     if os.environ.get("MXG_PROD_FLOOR") == "none":
         prod_floor = None
-    if "prod_floor" in inspect.signature(matmul.MXGEMMINI).parameters:
-        return matmul.MXGEMMINI(pe, pm, prod_floor=prod_floor)
-    return matmul.MXGEMMINI(pe, pm)
+    return matmul.MXGEMMINI(pe, pm, prod_floor=prod_floor)
 
 
 def shipped_datapath(recipe: Recipe):
