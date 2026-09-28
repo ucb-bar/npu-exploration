@@ -42,6 +42,8 @@ scalar one) is the obvious next step if this is used at model scale.
 """
 from __future__ import annotations
 
+import os as _os
+
 import json
 import math
 import os
@@ -84,6 +86,32 @@ def load_config(path: Path | None = None) -> RtlConfig:
     )
 
 
+#: Peak device memory the batched window loop may use for its [W, M, N] working set. Lower it if a
+#: run OOMs on a small GPU; it only changes the batch size, never the result.
+RTL_BATCH_BYTES = 2 << 30
+
+
+def _simulate_atw_rtl_serial(self, A, B, P_A, X_A, P_B, X_B, C, window, FM):
+    """The original per-k form. Kept for shapes the batched path cannot cover -- a K that is not a
+    whole number of windows -- so a ragged reduction still gets the right answer, slowly."""
+    import torch
+    K = P_A.shape[0]
+    for g in range(0, K, BLOCK):
+        g_end = min(g + BLOCK, K)
+        scale_map = X_A[g // BLOCK, :].unsqueeze(1) * X_B[g // BLOCK, :].unsqueeze(0)
+        for k_base in range(g, g_end, window):
+            S_red = torch.zeros(C.shape, dtype=torch.float32, device=C.device)
+            for k in range(k_base, min(k_base + window, g_end)):
+                outer = P_A[k, :].unsqueeze(1) * P_B[k, :].unsqueeze(0)
+                outer_q = product_quantize(outer, self.prod_e, self.prod_m, FM)
+                lane = k % window
+                e_acc, m_acc = (self.acc_schedule[lane] if self.acc_schedule is not None
+                                else (self.acc_fixed_e, self.acc_fixed_m))
+                S_red = accumulate(S_red, outer_q, e_acc, m_acc, FM)
+            C = cross_tile_accumulate(C, S_red * scale_map, FM)
+    return C
+
+
 def _golden(cfg: RtlConfig | None = None):
     """The datapath's arithmetic primitives.
 
@@ -121,6 +149,40 @@ def cross_tile_accumulate(C: torch.Tensor, tile: torch.Tensor, FM) -> torch.Tens
     return FM.bf16_accum_add(C, FM.q_bf16_rne(tile))
 
 
+#: Fuse the elementwise chains with torch.compile. OFF by default, and **UNVERIFIED**: it is
+#: wired up but has NOT been gated by verify_rtl_exact.py, because compiling these functions
+#: on CPU did not finish in 40 minutes on the box it was written on. Before trusting any
+#: number produced with it ON, run `MXG_RTL_COMPILE=1 python3 rtl_exact/verify_rtl_exact.py`
+#: on the target machine and require the usual 65536/65536.
+#:
+#: WHY IT MATTERS. MEASURED on an sm_120 GPU at seqlen 2048, the datapath runs at a flat
+#: **0.31 G element-steps/s** across every projection shape (q_proj 27.9 s for 8.6 G, gate_proj
+#: 76.3 s for 23.6 G, down_proj 76.4 s for 23.6 G -- the same rate), i.e. 1.8 h per window and ~29 h
+#: for 16. It is not shape-bound: `_rne_vec` and `_add_exact_vec` each issue 20-40 separate CUDA
+#: kernels, every one reading and writing the whole tensor, so a 50 M-element batched lane-step
+#: moves ~32 GB. These are pure elementwise chains on fixed shapes -- exactly what inductor fuses.
+RTL_COMPILE = bool(int(_os.environ.get("MXG_RTL_COMPILE", "0"))) if "_os" in dir() else False
+
+
+def _compiled_ops(FM):
+    """(product_quantize, accumulate, cross_tile) with the module closed over, so they compile.
+
+    `e`/`m` stay plain ints, which makes them compile-time constants -- inductor specializes per
+    lane precision, and there are only four distinct pairs in the schedule.
+    """
+    def prod(x, exp: int, man: int):
+        return FM.mx_product_quantize_trunc(x, exp, man)
+
+    def acc(a, prod_t, e: int, m: int):
+        return FM.fp_add_exact(FM.fp_quantize_rne(a, e, m), FM.fp_quantize_rne(prod_t, e, m), e, m)
+
+    def cross(C, tile):
+        return FM.bf16_accum_add(C, FM.q_bf16_rne(tile))
+
+    c = dict(dynamic=False, fullgraph=False)
+    return (torch.compile(prod, **c), torch.compile(acc, **c), torch.compile(cross, **c))
+
+
 # --- installation ---------------------------------------------------------------------------------
 
 def install(eval_complete_module, cfg: RtlConfig | None = None) -> None:
@@ -135,6 +197,7 @@ def install(eval_complete_module, cfg: RtlConfig | None = None) -> None:
     FM = _golden(cfg)
     EC = eval_complete_module
     BLOCK = EC.BLOCK
+    _prod_op, _acc_op, _cross_op = (_compiled_ops(FM) if RTL_COMPILE else (None, None, None))
 
     @torch.no_grad()
     def _simulate_atw_rtl(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
@@ -170,27 +233,47 @@ def install(eval_complete_module, cfg: RtlConfig | None = None) -> None:
         C = torch.zeros((M, N), dtype=torch.float32, device=device)
         window = self.window
 
-        for g in range(0, K, BLOCK):
-            g_end = min(g + BLOCK, K)
-            g_block = g // BLOCK
-            sA, sB = X_A[g_block, :], X_B[g_block, :]
-            scale_map = sA.unsqueeze(1) * sB.unsqueeze(0)
+        # WINDOWS ARE INDEPENDENT, so they are computed in BATCHES. `S_red` is zeroed per window
+        # and only folded into C at the end, so nothing couples one window's reduction to another's
+        # -- the sequential part is the 16 LANES inside a window, whose accumulator precision
+        # varies. Batching turns K sequential steps into `window` of them on tensors `W` times
+        # larger, which is what makes this tractable on a GPU: the per-k form issues ~80 small
+        # kernels over an [M,N] tile and is dominated by launch overhead.
+        #
+        # THE FOLD INTO C STAYS SEQUENTIAL AND IN ORDER. `cross_tile_accumulate` is bf16 and bf16
+        # addition is not associative, so reordering it would change the result.
+        if K % window or (BLOCK % window and K > BLOCK):
+            return _simulate_atw_rtl_serial(self, A, B, P_A, X_A, P_B, X_B, C, window, FM)
 
-            for k_base in range(g, g_end, window):
-                k_batch_end = min(k_base + window, g_end)
-                S_red = torch.zeros((M, N), dtype=torch.float32, device=device)
+        n_win = K // window
+        # Peak live memory is ~10 tensors of [W, M, N] float32 inside the quantizers.
+        budget = getattr(self, "_rtl_batch_bytes", RTL_BATCH_BYTES)
+        W = max(1, min(n_win, int(budget // max(1, 10 * 4 * M * N))))
+        lanes = ([self.acc_schedule[l] for l in range(window)] if self.acc_schedule is not None
+                 else [(self.acc_fixed_e, self.acc_fixed_m)] * window)
 
-                for k in range(k_base, k_batch_end):
-                    outer = P_A[k, :].unsqueeze(1) * P_B[k, :].unsqueeze(0)
-                    outer_q = product_quantize(outer, self.prod_e, self.prod_m, FM)   # (1)
-                    lane = k % window
-                    if self.acc_schedule is not None:
-                        e_acc, m_acc = self.acc_schedule[lane]
-                    else:
-                        e_acc, m_acc = self.acc_fixed_e, self.acc_fixed_m
-                    S_red = accumulate(S_red, outer_q, e_acc, m_acc, FM)              # (2)
-
-                C = cross_tile_accumulate(C, S_red * scale_map, FM)                   # (3)
+        for w0 in range(0, n_win, W):
+            w1 = min(w0 + W, n_win)
+            widx = torch.arange(w0, w1, device=device)
+            S_red = torch.zeros((w1 - w0, M, N), dtype=torch.float32, device=device)
+            for l in range(window):
+                ks = widx * window + l                                   # [W]
+                a = P_A.index_select(0, ks)                              # [W, M]
+                b = P_B.index_select(0, ks)                              # [W, N]
+                outer = a.unsqueeze(2) * b.unsqueeze(1)                  # [W, M, N]
+                e_acc, m_acc = lanes[l]
+                if _prod_op is not None:
+                    outer_q = _prod_op(outer, self.prod_e, self.prod_m)           # (1)
+                    S_red = _acc_op(S_red, outer_q, e_acc, m_acc)                 # (2)
+                else:
+                    outer_q = product_quantize(outer, self.prod_e, self.prod_m, FM)
+                    S_red = accumulate(S_red, outer_q, e_acc, m_acc, FM)
+            for i in range(w1 - w0):
+                g_block = ((w0 + i) * window) // BLOCK
+                scale_map = X_A[g_block, :].unsqueeze(1) * X_B[g_block, :].unsqueeze(0)
+                tile = S_red[i] * scale_map
+                C = _cross_op(C, tile) if _cross_op is not None else \
+                    cross_tile_accumulate(C, tile, FM)                            # (3)
 
         return C
 

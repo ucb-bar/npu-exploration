@@ -49,13 +49,28 @@ def parse_gemmini_cc(p: Path) -> dict:
         return m[0]
 
     prod = one(r"const int prod_e = (\d+), prod_m = (\d+);", "prod precision")
-    acc_e = one(r"const int8_t acc_e\[16\] = \{([^}]*)\};", "acc_e")
-    acc_m = one(r"const int8_t acc_m\[16\] = \{([^}]*)\};", "acc_m")
     group = one(r"const int GROUP = (\d+);", "GROUP")
+    lit_e = re.findall(r"const int8_t acc_e\[16\] = \{([^}]*)\};", t)
+    if lit_e:                                   # libgemmini before 9f10afe: two 16-entry literals
+        acc_e = tuple(int(x) for x in lit_e[0].split(","))
+        acc_m = tuple(int(x) for x in one(r"const int8_t acc_m\[16\] = \{([^}]*)\};", "acc_m").split(","))
+    else:                                       # since: a per-lane ramp `for (kk < DIM)` with an #if on GEMMINI_DIM
+        body = one(r"(?s)int8_t acc_e\[DIM\], acc_m\[DIM\];\s*for \(int kk = 0; kk < DIM; kk\+\+\) \{(.*?)#endif\s*\}",
+                   "acc ladder loop") if "#if GEMMINI_DIM" in t else \
+            one(r"(?s)int8_t acc_e\[DIM\], acc_m\[DIM\];\s*for \(int kk = 0; kk < DIM; kk\+\+\) \{(.*?)\n\s*\}", "acc ladder loop")
+        ramp = body.split("#else")[-1]           # the stock (DIM=16) branch
+        steps = [(int(n), int(e), int(m)) for n, e, m in
+                 re.findall(r"if\s*\(kk < (\d+)\)\s*\{\s*acc_e\[kk\] = (\d+);\s*acc_m\[kk\] = (\d+);", ramp)]
+        tail = re.search(r"else\s*\{\s*acc_e\[kk\] = (\d+);\s*acc_m\[kk\] = (\d+);", ramp)
+        if not steps or not tail:
+            raise AssertionError(f"acc ladder loop in {p.name}: could not read the ramp")
+        lanes = []
+        for kk in range(16):
+            e, m = next(((e, m) for n, e, m in steps if kk < n), (int(tail.group(1)), int(tail.group(2))))
+            lanes.append((e, m))
+        acc_e, acc_m = tuple(e for e, _ in lanes), tuple(m for _, m in lanes)
     return {"prod_e": int(prod[0]), "prod_m": int(prod[1]),
-            "acc_e": tuple(int(x) for x in acc_e.split(",")),
-            "acc_m": tuple(int(x) for x in acc_m.split(",")),
-            "block": int(group)}
+            "acc_e": acc_e, "acc_m": acc_m, "block": int(group)}
 
 
 def parse_scala(p: Path) -> dict:
@@ -92,8 +107,17 @@ def parse_scala(p: Path) -> dict:
 
 
 def parse_define(p: Path, name: str) -> int | None:
-    m = re.search(rf"#define {name}\s+(\d+)", p.read_text(encoding="utf-8"))
-    return int(m.group(1)) if m else None
+    """``#define NAME <int>``; or, since libgemmini 9f10afe, ``#define DIM GEMMINI_DIM`` with the
+    default ``#define GEMMINI_DIM <int>`` under an ``#ifndef`` (build_spike passes -DGEMMINI_DIM)."""
+    t = p.read_text(encoding="utf-8")
+    m = re.search(rf"#define {name}\s+(\d+)", t)
+    if m:
+        return int(m.group(1))
+    alias = re.search(rf"#define {name}\s+\(?\s*(\w+)\s*\)?\s*$", t, re.M)
+    if alias:
+        m = re.search(rf"#define {alias.group(1)}\s+(\d+)", t)
+        return int(m.group(1)) if m else None
+    return None
 
 
 def main() -> int:

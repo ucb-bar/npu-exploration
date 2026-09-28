@@ -45,6 +45,7 @@ DATA.mkdir(parents=True, exist_ok=True)
 
 import gen_matmul_llama as G      # noqa: E402  -- quantize(), _requant(), _run_mesh(), bf16_bits()
 import gen_llama_layer as GL      # noqa: E402  -- load_capture(), FMT
+from mesh_par import mesh_parallel  # noqa: E402
 from app.capture_llama_layer import rmsnorm, rope, softmax_causal  # noqa: E402
 
 FMT = GL.FMT
@@ -90,11 +91,31 @@ class Blob:
         return o
 
 
-def mesh(A_P, A_s, B_P, B_s):
-    return G._run_mesh(A_P, A_s, B_P, B_s, FMT)
+def mesh(A_P, A_s, B_P, B_s, label: str = ""):
+    """The datapath golden, column-parallel. `mesh_par` self-tests bit-identical to _run_mesh, and
+    regenerating this blob after the switch reproduced it BYTE for BYTE -- see section 13.1."""
+    return mesh_parallel(A_P, A_s, B_P, B_s, FMT, label=label)
 
 
-def build(cap: dict) -> tuple[Blob, dict]:
+def attention_chain(cap: dict, b: Blob, x_in: np.ndarray, w_ln: np.ndarray,
+                    prefix: str = "") -> tuple[np.ndarray, dict]:
+    """The whole attention sub-layer, from a residual-stream input to `Y = sum_h O_h @ Wo_h`.
+
+    Factored out of `build` so `gen_llama_layer_full.py` can run the SAME chain as the first half
+    of a complete decoder layer without a second copy to keep in step. `x_in`/`w_ln` are passed in
+    rather than read from the capture because a stacked layer feeds the PREVIOUS layer's output
+    here, which is not a captured tensor.
+
+    `prefix` namespaces the blob entries. A whole layer puts this chain and the MLP chain in ONE
+    blob and they both want `XN_CODES`, `XN_SCALES` and `Y_OUT`; `Blob.off` is a dict, so a
+    duplicate name would silently overwrite an offset while both copies still occupy the buffer --
+    the header would then point the second stage's operand at the first's bytes. Default "" leaves
+    the standalone kernel's names, and its blob, exactly as they were.
+
+    Appends every operand and per-stage golden to `b`; returns (Y, dims).
+    """
+    def add(n, a, dt):
+        return b.add(prefix + n, a, dt)
     M = int(cap["meta_seq"])
     D = int(cap["meta_d_model"])
     H = int(cap["meta_head_dim"])
@@ -108,17 +129,14 @@ def build(cap: dict) -> tuple[Blob, dict]:
     assert cap["Wq"].shape == (D, QD) and cap["Wo"].shape == (QD, D), \
         f"capture is not --all-heads: Wq {cap['Wq'].shape}, Wo {cap['Wo'].shape}"
 
-    b = Blob()
-    b.add("H_PRE", GL.bf16_exact(cap["h_pre"], "h_pre"), np.uint16)
-    b.add("W_IN_LN", GL.bf16_exact(cap["w_in_ln"], "w_in_ln"), np.uint16)
-    b.add("ROPE_COS", cos, np.float32)
-    b.add("ROPE_SIN", sin, np.float32)
+    add("ROPE_COS", cos, np.float32)
+    add("ROPE_SIN", sin, np.float32)
 
     # --- host: RMSNorm over the FULL D, then the mesh's A operand ---
-    xn = rmsnorm(cap["h_pre"], cap["w_in_ln"], eps)
+    xn = rmsnorm(x_in, w_ln, eps)
     xn_codes, xn_scales, xn_P = G.quantize(xn, axis="row", f=FMT)
-    b.add("XN_CODES", xn_codes, np.uint8)
-    b.add("XN_SCALES", xn_scales.T, np.uint8)             # A-side window: [D/32][M]
+    add("XN_CODES", xn_codes, np.uint8)
+    add("XN_SCALES", xn_scales.T, np.uint8)             # A-side window: [D/32][M]
 
     # --- mesh: the three projections, whole. Each is N-chunked in the C, but an output column
     #     depends only on its own column of B, so the unchunked model is the same golden. ---
@@ -126,11 +144,11 @@ def build(cap: dict) -> tuple[Blob, dict]:
     for name, W in (("WQ", cap["Wq"]), ("WK", cap["Wk"]), ("WV", cap["Wv"])):
         t0 = time.time()
         w_codes, w_scales, w_P = G.quantize(W, axis="col", f=FMT)
-        b.add(f"{name}_CODES", w_codes, np.uint8)
-        b.add(f"{name}_SCALES", w_scales, np.uint8)
+        add(f"{name}_CODES", w_codes, np.uint8)
+        add(f"{name}_SCALES", w_scales, np.uint8)
         out = mesh(xn_P, xn_scales, w_P, w_scales)
         proj[name] = out
-        b.add(f"{name[1]}_OUT", G.bf16_bits(out), np.uint16)
+        add(f"{name[1]}_OUT", G.bf16_bits(out), np.uint16)
         print(f"  mesh   {name[1]} = Xn @ {name}  {out.shape}  |max|={np.abs(out).max():.4g}"
               f"   ({time.time() - t0:.1f}s)")
 
@@ -155,7 +173,7 @@ def build(cap: dict) -> tuple[Blob, dict]:
         v_codes[kv], v_scales[kv] = c, s
     for n, a in (("Q_CODES", q_codes), ("Q_SCALES", q_scales), ("KT_CODES", kt_codes),
                  ("KT_SCALES", kt_scales), ("V_CODES", v_codes), ("V_SCALES", v_scales)):
-        b.add(n, a, np.uint8)
+        add(n, a, np.uint8)
 
     # --- mesh + host, per head: scores, causal softmax, and O = P @ V requantized to FP8 ---
     s_out = np.zeros((NH, M, M), np.uint16)
@@ -181,23 +199,39 @@ def build(cap: dict) -> tuple[Blob, dict]:
         o_codes[h], o_scales[h] = oc, os_
         O_val[:, h * H:(h + 1) * H] = oP * _e8(os_).repeat(BLOCK, axis=1)
     print(f"  mesh   {NH} heads: S = Q@K^T then O = P@V (requant)   ({time.time() - t0:.1f}s)")
-    b.add("S_OUT", s_out, np.uint16)
+    add("S_OUT", s_out, np.uint16)
     for n, a in (("P_CODES", p_codes), ("P_SCALES", p_scales),
                  ("O_CODES", o_codes), ("O_SCALES", o_scales)):
-        b.add(n, a, np.uint8)
+        add(n, a, np.uint8)
 
     # --- mesh: o_proj, accumulated across heads. Y = sum_h O_h @ Wo[64h:64h+64, :], which is one
     #     [M,QD]x[QD,D] matmul -- the device reaches the same value by adding each head's
     #     contribution into the same smem region. ---
     wo_codes, wo_scales, wo_P = G.quantize(cap["Wo"], axis="col", f=FMT)
-    b.add("WO_CODES", wo_codes, np.uint8)
-    b.add("WO_SCALES", wo_scales, np.uint8)
+    add("WO_CODES", wo_codes, np.uint8)
+    add("WO_SCALES", wo_scales, np.uint8)
     o_all = np.concatenate([_p_from(o_codes[h]) for h in range(NH)], axis=1)
     o_all_scales = np.concatenate([o_scales[h] for h in range(NH)], axis=1)   # [M][QD/32]
     t0 = time.time()
     Y = mesh(o_all, o_all_scales, wo_P, wo_scales)
     print(f"  mesh   Y = O @ Wo  {Y.shape}  |max|={np.abs(Y).max():.4g}   ({time.time() - t0:.1f}s)")
-    b.add("Y_OUT", G.bf16_bits(Y), np.uint16)
+    add("Y_OUT", G.bf16_bits(Y), np.uint16)
+
+    dims = dict(M=M, D=D, H=H, NH=NH, NKV=NKV, PER=PER, QD=QD, KVD=KVD, eps=eps,
+                layer=int(cap["meta_layer"]))
+    return Y, dims
+
+
+def build(cap: dict) -> tuple[Blob, dict]:
+    """The standalone attention kernel's blob: the chain, plus the references it is graded on.
+
+    H_PRE and W_IN_LN are added BEFORE the chain because blob offsets are positional -- keeping the
+    order is what made the refactor to `attention_chain` provably inert (byte-identical output).
+    """
+    b = Blob()
+    b.add("H_PRE", GL.bf16_exact(cap["h_pre"], "h_pre"), np.uint16)
+    b.add("W_IN_LN", GL.bf16_exact(cap["w_in_ln"], "w_in_ln"), np.uint16)
+    Y, dims = attention_chain(cap, b, cap["h_pre"], cap["w_in_ln"])
 
     ref = cap["ref_attn"]
     at = cap["attn_torch"] if "attn_torch" in cap else ref
@@ -208,8 +242,7 @@ def build(cap: dict) -> tuple[Blob, dict]:
     print(f"  grade  MX chain vs fp32 reference        : rel_fro = {100 * rel:.4f}%")
     print(f"  grade  MX chain vs the MODEL's own output: rel_fro = {100 * rel_t:.4f}%")
 
-    dims = dict(M=M, D=D, H=H, NH=NH, NKV=NKV, PER=PER, QD=QD, KVD=KVD, eps=eps,
-                rel=rel, rel_torch=rel_t, layer=int(cap["meta_layer"]))
+    dims.update(rel=rel, rel_torch=rel_t)
     return b, dims
 
 

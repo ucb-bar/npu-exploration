@@ -1,7 +1,7 @@
 """Build (and cache) the spike model for a recipe.
 
-libgemmini's MX precision ladder is compile-time: ``prod_e``/``prod_m``, the 16-entry
-``acc_e``/``acc_m`` tables and the block-scale group are C literals in
+libgemmini's MX precision ladder is compile-time: ``prod_e``/``prod_m``, the per-lane
+``acc_e[DIM]``/``acc_m[DIM]`` ladder and the block-scale group are C literals in
 ``gemmini.cc``, not runtime fields. So a recipe that changes them needs its own
 ``libgemmini.so``, and running it against the stock one would fail in the worst
 possible way -- silently, with the mxquant model honouring the recipe, the device ignoring
@@ -69,8 +69,8 @@ def chipyard_root() -> Path:
     cy = os.environ.get("MERLIN_CHIPYARD") or os.environ.get("CHIPYARD_ROOT")
     if cy:
         return Path(cy)
-    # config / npu-exploration / gemmini / generators / <chipyard root>
-    return Path(__file__).resolve().parents[4]
+    # spike / models / npu-exploration / gemmini / generators / <chipyard root>
+    return Path(__file__).resolve().parents[5]
 
 
 def gemmini_root() -> Path:
@@ -123,20 +123,27 @@ def gemmini_pin() -> str | None:
         return None
 
 
-def _sub_once(text: str, pattern: str, repl: str, expect: int, what: str) -> str:
+def _sub_once(text: str, pattern: str, repl: str, expect: int, what: str, flags: int = 0) -> str:
     """Substitute with an asserted match count.
 
     A count that has moved means upstream libgemmini changed shape underneath us. Far
     better to stop here than to half-patch the model and grade a kernel against a
     machine that is part one recipe and part another.
     """
-    out, n = re.subn(pattern, repl, text)
+    out, n = re.subn(pattern, lambda _m: repl, text, flags=flags)
     if n != expect:
         raise BuildError(
             f"{what}: expected {expect} match(es) of /{pattern}/ in gemmini.cc, found {n}. "
-            "libgemmini has changed; re-check gemmini.cc:1145-1148 and the GROUP_OUT sites "
-            "before trusting any build")
+            "libgemmini has changed; re-check the prod_e/acc_e block in mx_loop_ws_spad and "
+            "the GROUP_OUT sites before trusting any build")
     return out
+
+
+#: libgemmini's accumulator ladder: `int8_t acc_e[DIM], acc_m[DIM];` filled by a per-lane loop
+#: whose ramp depends on GEMMINI_DIM (#if ... #endif inside the loop body). The whole declaration
+#: plus loop is replaced, so no lane keeps a stock value.
+ACC_LADDER_RE = (r"int8_t acc_e\[DIM\], acc_m\[DIM\];\s*"
+                 r"for \(int kk = 0; kk < DIM; kk\+\+\) \{.*?#endif\s*\}")
 
 
 def patch(src: str, recipe) -> tuple[str, list[str]]:
@@ -144,16 +151,24 @@ def patch(src: str, recipe) -> tuple[str, list[str]]:
     changes = []
     acc_e = ",".join(str(v) for v in recipe.acc_e)
     acc_m = ",".join(str(v) for v in recipe.acc_m)
+    if not (len(recipe.acc_e) == len(recipe.acc_m) == recipe.dim):
+        raise BuildError(f"{recipe.name}: accumulator ladder has {len(recipe.acc_e)} entries, "
+                         f"dim is {recipe.dim}; need one per lane")
 
     src = _sub_once(src, r"const int prod_e = \d+, prod_m = \d+;",
                     f"const int prod_e = {recipe.prod_e}, prod_m = {recipe.prod_m};",
                     1, "product precision")
     changes.append(f"prod_e={recipe.prod_e} prod_m={recipe.prod_m}")
 
-    src = _sub_once(src, r"const int8_t acc_e\[16\] = \{[^}]*\};",
-                    f"const int8_t acc_e[16] = {{{acc_e}}};", 1, "accumulator exponents")
-    src = _sub_once(src, r"const int8_t acc_m\[16\] = \{[^}]*\};",
-                    f"const int8_t acc_m[16] = {{{acc_m}}};", 1, "accumulator mantissas")
+    # Literal tables sized to the recipe, with a compile-time check that the build's DIM agrees:
+    # `build()` passes -DGEMMINI_DIM=<dim>, and anything else must not compile into a wrong model.
+    src = _sub_once(src, ACC_LADDER_RE,
+                    f"#if GEMMINI_DIM != {recipe.dim}\n"
+                    f"#error \"recipe {recipe.name} has a {recipe.dim}-lane accumulator ladder\"\n"
+                    f"#endif\n"
+                    f"  const int8_t acc_e[DIM] = {{{acc_e}}};\n"
+                    f"  const int8_t acc_m[DIM] = {{{acc_m}}};",
+                    1, "accumulator ladder", flags=re.DOTALL)
     changes.append(f"acc_e=[{acc_e}]")
     changes.append(f"acc_m=[{acc_m}]")
 
@@ -219,7 +234,7 @@ def build(recipe, *, force: bool = False, gxx: str | None = None, quiet: bool = 
     riscv = os.environ.get("RISCV") or str(chipyard_root() / ".conda-env/riscv-tools")
     cmd = [gxx, "-L", f"{riscv}/lib", f"-Wl,-rpath,{riscv}/lib", "-shared",
            "-o", str(so), "-std=c++17", "-I", f"{riscv}/include", "-I", str(srcdir),
-           "-fPIC", "-O3", str(srcdir / "gemmini.cc")]
+           f"-DGEMMINI_DIM={recipe.dim}", "-fPIC", "-O3", str(srcdir / "gemmini.cc")]
     if not quiet:
         print(f"[build     ] {bid} ({recipe.name})")
         for c in changes:

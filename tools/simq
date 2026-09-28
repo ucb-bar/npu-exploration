@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Thin wrapper so `simq build CONFIG=...` works without naming the interpreter or the .py.
+# Put this directory on PATH, or call it as tools/simq.
+exec python3 "$(dirname "$(readlink -f "$0")")/simq.py" "$@"

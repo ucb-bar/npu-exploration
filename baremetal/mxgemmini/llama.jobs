@@ -1,7 +1,7 @@
 # The llama kernels on RTL. Cheapest first, so a structural failure shows up in minutes rather
 # than hours.
 #
-#   tools/simq add run CONFIG=MxGemminiRocketConfig BINARY=baremetal/mxgemmini/llama.jobs \
+#   tools/simq run CONFIG=MxGemminiRocketConfig BINARY=baremetal/mxgemmini/llama.jobs \
 #       MAX_CYCLES=60000000 TIMEOUT=28800
 #
 # MAX_CYCLES MATTERS HERE. These kernels are dominated by the host's fp32 glue, not the mesh:

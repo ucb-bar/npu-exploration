@@ -322,8 +322,15 @@ int main() {
 
   // ================= host: RMSNorm =================
   t0 = read_cycles();
+#ifdef LLAMA_SKIP_RMSNORM
+  // Skip the ~524k-cycle host RMSNorm: use the golden Xn codes/scales directly (they are what the
+  // host would produce, verified 0/2048 in the full test). Makes the mesh-only repro fast in VCS.
+  for (size_t i = 0; i < (size_t) LLAMA_M * LLAMA_D; i++) xn_codes[i] = ((const uint8_t *) XN_CODES)[i];
+  for (size_t i = 0; i < (size_t) LLAMA_GD * LLAMA_M; i++) xn_scales[i] = ((const uint8_t *) XN_SCALES_ROW)[i];
+#else
   mx_rmsnorm((const uint16_t *) H_PRE_BF16, W_IN_LN_BF16, LLAMA_M, LLAMA_D, LLAMA_RMS_EPS, xn_f);
   mx_quantize_rows(xn_f, LLAMA_M, LLAMA_D, xn_codes, xn_scales);
+#endif
   t_host += read_cycles() - t0;
   printf("host  rmsnorm+quant: codes differ %d/%d, scales differ %d/%d vs golden\n",
          mx_count_diff_u8(xn_codes, (const uint8_t *) XN_CODES, LLAMA_M * LLAMA_D),
@@ -341,7 +348,30 @@ int main() {
                                   (const uint16_t *) V_OUT_BF16 };
   const char *qkv_name[3] = { "Q", "K", "V" };
   int qkv_diff = 0;
-  for (int s = 0; s < 3; s++) {
+  static uint16_t cap_row0[3][8];   // each matmul's output row 0, captured BEFORE the next iter can clobber it
+  static uint16_t cap_qlast[8];     // Q's last row, for leak comparison
+  // LLAMA_ONLY_PROJ isolates one projection (0=Q,1=K,2=V) as a standalone FIRST matmul; LLAMA_NPROJ
+  // runs the first N (default 3); LLAMA_SEPARATE_QKV drains each to its own spad region instead of
+  // reusing SPAD_QKV -- if that makes K/V pass, the bug is the acc/region reuse not being reset.
+#ifndef LLAMA_NPROJ
+#define LLAMA_NPROJ 3
+#endif
+  // CPU-side view of Xn in DRAM: changes between projections => something wrote it.
+#define XN_PROBE(stage, name) do { gemmini_fence(); \
+    printf("xnprobe %s-%s @%p diff=%d/%d row0:", stage, name, (void *) xn_codes, \
+           mx_count_diff_u8(xn_codes, (const uint8_t *) XN_CODES, LLAMA_M * LLAMA_D), LLAMA_M * LLAMA_D); \
+    for (int c_ = 0; c_ < 16; c_++) printf(" %02x", xn_codes[c_]); printf("\n"); } while (0)
+#ifdef LLAMA_ONLY_PROJ
+  for (int s = LLAMA_ONLY_PROJ; s < LLAMA_ONLY_PROJ + 1; s++) {
+#else
+  for (int s = 0; s < LLAMA_NPROJ; s++) {
+#endif
+#ifdef LLAMA_SEPARATE_QKV
+    uint32_t qkv_dst = SPAD_QKV + (uint32_t) s * ROWS16(LLAMA_M, LLAMA_H);
+#else
+    uint32_t qkv_dst = SPAD_QKV;
+#endif
+    XN_PROBE("before", qkv_name[s]);
     t0 = read_cycles();
     // Tile t contributes Xn[:, t*KTILE ..] @ W[t*KTILE .., :] into SPAD_QKV: the first overwrites,
     // the rest accumulate, so after the loop the region holds the full D-deep reduction. Both
@@ -355,16 +385,63 @@ int main() {
                              KGRP * LLAMA_H, 1);
       gemmini_fence();
       mvin_B(wcodes[s] + (size_t) kt * KTILE * LLAMA_H, KTILE, LLAMA_H, 0, LLAMA_H, SPAD_PB);
-      mesh_matmul(LLAMA_M, KTILE, LLAMA_H, SPAD_XN, SPAD_PB_ARG, SPAD_QKV,
+      mesh_matmul(LLAMA_M, KTILE, LLAMA_H, SPAD_XN, SPAD_PB_ARG, qkv_dst,
                   OUT_BF16, (uint64_t) scale_sink, 0, kt > 0);
     }
     t_mesh += read_cycles() - t0;
-    mvout_bf16(qkv_hw[s], SPAD_QKV, LLAMA_M, LLAMA_H);
+    XN_PROBE("premvout", qkv_name[s]);
+    mvout_bf16(qkv_hw[s], qkv_dst, LLAMA_M, LLAMA_H);
+    XN_PROBE("postmvout", qkv_name[s]);
+    for (int c = 0; c < 8; c++) cap_row0[s][c] = qkv_hw[s][c];     // corruption-proof snapshot
+    if (s == 0) for (int c = 0; c < 8; c++) cap_qlast[c] = Q_hw[(LLAMA_M - 1) * LLAMA_H + c];
     int d = mx_count_diff_u16(qkv_hw[s], qkv_gold[s], LLAMA_M * LLAMA_H);
     qkv_diff += d;
     printf("mesh  %s = Xn @ W%s : %d/%d differ from golden\n",
            qkv_name[s], qkv_name[s], d, LLAMA_M * LLAMA_H);
+    if (d) {  // localize the regression: which output rows differ, and by how much
+      for (int r = 0; r < LLAMA_M; r++) {
+        int rd = 0;
+        for (int c = 0; c < LLAMA_H; c++)
+          if (qkv_hw[s][(size_t) r * LLAMA_H + c] != qkv_gold[s][(size_t) r * LLAMA_H + c]) rd++;
+        if (rd)
+          printf("      %s row %2d: %d/%d cols differ  hw[0]=%04x gold[0]=%04x\n",
+                 qkv_name[s], r, rd, LLAMA_H,
+                 qkv_hw[s][(size_t) r * LLAMA_H], qkv_gold[s][(size_t) r * LLAMA_H]);
+      }
+    }
   }
+
+#ifdef LLAMA_QKV_ONLY
+  // Isolated repro: stop after the Q/K/V projections. This alone reproduces the back-to-back
+  // BF16 LUT-matmul bug (Q clean, K/V one output row wrong) without scores/softmax/P@V/o_proj.
+  // Leak probe (corruption-proof snapshots taken right after each mvout). Compare K/V row 0 (wrong)
+  // against Q's row 0 and Q's LAST row: match Q[last] -> output-pipeline tail leak; match Q[0] ->
+  // input-side replay; matches neither -> distinct stale/garbage.
+  printf("  cap Q row0 = %04x %04x %04x %04x  Q rowLast = %04x %04x %04x %04x\n",
+         cap_row0[0][0], cap_row0[0][1], cap_row0[0][2], cap_row0[0][3],
+         cap_qlast[0], cap_qlast[1], cap_qlast[2], cap_qlast[3]);
+  printf("  cap K row0 = %04x %04x %04x %04x  gold = %04x %04x %04x %04x\n",
+         cap_row0[1][0], cap_row0[1][1], cap_row0[1][2], cap_row0[1][3],
+         ((const uint16_t *) K_OUT_BF16)[0], ((const uint16_t *) K_OUT_BF16)[1],
+         ((const uint16_t *) K_OUT_BF16)[2], ((const uint16_t *) K_OUT_BF16)[3]);
+  printf("  cap V row0 = %04x %04x %04x %04x  gold = %04x %04x %04x %04x\n",
+         cap_row0[2][0], cap_row0[2][1], cap_row0[2][2], cap_row0[2][3],
+         ((const uint16_t *) V_OUT_BF16)[0], ((const uint16_t *) V_OUT_BF16)[1],
+         ((const uint16_t *) V_OUT_BF16)[2], ((const uint16_t *) V_OUT_BF16)[3]);
+  // Did a later matmul clobber an earlier output buffer in DRAM? (K_hw now vs its captured row0.)
+  printf("  post-loop K_hw row0 = %04x %04x %04x %04x  (was %04x at produce time)\n",
+         K_hw[0], K_hw[1], K_hw[2], K_hw[3], cap_row0[1][0]);
+  printf("cycles mesh %d, host %d\n", (int) t_mesh, (int) t_host);
+  if (qkv_diff == 0)
+    printf("llama QKV-only test PASSED (Q, K, V projections bit-exact).\n");
+  else
+    printf("llama QKV-only test FAILED: %d mesh element(s) differ from golden.\n", qkv_diff);
+#ifndef BAREMETAL
+  exit(qkv_diff != 0);
+#else
+  return qkv_diff != 0;
+#endif
+#endif
 
   // ================= host: RoPE, and the K transpose the MX loop cannot do =================
   t0 = read_cycles();
