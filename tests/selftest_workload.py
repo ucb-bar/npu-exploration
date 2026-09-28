@@ -211,7 +211,8 @@ def main() -> int:
             continue
         r = None if e["recipe"] is None else base
         k = W.key("tinyllama", r, nsamples=oracle["nsamples"], seqlen=oracle["seqlen"], seed=oracle["seed"],
-                  rules=oracle["rules"], rounding_mode=e["rounding_mode"] or scheme.ROUNDING, scale_floor=e["scale_floor"])
+                  rules=oracle["rules"], rounding_mode=e["rounding_mode"] or scheme.ROUNDING, scale_floor=e["scale_floor"],
+                  reduce=e.get("reduce", "hardware"))
         path = W.RESULTS / f"{k}.json"
         if not path.exists():
             print(f"  skip  {e['name']}: not measured in this environment / mxq commit yet ({path.name})")
