@@ -97,7 +97,7 @@ def run(spec, recipe, *, dtype: str = "fp8_e4m3", edges: dict | None = None, shi
             "block": recipe.block,
             "operand_quantizer": (f"mxq.block.mxgemmini {_scheme.ROUNDING} floor=2^-23"
                                   + (" + compiler/codebook codebooks (wire operands)" if codebook else "")),
-            "chain_requantizer": ("app/ device model" if codebook
+            "chain_requantizer": ("compiler/operands device model" if codebook
                                   else "mxq.block.mxgemmini on the bf16 output" + (" via E3M1" if dtype in _REQUANT_VIA else "")),
             "as_shipped": f"mxq block.mxquant + {s_arith.name}" if shipped else None,
             "recipe": recipe.name, "build_id": recipe.build_id(), "dtype": dtype,
@@ -247,7 +247,7 @@ def _mesh_shipped(recipe, arith, sched, window: int, fmt: str):
     return mesh
 
 
-# --- what mxq does not have: the hardware team's device model, app/ -------------------------------
+# --- what mxq does not have: the codebook formats, on the hardware team's model in compiler/operands.py ---
 
 def _device_operands(A: np.ndarray, W: np.ndarray, dtype: str, a_px):
     """Codebook formats: the wire operands the compiler emits (indices + per-row-pair tables), decoded."""

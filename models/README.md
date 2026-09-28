@@ -97,6 +97,7 @@ a GPU the path reports why.
 
 ## What is not here yet
 
-The lowering and the spike run still live in `grade/pipeline.py`; `compiler/operands.py` (wire
-encoding, codebooks, requantizer) is still under `app/`. Both move in the next PR, with the compile
-mode entry point.
+The lowering is `compiler/lower.py` and the operand encoder `compiler/operands.py`; the spike run
+still lives in `grade/pipeline.py`. What the models do not yet read from the recipe (the operand
+format, the reducer, the rounding knobs, the emitter geometry) is the next plan: two recipes,
+hardware and run, and no flag that a recipe field could carry.

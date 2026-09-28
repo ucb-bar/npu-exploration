@@ -1,7 +1,7 @@
 # tools — one-off utilities
 
 Scripts run by hand rather than by `run_kernel.py`. Nothing in the normal path imports them; if a
-thing runs on every kernel it belongs in [`app/`](../app/README.md) instead. `simq` is the exception
+thing runs on every kernel it belongs in [`compiler/`](../compiler/README.md) or [`models/`](../models/README.md) instead. `simq` is the exception
 to "occasionally" — it is the everyday way to drive RTL simulations.
 
 | file | role |

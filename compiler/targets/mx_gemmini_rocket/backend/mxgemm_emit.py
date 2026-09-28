@@ -2,7 +2,7 @@
 
 This is the target's codegen: the piece merlin itself would carry if it shipped an mxgemmini
 backend. It consumes a merlin command buffer and nothing else — no fixture data, no bring-up paths,
-no knowledge of any particular matmul. Operand-specific material lives in ``app/``.
+no knowledge of any particular matmul. Operand-specific material lives in ``compiler/operands.py``.
 
 Scope: a CHAIN of one or more weight-stationary MX matmuls
 (RES_PACK -> MATMUL_RESIDENT -> COMMIT -> EVICT, repeated), where stage *i+1*'s lhs is stage *i*'s

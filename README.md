@@ -226,7 +226,6 @@ Each directory has its own README covering what it holds and what to do there.
 
 | Dir | Contents |
 |---|---|
-| [`app/`](app/README.md) | MX quantization, host ops, the format table, codebooks, interface MLIR |
 | [`kernels/`](kernels/README.md) | the kernel registry — a kernel is data, not code. **Add kernels here.** |
 | [`baremetal/`](baremetal/README.md) | hand-written application kernels per target (TinyLlama on MxGemmini) |
 | [`config/`](config/README.md) | hardware recipes: one JSON = one machine (`--config`); `scheme.py` maps a recipe onto mxq |

@@ -15,9 +15,9 @@ consumes a command buffer and emits + builds + runs a bare-metal ELF.
 | `backend/mxgraph_emit.py` | graph command buffer → C driver (one ELF with host ops) |
 | `backend/__init__.py` | the package; registers with merlin only if merlin is importable (compile_kernel.py never loads it) |
 
-Nothing here knows about a model, a tensor, or a file — that is
-[`app/`](../app/README.md). It receives a command buffer and knows nothing about
-tensors, models, or files.
+The backend receives a command buffer and knows nothing about tensors, models, or files;
+the front half of this package (`formats.py`, `wire.py`, `codebook.py`, `operands.py`,
+`graph.py`, `lower.py`) is where tensors become the wire.
 
 See [`targets/mx_gemmini_rocket/README.md`](targets/mx_gemmini_rocket/README.md).
 

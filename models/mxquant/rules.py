@@ -8,7 +8,7 @@ record ("mxquant_layers") always means the same layers.
                      MXQuant's eval_complete.py quantizes, so perplexities are comparable to its published numbers.
     all_linear       every nn.Linear, attention projections included.
     linears_no_head  every nn.Linear except lm_head, attention projections included: the decoder's projections
-                     alone, the layer set of app/ppl_datapath.py.
+                     alone.
 """
 from __future__ import annotations
 
