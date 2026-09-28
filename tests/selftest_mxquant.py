@@ -193,15 +193,27 @@ def main() -> int:
 
     def diff(dtype, C):
         P0, X0 = requantize_chained(C, dtype=dtype, books=None)
-        P1, X1 = K._requant(C, dtype, None) if dtype == "fp8_e4m3" else K._requant_mxq(C, dtype)
+        P1, X1 = K._requant(C, dtype, None)
         return int((P0.numpy() != P1.numpy()).sum()), int((X0.numpy() != X1.numpy()).sum()), P0.numel()
     for name, C in cases():
         dp, dx, n = diff("fp8_e4m3", C)
         check(f"fp8_e4m3 {name}: mxq == device requantizer", dp == 0 and dx == 0, f"P {dp}/{n} X {dx}")
-    dp, dx, n = diff("fp4_e2m1", rng.standard_normal((64, 64)).astype(np.float32) * 3)
-    print(f"  info  fp4_e2m1 normal block: mxq differs from the device requantizer on {dp}/{n} elements "
-          f"(two-step bf16->E3M1->E2M1 rounding), so the fp4 chain edge uses the device model")
-    check("fp4_e2m1 chain edge is routed to the device model", "fp4_e2m1" in K._DEVICE_REQUANT)
+    # fp4: the device rounds bf16 -> E3M1 -> E2M1; mxq's via=(3, 1) is that. Its scale floor is E8M0's 2^-126,
+    # so the sub-2^-23 case is a real check here and the zero-block case is excluded (the device's scale
+    # underflows to 0 there, mxq keeps 2^-126; the codes are 0 either way).
+    from rtl_exact.mxmesh import fp4 as M4
+    for name, C in cases():
+        if name == "zero blocks":
+            continue
+        C = torch.from_numpy(C).to(torch.bfloat16).float().numpy()
+        Pd, Xd = M4.matrix_mx_requantize(torch.from_numpy(C.copy()), "fp4:e2m1")
+        P1, X1 = K._requant(C, "fp4_e2m1", None)
+        dp, dx = int((Pd.t() != P1).sum()), int((Xd.t() != X1).sum())
+        check(f"fp4_e2m1 {name}: mxq via E3M1 == device requantizer", dp == 0 and dx == 0, f"P {dp}/{P1.numel()} X {dx}")
+    one = torch.from_numpy(rng.standard_normal((64, 64)).astype(np.float32) * 3).to(torch.bfloat16).float().numpy()
+    Pd, _ = M4.matrix_mx_requantize(torch.from_numpy(one.copy()), "fp4:e2m1")
+    P1, _ = K._quantize(one, "MXFP4", axis=1)
+    print(f"  info  fp4_e2m1 with a single rounding would differ on {int((Pd != P1).sum())}/{P1.numel()}: the via step is load-bearing")
 
     print("\n" + "=" * 70)
     if FAILURES:

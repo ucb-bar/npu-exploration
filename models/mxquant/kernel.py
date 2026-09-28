@@ -12,13 +12,16 @@ on the direct formats this equals the wire round trip element for element, and f
 chain ``quantize(bf16(C))`` IS the device requantizer (``gemmini.cc:1303-1378``), 0 differing on
 10^6 values including ties, subnormals, zero and sub-2^-23 blocks.
 
-Two things mxq does not have stay on the hardware team's code in ``app/``, in :func:`_device_operands`
-and :func:`_device_requant` and nowhere else:
+The fp4_e2m1 chain requantizer rounds bf16 -> E3M1 -> E2M1 in two steps; that is mxq's
+``quantize(via=(3, 1))`` (mxq 5fe2690), measured identical to the hardware team's model
+(``rtl_exact/mxmesh/fp4.py`` ``matrix_mx_requantize``) on 3.4 M codes of finite blocks with max >= 2^-126.
+Its scale floor is E8M0's smallest scale, 2^-126, not the fp8 requantizer's 2^-23 (``gemmini.cc``): the two
+device models floor differently, a spike-vs-RTL question for Nicolas, invisible on every fixture so far.
 
-* the four CODEBOOK formats (fp8_e4m3_quad, fp8_e5m2, fp6_e3m2, fp6_e2m3): the wire carries 4-bit
-  indices into a per-row-pair table built from the data (``compiler/codebook.py``);
-* the fp4_e2m1 chain requantizer, which rounds bf16 -> E3M1 -> E2M1 in two steps (``rtl_exact/mxmesh/fp4.py``
-  ``matrix_mx_requantize``); mxq's one-step RNE differs on 629/4096 of a normal block.
+One thing mxq does not have stays on the hardware team's code, in :func:`_device_operands` and
+:func:`_device_requant` and nowhere else: the four CODEBOOK formats (fp8_e4m3_quad, fp8_e5m2, fp6_e3m2,
+fp6_e2m3), whose wire carries 4-bit indices into a per-row-pair table built from the data
+(``compiler/codebook.py``).
 
 ``edges`` (built by the lowering, ``compiler/lower.py``) says how each intermediate reached the mesh:
 ``{"via": "host"}`` -- through host memory, re-quantized there -- or ``{"via": "requant", "books"}`` --
@@ -44,8 +47,8 @@ TIER = "mxquant_recipe_exact"
 #: into the edge map); these names are only read here.
 VIA_HOST = "host"
 VIA_REQUANT = "requant"
-#: The chain requantizer mxq does not have (two-step rounding, see the module docstring).
-_DEVICE_REQUANT = frozenset({"fp4_e2m1"})
+#: The fp4 requantizer's two roundings and scale floor (module docstring); every other direct format is one rounding.
+_REQUANT_VIA = {"fp4_e2m1": dict(via=(3, 1), scale_floor=2.0 ** -126)}
 
 
 class Unavailable(RuntimeError):
@@ -94,8 +97,8 @@ def run(spec, recipe, *, dtype: str = "fp8_e4m3", edges: dict | None = None, shi
             "block": recipe.block,
             "operand_quantizer": (f"mxq.block.mxgemmini {_scheme.ROUNDING} floor=2^-23"
                                   + (" + compiler/codebook codebooks (wire operands)" if codebook else "")),
-            "chain_requantizer": ("app/ device model" if codebook or dtype in _DEVICE_REQUANT
-                                  else "mxq.block.mxgemmini on the bf16 output"),
+            "chain_requantizer": ("app/ device model" if codebook
+                                  else "mxq.block.mxgemmini on the bf16 output" + (" via E3M1" if dtype in _REQUANT_VIA else "")),
             "as_shipped": f"mxq block.mxquant + {s_arith.name}" if shipped else None,
             "recipe": recipe.name, "build_id": recipe.build_id(), "dtype": dtype,
         },
@@ -176,11 +179,11 @@ def _walk(spec, dtype: str, edges: dict | None, mesh):
     return vals[spec.stages[-1].name], {k: v for k, v in vals.items() if k != INPUT}
 
 
-def _quantize(V: np.ndarray, fmt: str, axis: int):
+def _quantize(V: np.ndarray, fmt: str, axis: int, *, scale_floor: float = SCALE_FLOOR, via=None):
     """mxq's block quantizer in the hardware's convention: RNE, block max floored at 2^-23."""
     from mxq import block
     return block.mxgemmini.quantize(torch.from_numpy(np.ascontiguousarray(V, np.float32)), fmt, axis=axis,
-                                    block_size=BLOCK, rounding_mode=_scheme.ROUNDING, scale_floor=SCALE_FLOOR)
+                                    block_size=BLOCK, rounding_mode=_scheme.ROUNDING, scale_floor=scale_floor, via=via)
 
 
 def _operands(A: np.ndarray, W: np.ndarray, fmt: str):
@@ -198,7 +201,7 @@ def _requant(C: np.ndarray, dtype: str, books) -> tuple[torch.Tensor, torch.Tens
     fp8_e4m3 (measured, see the module docstring). The formats mxq cannot follow go to the device
     model.
     """
-    if _scheme.is_codebook(dtype) or dtype in _DEVICE_REQUANT:
+    if _scheme.is_codebook(dtype):
         return _device_requant(C, dtype, books)
     return _requant_mxq(C, dtype)
 
@@ -208,7 +211,7 @@ def _requant_mxq(C: np.ndarray, dtype: str) -> tuple[torch.Tensor, torch.Tensor]
         raise Unavailable(f"{dtype} chained: the requantizer blocks its output in {BLOCK}s along N, and this "
                           f"stage's N is {C.shape[1]}. A partial block is not what the device does with a full tile.")
     C_bf16 = torch.from_numpy(np.ascontiguousarray(C, np.float32)).to(torch.bfloat16).to(torch.float32).numpy()
-    P, X = _quantize(C_bf16, _scheme.mxq_format(dtype), axis=1)
+    P, X = _quantize(C_bf16, _scheme.mxq_format(dtype), axis=1, **_REQUANT_VIA.get(dtype, {}))
     return P.t().contiguous(), X.t().contiguous()
 
 
