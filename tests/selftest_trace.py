@@ -175,8 +175,8 @@ def main() -> int:
     check("RoPE module -> rope host stage between two mesh stages",
           [getattr(s, "op", None) for s in tp.stages] == [None, "rope", None])
     check("rope: fp32 reference == module(x)", close(tp.reference(), roped(xp).detach().numpy()))
-    from app import mxgraph
-    g = mxgraph.from_spec(tp)
+    from compiler import graph
+    g = graph.from_spec(tp)
     rope_step = next(s for s in g.steps if getattr(s, "op", None) == "rope")
     check("rope: graph bakes cos/sin as consts", set(rope_step.const_names) == {"cos", "sin"}
           and all(n in g.consts for n in rope_step.const_names.values()))

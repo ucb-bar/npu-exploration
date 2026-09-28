@@ -118,7 +118,7 @@ def from_spec(spec) -> Graph:
             if not st.emittable:
                 raise ValueError(
                     f"host stage {st.name!r} carries a python closure (fn=), which cannot be "
-                    "emitted as C. Declare it with op= (see app/mxhost.OPS) or accept the "
+                    "emitted as C. Declare it with op= (see kernels/host_ops.OPS) or accept the "
                     "per-stage path.")
             srcs = st.srcs or (prev,)
             r, c = g.shapes[srcs[0]]

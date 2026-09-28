@@ -149,7 +149,7 @@ measure stale RTL — the mistake that cost two days in
        ▼            ▼                    ▼
  ┌───────────── grade/pipeline.run ────────────────────────────────────────┐
  │ reference  fp32                                                         │
- │ spike      LOWER: compiler/lower.py (app/mxgraph, mxhost) → command buffer│
+ │ spike      LOWER: compiler/lower.py (compiler/graph, host_ops) → command buffer│
  │            (fused chain | graph | per-stage)   → compiler/targets backend│
  │            mxgemm_emit / mxgraph_emit → main.c → ELF → spike             │
  │ mxquant    models/mxquant on mxq, fed the same wire operands             │
@@ -213,7 +213,7 @@ kernels/     registry.py spec.py trace.py            the kernel IR; --list shows
 config/      recipe.py recipes/*.json scheme.py     one JSON = one machine; recipe → mxq
 models/      reference/ mxquant/ (bits + perplexity) spike/ ppa/ perf/   one folder per model of the machine
 grade/       pipeline.py metrics.py report.py telemetry.py     run, compare, record
-app/         mxgraph mxhost (lowering front half); formats wire codebook (the wire);
+app/         graph host_ops (lowering front half); formats wire codebook (the wire);
              operands.py (operand quantizer, renamed in the next PR); mxmesh/; capture_*
 compiler/    lower.py (KernelSpec -> command buffer); targets/mx_gemmini_rocket/ backend/{mxgemm_emit,mxgraph_emit,runner} runtime/
 baremetal/   hand-written TinyLlama kernels and their generators

@@ -89,11 +89,11 @@ def _helpers(dim: int, spad_rows: int) -> list[str]:
 
 #: RMSNorm over an fp32 tile. `mx_host.h`'s `mx_rmsnorm` takes bf16 inputs, which is right for the
 #: reference kernel's residual stream but not for a graph where every edge is already fp32. Same
-#: arithmetic, same order of operations, so `app.mxhost.rmsnorm` remains its twin.
+#: arithmetic, same order of operations, so `kernels.host_ops.rmsnorm` remains its twin.
 _ROPE_F32 = """\
 /* RoPE with fp32 cos/sin tables. mx_host.h's mx_rope takes them as uint32 bit patterns and puns
    through a union; the emitter bakes real floats, so this variant takes them directly. Same
-   arithmetic and same indexing, so app.mxhost.rope stays its twin. */
+   arithmetic and same indexing, so kernels.host_ops.rope stays its twin. */
 static void mx_rope_f32(const uint16_t *x_bf16, const float *cosv, const float *sinv,
                         int M, int H, float *out) {
   const int half = H / 2;
@@ -137,7 +137,7 @@ def _bf16_to_f32(name: str, m: int, n: int) -> list[str]:
 def generate_graph_driver(cb: dict[str, Any], *, dtype: str = "fp8_e4m3") -> str:
     """Emit the one-ELF driver for a graph-shaped kernel.
 
-    ``cb["graph"]`` carries the step list (see :mod:`app.mxgraph`) and ``cb["graph_operands"]`` the
+    ``cb["graph"]`` carries the step list (see :mod:`compiler.graph`) and ``cb["graph_operands"]`` the
     quantized leaves. The graph is a side channel because ``merlin_iface`` v0.1 cannot express it —
     three live values, computed B operands, and a softmax it has no op for.
     """
@@ -275,9 +275,9 @@ def generate_graph_driver(cb: dict[str, Any], *, dtype: str = "fp8_e4m3") -> str
 
 def _emit_host_step(st: dict, uses: dict) -> list[str]:
     """A host op, plus the re-quantization that hands its result back to the mesh."""
-    from app import mxhost
+    from kernels import host_ops
 
-    o = mxhost.get(st["op"], **st["params"])
+    o = host_ops.get(st["op"], **st["params"])
     m, n, out = st["m"], st["n"], st["out"]
     srcs = list(st["srcs"])
     src = srcs[0]

@@ -78,7 +78,7 @@ class RoPE(nn.Module):
     """Rotary embedding with fixed tables, the form the tracer recognises.
 
     ``cos`` and ``sin`` are ``[M][H]`` tables, one row per position, over the full width; the
-    arithmetic is ``app.mxhost.rope`` exactly (split-half rotation), so ``module(x)`` and the
+    arithmetic is ``kernels.host_ops.rope`` exactly (split-half rotation), so ``module(x)`` and the
     spec's reference agree. Build one from a model's tables and call it on a ``[M][H]`` value.
     """
 

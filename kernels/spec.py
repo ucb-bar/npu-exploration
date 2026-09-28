@@ -65,7 +65,7 @@ class Stage:
 class HostStage:
     """A stage the mesh cannot do, run on the scalar core in fp32.
 
-    DECLARATIVE, not a closure: ``op`` names an entry in :data:`app.mxhost.OPS`, which carries both
+    DECLARATIVE, not a closure: ``op`` names an entry in :data:`kernels.host_ops.OPS`, which carries both
     a Python twin (for the reference) and the ``mx_host.h`` function to call (for the device). A
     closure can be run but not compiled, so a kernel built from closures can only execute on the
     host BETWEEN ELFs -- exactly what merlin_glue_port_plan.md D4 abolishes.
@@ -94,8 +94,8 @@ class HostStage:
                 f"host stage {self.name!r}: set exactly one of op= (emittable) or fn= "
                 "(python-only, forces the per-stage path)")
         if self.op is not None:
-            from app import mxhost
-            o = mxhost.get(self.op, **self.params)   # validates the name and the params, early
+            from kernels import host_ops
+            o = host_ops.get(self.op, **self.params)   # validates the name and the params, early
             if self.src is not None and len(self.srcs) != o.arity:
                 raise ValueError(
                     f"host stage {self.name!r}: op {self.op!r} takes {o.arity} input(s), "
@@ -114,8 +114,8 @@ class HostStage:
         """Evaluate on the host, for the reference and the golden."""
         if self.op is None:
             return self.fn(*xs)
-        from app import mxhost
-        return mxhost.get(self.op, **self.params).fn(*xs, **self.params)
+        from kernels import host_ops
+        return host_ops.get(self.op, **self.params).fn(*xs, **self.params)
 
 
 AnyStage = Union[Stage, HostStage]

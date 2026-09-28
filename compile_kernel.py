@@ -83,7 +83,7 @@ def compile(spec, recipe, *, dtype: str = DEFAULT_DTYPE, target: str = "spike", 
         host = [st.name for st in spec.stages if not st.on_mesh and not st.emittable]
         raise ValueError(
             f"{spec.name} cannot be compiled ahead of time: host stage(s) {host} carry a Python "
-            "function, not an op the emitter knows (app/mxhost.OPS), so the only lowering is one "
+            "function, not an op the emitter knows (kernels/host_ops.OPS), so the only lowering is one "
             "ELF per matmul, each fed by the previous run. run_kernel.py drives that path.")
     if low.kind == "graph" and dtype != GRAPH_DTYPE:
         raise ValueError(

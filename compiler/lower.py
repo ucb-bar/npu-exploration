@@ -257,10 +257,10 @@ def _graph(spec, dtype: str) -> tuple[dict, list[dict], dict]:
     """
     from dataclasses import asdict
 
-    from app import mxgraph
+    from compiler import graph
 
-    g = mxgraph.from_spec(spec)
-    ops = mxgraph.operand_bundles(g, dtype=dtype)
+    g = graph.from_spec(spec)
+    ops = graph.operand_bundles(g, dtype=dtype)
     cb = {
         "commands": [],                       # no chain: the graph IS the program
         "tensors": {},
