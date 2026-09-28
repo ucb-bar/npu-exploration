@@ -20,13 +20,15 @@ holds it up.
 | `selftest_lower.py` | `compiler/lower.py` builds the chain command buffer merlin's parser used to build (26 recorded cases, `tests/oracle/command_buffers.json`), picks the lowering the pipeline picks, imports no merlin |
 | `selftest_compile.py` (+ `fixtures/modules.py`) | `compile_kernel.py` writes the same `main.c` as the graded path for every kernel × format and both targets, its spike ELF prints `expected.npy` bit for bit, and it refuses before any build |
 | `test_recipe_drift.py` | a recipe JSON equals the Chisel it elaborates (see [`../config/`](../config/README.md)) |
+| `verify_rtl_exact.py` | MXQuant under [`../rtl_exact/`](../rtl_exact/README.md) equals the hardware bit for bit on one real llama MLP (`oracle/fixture_llama_mlp.npz`; `oracle/make_fixture.py` regenerates it from a capture) |
+| `rtl/*.jobs` | RTL regression lists for simq: `tools/simq run CONFIG=<cfg> BINARY=tests/rtl/<list>.jobs JOBS=8` (the config is in each file's header) |
 | `oracle/` | fixtures the above compare against |
 
 ## Using it
 
 ```bash
 .venv/bin/python tests/selftest_grade.py
-.venv/bin/python rtl_exact/verify_rtl_exact.py     # lives with the config it verifies
+.venv/bin/python tests/verify_rtl_exact.py
 ```
 
 Each is a plain script: exit `0` on pass, non-zero on failure. There is no runner — run the one whose

@@ -11,7 +11,7 @@ means "matches the hardware", not "matches another python model".
 Run from the gemmini tree, which owns the golden model and the capture:
 
     cd generators/gemmini/npu-exploration
-    PATH=.venv/bin:$PATH .venv/bin/python3 rtl_exact/make_fixture.py
+    PATH=.venv/bin:$PATH .venv/bin/python3 tests/oracle/make_fixture.py
 """
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-GEMMINI = (HERE / ".." / ".." / "software" / "gemmini-rocc-tests").resolve()
-NPU = (HERE / "..").resolve()
+NPU = HERE.parents[1]
+GEMMINI = NPU.parent / "software" / "gemmini-rocc-tests"
 for p in (str(GEMMINI), str(NPU)):
     if p not in sys.path:
         sys.path.insert(0, p)

@@ -152,7 +152,7 @@ def cross_tile_accumulate(C: torch.Tensor, tile: torch.Tensor, FM) -> torch.Tens
 #: Fuse the elementwise chains with torch.compile. OFF by default, and **UNVERIFIED**: it is
 #: wired up but has NOT been gated by verify_rtl_exact.py, because compiling these functions
 #: on CPU did not finish in 40 minutes on the box it was written on. Before trusting any
-#: number produced with it ON, run `MXG_RTL_COMPILE=1 python3 rtl_exact/verify_rtl_exact.py`
+#: number produced with it ON, run `MXG_RTL_COMPILE=1 python3 tests/verify_rtl_exact.py`
 #: on the target machine and require the usual 65536/65536.
 #:
 #: WHY IT MATTERS. MEASURED on an sm_120 GPU at seqlen 2048, the datapath runs at a flat

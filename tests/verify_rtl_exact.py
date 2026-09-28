@@ -15,7 +15,7 @@ changed (`fp8_matmul_model` / `gemmini.cc`); or the config drifted. Each is wort
 which is the point of keeping this runnable.
 
     cd generators/gemmini/npu-exploration
-    .venv/bin/python3 rtl_exact/verify_rtl_exact.py
+    .venv/bin/python3 tests/verify_rtl_exact.py
 
 `eval_complete.py` lives on MXQuant's `chloe-branch-all`; if it is not importable this script
 extracts it from that branch into a temp dir rather than asking you to switch branches.
@@ -61,10 +61,10 @@ def main() -> int:
     ap.add_argument("--prodacc", type=Path, default=None,
                     help="directory holding MXQuant's eval_complete.py (default: extract from "
                          f"{BRANCH})")
-    ap.add_argument("--fixture", type=Path, default=HERE / "fixture_llama_mlp.npz")
+    ap.add_argument("--fixture", type=Path, default=HERE / "oracle" / "fixture_llama_mlp.npz")
     args = ap.parse_args()
 
-    sys.path.insert(0, str(HERE))
+    sys.path.insert(0, str(NPU / "rtl_exact"))      # rtl_datapath
     sys.path.insert(0, str(_prodacc_dir(args.prodacc)))
 
     import torch

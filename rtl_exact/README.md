@@ -6,7 +6,7 @@ max abs diff 0.0, on a real TinyLlama MLP. Verified 2026-09-06, and re-checkable
 
 ```bash
 cd generators/gemmini/npu-exploration
-.venv/bin/python3 rtl_exact/verify_rtl_exact.py
+.venv/bin/python3 tests/verify_rtl_exact.py
 ```
 ```
   as shipped         :  10.63% vs fp32    17.90% vs hardware
@@ -74,9 +74,9 @@ hardware *worse*. Do not quote the effect of one of them measured with the other
 | `mxgemmini_rtl.json` | **the config** — formats, mesh geometry, the per-lane accumulator schedule, the three semantic rules, provenance (RTL and spike file:line) and the verified numbers |
 | `acc_schedule.csv` | the schedule alone, in the format MXQuant's `--acc-schedule` reads |
 | `rtl_datapath.py` | the three behaviours, and `install()` to put them into MXQuant's `MXLinearSim` |
-| `fixture_llama_mlp.npz` | one real llama MLP's inputs plus the **hardware's** output (1.2 MB) |
-| `verify_rtl_exact.py` | the gate above |
-| `make_fixture.py` | regenerates the fixture from a fresh capture |
+| `../tests/verify_rtl_exact.py` | the gate above |
+| `../tests/oracle/fixture_llama_mlp.npz` | one real llama MLP's inputs plus the **hardware's** output (1.2 MB) |
+| `../tests/oracle/make_fixture.py` | regenerates the fixture from a fresh capture |
 
 ## Two things to know
 

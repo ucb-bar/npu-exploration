@@ -202,7 +202,7 @@ Less common:
 | `python -m models.accuracy --config R --dry-run` | which layers the accuracy model would patch |
 | `app/capture_llama_layer.py`, `app/capture_llama_tiles.py` | capture real TinyLlama tensors for the llama kernels (needs the MXQuant clone) |
 | `baremetal/mxgemmini/gen/gen_*.py` | generators for the hand-written TinyLlama kernels |
-| `rtl_exact/verify_rtl_exact.py`, `rtl_exact/make_fixture.py` | the frozen fixture and its verifier |
+| `tests/verify_rtl_exact.py`, `tests/oracle/make_fixture.py` | the frozen llama-MLP fixture and its verifier (MXQuant under `rtl_exact/` equals the hardware) |
 | `tools/extract_model.py` | one-off extraction from the gemmini tree |
 
 Run everything with `.venv/bin/python` from the repo root after `source scripts/env.sh`.
@@ -220,8 +220,9 @@ app/         mxiface mxgraph mxhost (lowering front half); mxformats mxwire mxlu
              mxq_golden.py (operand quantizer, renamed in the next PR); mxmesh/; capture_*
 compiler/    lower.py (KernelSpec -> command buffer); targets/mx_gemmini_rocket/ backend/{mxgemm_emit,mxgraph_emit,runner} runtime/
 baremetal/   hand-written TinyLlama kernels and their generators
-rtl_exact/   the frozen fixture and verifier
-tests/       the self-tests        tools/ extraction        scripts/ setup.sh env.sh
+rtl_exact/   the MXQuant config that is the hardware (rtl_datapath.py, mxgemmini_rtl.json)
+tests/       every test: selftest_*.py, verify_rtl_exact.py, oracle/ fixtures, rtl/ simq regression lists
+tools/       simq (RTL job queue), extraction        scripts/ setup.sh env.sh
 merlin/  microscaling-quant/       submodules             MXQuant/   optional clone
 out/  results/  .venv/  toolchain/ generated, gitignored
 ```

@@ -46,7 +46,7 @@ from pathlib import Path
 
 NPU = Path(__file__).resolve().parent.parent
 ROCC = NPU.parent / "software" / "gemmini-rocc-tests"
-for _p in (str(NPU), str(ROCC), str(NPU / "rtl_exact")):
+for _p in (str(NPU), str(ROCC), str(NPU / "rtl_exact"), str(NPU / "tests")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
