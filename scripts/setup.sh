@@ -13,7 +13,7 @@
 # What each phase provides (and which code requires it):
 #   python     .venv + requirements.txt        (every documented .venv/bin/python command)
 #   mxq        <repo>/microscaling-quant        git submodule, pinned: the quantization library the
-#                                                mxquant and accuracy models run on (models/, config/scheme.py)
+#                                                mxquant model runs on (models/, config/scheme.py)
 #   mxquant    <repo>/MXQuant checkout          OPTIONAL (--with-mxquant): app/capture_llama_*.py load the
 #                                                model through it; grade/mxquant_ref.py (legacy) reads
 #                                                origin/chloe-branch-all. Nothing graded needs it.
@@ -277,7 +277,7 @@ doctor() {
     row 1 "$(have_mxq && echo 1)"                                         "mxq submodule"         "$REPO/microscaling-quant"
     row 1 "$(have_python && echo 1)"                                      ".venv (torch, numpy)"  "$REPO/.venv"
     row 0 "$(have_ppa && echo 1)"                                         "PPA workspace (optional)" "${MX_PPA_ROOT:-$PPA_DIR/ppa}"
-    row 0 "$(command -v nvidia-smi >/dev/null 2>&1 && echo 1)"            "GPU (optional: accuracy model)" "nvidia-smi"
+    row 0 "$(command -v nvidia-smi >/dev/null 2>&1 && echo 1)"            "GPU (optional: perplexity)" "nvidia-smi"
     row 0 "$(have_mxquant && have_mxq_branch && echo 1)"                  "MXQuant (optional: capture, legacy)" "$REPO/MXQuant  (--with-mxquant)"
     echo
     if [ "$bad" = 0 ]; then

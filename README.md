@@ -8,7 +8,7 @@ it bit for bit against the mxquant model of the same machine. **One ELF per kern
 Prerequisites: Linux x86_64, `conda` (miniconda is fine), git SSH access to
 `ucb-bar/npu-exploration`, `ucb-bar/merlin`, `ucb-bar/gemmini` and `chloe-wong/microscaling-quant`
 (optionally `Rakanic/MxGemmini-workspace` for silicon-cost numbers, `chooper1/MXQuant` for the
-capture scripts and the legacy reference, and a CUDA GPU for the accuracy model), and ~10 GB of disk.
+capture scripts and the legacy reference, and a CUDA GPU for the perplexity path), and ~10 GB of disk.
 
 ```bash
 git clone --recurse-submodules git@github.com:ucb-bar/npu-exploration.git
@@ -117,7 +117,7 @@ measure stale RTL — the mistake that cost two days in
 |---|---|---|
 | `--kernel` | `linear` | which kernel (`--list`) |
 | `--config` | `baseline` | which hardware recipe (`--list`) |
-| `--models` | `default` | which models run: `default` = reference, mxquant, spike, ppa, perf; `all` adds accuracy; or a comma list |
+| `--models` | `default` | which models run: reference, mxquant, spike, ppa, perf, or a comma list of them |
 | `--dtype` | `fp8_e4m3` | MX operand format |
 | `--m --k --h --n` | 64 | batch rows, in_features, hidden, out_features |
 | `--tol` | 0.15 | pass threshold on relative Frobenius error vs fp32 |
@@ -125,7 +125,6 @@ measure stale RTL — the mistake that cost two days in
 | `--build-only` | off | stop at the ELF |
 | `--per-stage-elf` | off | one ELF per matmul, intermediates carried by the host; the default fuses a chain or emits a graph as one ELF |
 | `--legacy-mxquant` | off | grade with the previous reference (`grade/mxquant_ref.py`, MXQuant bundle extracted from the clone on first use); for the equivalence test, removed in the next PR |
-| `--gpus --nsamples --model-id` | | accuracy model: GPUs to split the samples over, sample count, HF model |
 
 ### Tests
 
@@ -155,22 +154,21 @@ measure stale RTL — the mistake that cost two days in
  │            mxgemm_emit / mxgraph_emit → main.c → ELF → spike             │
  │ mxquant    models/mxquant on mxq, fed the same wire operands             │
  │ ppa, perf  models/ppa, models/perf                                       │
- │ accuracy   models/accuracy: TinyLlama perplexity on the recipe's Scheme  │
  └──────────────────────────┬──────────────────────────────────────────────┘
                             ▼
               grade/metrics + report → results/<run>/  → VERDICT · PPA · PERF · PPL
 ```
 
 The recipe is the only source of the machine: `config/scheme.py` turns it into mxq's quantizer and
-arithmetic for the mxquant and accuracy models, and `build_spike.py` turns the same JSON into the
+arithmetic for the mxquant model (bits per kernel, perplexity per workload), and `build_spike.py` turns the same JSON into the
 functional model spike loads. The kernel is data (`kernels/registry.py`); the pipeline lowers it,
 runs it, and grades the bits that came back against the mxquant model of the same recipe.
 
 Inside `pipeline.run` the spike run and the three models that do not need its output run **at the
 same time**: the mxquant model needs only the lowering's edges, ppa only the recipe, perf only the
 stage shapes, so they start the moment the lowering has decided the edges and the grade joins them
-after spike returns. The accuracy model runs after the grade and splits its samples over the GPUs
-named in `--gpus`, one worker process per GPU. To run many kernel × recipe combinations at once,
+after spike returns. Perplexity is its own command (`python -m models.mxquant --workload …`), one
+worker process per GPU named in `--gpus`. To run many kernel × recipe combinations at once,
 launch several `run_kernel.py` processes; each run writes its own `results/<timestamp>_…/` directory.
 
 ## Entry points
@@ -178,11 +176,10 @@ launch several `run_kernel.py` processes; each run writes its own `results/<time
 | what you want | command |
 |---|---|
 | grade a kernel on a machine, every model at once | `run_kernel.py --kernel attention --config wide_acc` |
-| the same, with TinyLlama perplexity for that machine | `run_kernel.py --kernel linear --config wide_acc --models all --gpus 0,1,2,3` |
 | just the bits a machine must produce, no spike, seconds | `run_kernel.py --kernel mlp3 --config narrow_prod --models mxquant` |
 | compile a kernel to an ELF for spike or the RTL build | `compile_kernel.py --kernel mlp3 --target mx_rocket` |
 | compile a plain PyTorch module, no registry entry | `compile_kernel.py --module my.py:Block --input x.npy` |
-| perplexity of one machine on its own | `python -m models.accuracy --config baseline --gpus 0,1,2,3` |
+| perplexity of a workload on one machine, same arithmetic | `python -m models.mxquant --workload tinyllama --config baseline --gpus 0,1,2,3` |
 | silicon cost of one machine | `python -m models.ppa.ppa --config baseline` |
 | predicted timeline of one matmul on it | `python -m models.perf.perf --config baseline --m 64 --k 64 --n 64` |
 | build or list the per-recipe functional models | `python -m models.spike.build_spike --config R --force` |
@@ -199,7 +196,7 @@ Less common:
 
 | command | what it does |
 |---|---|
-| `python -m models.accuracy --config R --dry-run` | which layers the accuracy model would patch |
+| `python -m models.mxquant --workload tinyllama --config R --dry-run` | which layers get the recipe's Scheme |
 | `app/capture_llama_layer.py`, `app/capture_llama_tiles.py` | capture real TinyLlama tensors for the llama kernels (needs the MXQuant clone) |
 | `baremetal/mxgemmini/gen/gen_*.py` | generators for the hand-written TinyLlama kernels |
 | `tests/verify_rtl_exact.py`, `tests/oracle/make_fixture.py` | the frozen llama-MLP fixture and its verifier (MXQuant under `rtl_exact/` equals the hardware) |
@@ -214,7 +211,7 @@ run_kernel.py                 the exploration entry point (graded)
 compile_kernel.py             the compile entry point (ELF + expected bits)
 kernels/     registry.py spec.py trace.py            the kernel IR; --list shows what is registered; trace.py = PyTorch module -> KernelSpec
 config/      recipe.py recipes/*.json scheme.py     one JSON = one machine; recipe → mxq
-models/      reference/ mxquant/ spike/ ppa/ perf/ accuracy/   one folder per model of the machine
+models/      reference/ mxquant/ (bits + perplexity) spike/ ppa/ perf/   one folder per model of the machine
 grade/       pipeline.py metrics.py report.py telemetry.py     run, compare, record
 app/         mxgraph mxhost (lowering front half); mxformats mxwire mxlut (the wire);
              mxq_golden.py (operand quantizer, renamed in the next PR); mxmesh/; capture_*
@@ -235,7 +232,7 @@ Each directory has its own README covering what it holds and what to do there.
 | [`kernels/`](kernels/README.md) | the kernel registry — a kernel is data, not code. **Add kernels here.** |
 | [`baremetal/`](baremetal/README.md) | hand-written application kernels per target (TinyLlama on MxGemmini) |
 | [`config/`](config/README.md) | hardware recipes: one JSON = one machine (`--config`); `scheme.py` maps a recipe onto mxq |
-| [`models/`](models/README.md) | one folder per model of that machine: reference, mxquant, spike, ppa, perf, accuracy |
+| [`models/`](models/README.md) | one folder per model of that machine: reference, mxquant (bits and perplexity), spike, ppa, perf |
 | [`compiler/`](compiler/README.md) | the lowering (`lower.py`) and the backend that emits, builds and runs the ELF |
 | [`grade/`](grade/README.md) | run, compare, record — and what the verdict means |
 | [`rtl_exact/`](rtl_exact/README.md) | the reference configuration that matches the hardware bit for bit |

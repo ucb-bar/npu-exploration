@@ -1,5 +1,5 @@
 {
-  "what": "TinyLlama WikiText-2 perplexity with the baseline recipe's arithmetic in every linear layer except the attention projections, next to the unpatched bf16 model. models/accuracy measures it; tests/selftest_accuracy.py [6] checks a cached measurement in the same environment against these numbers exactly.",
+  "what": "TinyLlama WikiText-2 perplexity with the baseline recipe's arithmetic in every linear layer except the attention projections, next to the unpatched bf16 model. models/mxquant's perplexity path measures it; tests/selftest_workload.py [6] checks a cached measurement in the same environment against these numbers exactly.",
   "taken": "2026-09-24",
   "machine": "firesim2, 4x L40S",
   "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",

@@ -70,7 +70,7 @@ See [`../README.md`](../README.md) for install and the run command.
 
 ## Recipe → mxq (`scheme.py`)
 
-The mxquant and accuracy models run mxq (`microscaling-quant/`) with the arithmetic the recipe
+The mxquant model (both paths) runs mxq (`microscaling-quant/`) with the arithmetic the recipe
 describes, and `scheme.py` is the only place that translation lives:
 
 | function | gives | from |

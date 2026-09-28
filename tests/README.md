@@ -8,9 +8,9 @@ holds it up.
 |---|---|
 | `selftest_grade.py` | metrics, telemetry and reporting agree — the bit-identity verdict, the fp32 fallback, NO VERDICT without hardware, the renamed keys, and that events logged before the results directory exists are not dropped |
 | `selftest_scheme.py` | `config/scheme.py` builds from each recipe exactly the arithmetic the hardware team's extracted model runs (0 differing elements, 4 recipes); the refusals; `models.select` |
-| `selftest_mxquant.py` | `models/mxquant` equals the previous reference on every kernel × format (24 pairs, every intermediate), follows the recipe, degrades to `Unavailable` honestly, and its as-shipped line is mxq's MXQuant mode |
+| `selftest_mxquant.py` | `models/mxquant` equals the previous reference on every kernel × format (24 pairs, every intermediate), follows the recipe, degrades to `Unavailable` honestly, its as-shipped line is mxq's MXQuant mode; 120 recorded kernel × format × recipe outputs (`oracle/mxquant_bits.json`) hold it bit for bit, and mxq's quantizer on the bf16 accumulator is measured to be the fp8_e4m3 device requantizer |
 | `selftest_block.py` | `models/mxquant/block.py` (mxq) is MXQuant's block quantizer bit for bit — ties, subnormals, zero and sub-2^-23 blocks, ragged shapes, all formats (`oracle/block_fixture.npz`; `--update` regenerates it from MXQuant) |
-| `selftest_accuracy.py` | the accuracy model patches the right layers with the recipe's Scheme, keys its cache on everything the number depends on, refuses what mxq cannot run; `--gpu` measures one sample and hits the cache |
+| `selftest_workload.py` | the perplexity path patches the right layers with the recipe's Scheme, gives the same bits as the bit path on a linear layer and an mlp2 chain, keys its cache on everything the number depends on, refuses what mxq cannot run; `--gpu` measures one sample and hits the cache |
 | `selftest_quantizer.py` | our quantizer produces the same bytes as the baremetal headers |
 | `selftest_formats.py` | all 6 MX formats and 3 chains match their shipped fixtures |
 | `selftest_mx_host.py` | the C host runtime (`mx_host.h`) equals its Python twin |
