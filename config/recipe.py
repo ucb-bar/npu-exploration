@@ -280,13 +280,15 @@ def parse(raw: dict, *, path: Path | None = None) -> Recipe:
         raise RecipeError(f"runtime.operand_fmt: {fmt!r} not one of {sorted(_OPERAND_FMT)}")
     if fmt != "fp8":
         # The field is the right shape -- these ARE runtime instruction bits, and
-        # libgemmini implements all three formats -- but the SOFTWARE side stops at
-        # fp8: app/mxquant.py encodes e4m3 only, so a recipe asking for fp4 would
-        # quietly send fp8 codes and report an fp8 result under an fp4 label.
+        # libgemmini implements all three formats -- but the models do not read it:
+        # the operand format reaches the compiler and the mxquant model through --dtype
+        # (compiler/operands.py encodes every format), so a recipe saying fp4 here would
+        # run whatever --dtype said and report it under an fp4 label. The recipe refactor
+        # (one run recipe carrying the format) retires this refusal.
         raise RecipeError(
-            f"runtime.operand_fmt={fmt!r} is declared but not wired. app/mxquant.py "
-            "encodes FP8 E4M3 only (no e2m1/e3m2 encoder, and no 2-per-byte packing), "
-            "so this recipe would silently run fp8. Wire the encoder first")
+            f"runtime.operand_fmt={fmt!r} is declared but not wired: the models take the "
+            "operand format from --dtype, not from the recipe, so this recipe would silently "
+            "run --dtype's format. Pass --dtype fp4_e2m1 (or fp6_e3m2) and leave operand_fmt at fp8")
     seam = software.get("seam", "weight")
     if seam not in ("weight", "rescale"):
         raise RecipeError(f"software.seam: {seam!r} not one of 'weight', 'rescale'")
