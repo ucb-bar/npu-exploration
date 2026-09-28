@@ -1,26 +1,34 @@
-"""The mxquant model: the bits MX-Gemmini must produce for one kernel, computed from the recipe on mxq.
+"""The mxquant model, bit path: the bits MX-Gemmini must produce for one kernel, computed from the recipe on mxq.
 
 VERDICT is ``spike bits == mxquant bits`` with no tolerance anywhere in it. The model walks the same
-graph the device runs: mesh stages go through ``mxq.matmul.systolic`` with the recipe's Arithmetic,
-schedule and window (``config/scheme.py``), on exactly the wire operands the compiler emitted
-(``app.mxq_golden.quantize_operand`` -> ``wire_to_px``), so codebook formats and hardware-requantized
-chain intermediates are reproduced, not re-derived. Host stages run their own fp32 function, as they
-do on the Rocket core.
+graph the device runs: every mesh stage goes through ``mxq.matmul.systolic`` with the recipe's
+Arithmetic, schedule and window (``config/scheme.py``); host stages run their own fp32 function, as
+they do on the Rocket core.
 
-``edges`` (built by the lowering that ran, ``grade/pipeline.py``) says how each intermediate reached
-the mesh: ``{"via": "host"}`` -- it went through host memory and was re-quantized there -- or
-``{"via": "requant", "books": ...}`` -- the hardware requantizer wrote it and the next stage read it
-in place, which only the fused chain does. An edge the requantizer model cannot reproduce raises
-:class:`Unavailable`; the pipeline then grades on the fp32 tier and says so. A confident wrong
-reference would be worse than none.
+Operands come from mxq's block quantizer (``mxq.block.mxgemmini.quantize``, round-to-nearest-even,
+block max floored at 2^-23), which is what the compiler's wire encoder calls too, so the model
+multiplies the values the ELF carries. Measured 2026-09-28 (``tests/selftest_mxquant.py`` [5], [6]):
+on the direct formats this equals the wire round trip element for element, and for an fp8_e4m3
+chain ``quantize(bf16(C))`` IS the device requantizer (``gemmini.cc:1303-1378``), 0 differing on
+10^6 values including ties, subnormals, zero and sub-2^-23 blocks.
+
+Two things mxq does not have stay on the hardware team's code in ``app/``, in :func:`_device_operands`
+and :func:`_device_requant` and nowhere else:
+
+* the four CODEBOOK formats (fp8_e4m3_quad, fp8_e5m2, fp6_e3m2, fp6_e2m3): the wire carries 4-bit
+  indices into a per-row-pair table built from the data (``app/mxlut.py``);
+* the fp4_e2m1 chain requantizer, which rounds bf16 -> E3M1 -> E2M1 in two steps (``app/mxmesh/fp4.py``
+  ``matrix_mx_requantize``); mxq's one-step RNE differs on 629/4096 of a normal block.
+
+``edges`` (built by the lowering, ``compiler/lower.py``) says how each intermediate reached the mesh:
+``{"via": "host"}`` -- through host memory, re-quantized there -- or ``{"via": "requant", "books"}`` --
+the hardware requantizer wrote it and the next stage read it in place (fused chains only). An edge
+the requantizer model cannot reproduce raises :class:`Unavailable`; the pipeline then grades on the
+fp32 tier and says so. A confident wrong reference would be worse than none.
 
 The informational "as shipped" number is MXQuant's published simulator on this recipe's ladder:
 operands from ``mxq.block.mxquant`` (MXQuant's own codes, from the floats), arithmetic
 ``mxq.matmul.MXQUANT``. It is reported as the model-vs-silicon gap and never grades a run.
-
-This replaces ``grade/mxquant_ref.py``, which patched MXQuant's simulator at runtime and could not
-see the recipe; that file stays untouched until the second PR, as the legacy implementation the
-equivalence test (``tests/selftest_mxquant.py``) compares against.
 """
 from __future__ import annotations
 
@@ -29,13 +37,15 @@ import torch
 
 import models
 from config import scheme as _scheme
-from models.mxquant.block import BLOCK
+from models.mxquant.block import BLOCK, SCALE_FLOOR
 
 TIER = "mxquant_recipe_exact"
-#: How a value reached the mesh. THE LOWERING DECIDES THIS (grade/pipeline.py writes "host" / "requant"
+#: How a value reached the mesh. THE LOWERING DECIDES THIS (compiler/lower.py writes "host" / "requant"
 #: into the edge map); these names are only read here.
 VIA_HOST = "host"
 VIA_REQUANT = "requant"
+#: The chain requantizer mxq does not have (two-step rounding, see the module docstring).
+_DEVICE_REQUANT = frozenset({"fp4_e2m1"})
 
 
 class Unavailable(RuntimeError):
@@ -62,22 +72,30 @@ def run(spec, recipe, *, dtype: str = "fp8_e4m3", edges: dict | None = None, shi
     ok, why = available()
     if not ok:
         raise Unavailable(why)
+    try:
+        fmt = _scheme.mxq_format(dtype)
+    except _scheme.RecipeError as exc:
+        raise Unavailable(str(exc)) from exc
     arith, sched, window = _scheme.datapath(recipe)
     if recipe.block != BLOCK:
-        raise Unavailable(f"{recipe.name}: software.block = {recipe.block}, but the wire operands are "
-                          f"quantized in groups of {BLOCK} (app/mxq_golden.py); this model cannot follow")
-    y, stages = _walk(spec, dtype, edges, _mesh_hw(recipe, arith, sched, window, dtype))
+        raise Unavailable(f"{recipe.name}: block = {recipe.block}, but the wire operands are quantized "
+                          f"in groups of {BLOCK}; this model cannot follow")
+    codebook = _scheme.is_codebook(dtype)
+    y, stages = _walk(spec, dtype, edges, _mesh_hw(recipe, arith, sched, window, dtype, fmt))
     shipped_y = None
     if shipped:
         s_arith, _, _ = _scheme.shipped_datapath(recipe)
-        shipped_y, _ = _walk(spec, dtype, None, _mesh_shipped(recipe, s_arith, sched, window, dtype))
+        shipped_y, _ = _walk(spec, dtype, None, _mesh_shipped(recipe, s_arith, sched, window, fmt))
     return {
         "y": y, "stages": stages, "shipped_y": shipped_y, "tier": TIER,
         "model": {
             "source": "mxq", "commit": models.mxq_commit(),
             "arith": arith.name, "schedule": [list(s) for s in sched], "window": window,
             "block": recipe.block,
-            "operand_quantizer": f"mxq.block.mxgemmini {_scheme.ROUNDING} floor=2^-23 (wire operands)",
+            "operand_quantizer": (f"mxq.block.mxgemmini {_scheme.ROUNDING} floor=2^-23"
+                                  + (" + app/mxlut codebooks (wire operands)" if codebook else "")),
+            "chain_requantizer": ("app/ device model" if codebook or dtype in _DEVICE_REQUANT
+                                  else "mxq.block.mxgemmini on the bf16 output"),
             "as_shipped": f"mxq block.mxquant + {s_arith.name}" if shipped else None,
             "recipe": recipe.name, "build_id": recipe.build_id(), "dtype": dtype,
         },
@@ -128,11 +146,7 @@ def line(metrics: dict) -> str:
 # --- internals --------------------------------------------------------------------------------------
 
 def _walk(spec, dtype: str, edges: dict | None, mesh):
-    """Run the whole KernelSpec: host stages in fp32, mesh stages through ``mesh(A, W, a_px)``.
-
-    The same walk ``grade/mxquant_ref.simulate`` does; only the matmul differs.
-    """
-    from app.mxq_golden import NotModelled, requantize_chained
+    """Run the whole KernelSpec: host stages in fp32, mesh stages through ``mesh(A, W, a_px)``."""
     from kernels.spec import INPUT
 
     vals: dict[str, np.ndarray] = {INPUT: spec.x.numpy().astype(np.float32)}
@@ -156,39 +170,69 @@ def _walk(spec, dtype: str, edges: dict | None, mesh):
             edge = edge_map.get(lhs_name, {})
             a_px = None
             if edge.get("via") == VIA_REQUANT:
-                try:
-                    a_px = requantize_chained(vals[lhs_name], dtype=dtype, books=edge.get("books"))
-                except NotModelled as exc:
-                    raise Unavailable(str(exc)) from exc
+                a_px = _requant(vals[lhs_name], dtype, edge.get("books"))
             vals[st.name] = mesh(a, b, a_px)
         prev = st.name
     return vals[spec.stages[-1].name], {k: v for k, v in vals.items() if k != INPUT}
 
 
-def _mesh_hw(recipe, arith, sched, window: int, dtype: str):
-    """``A[M][K] @ W[K][N]`` on the wire operands the device was given, through mxq's systolic column."""
+def _quantize(V: np.ndarray, fmt: str, axis: int):
+    """mxq's block quantizer in the hardware's convention: RNE, block max floored at 2^-23."""
+    from mxq import block
+    return block.mxgemmini.quantize(torch.from_numpy(np.ascontiguousarray(V, np.float32)), fmt, axis=axis,
+                                    block_size=BLOCK, rounding_mode=_scheme.ROUNDING, scale_floor=SCALE_FLOOR)
+
+
+def _operands(A: np.ndarray, W: np.ndarray, fmt: str):
+    """``(PA [K][M], XA [K/32][M], PB [K][N], XB [K/32][N])``: both block along K, from mxq."""
+    PA, XA = _quantize(A.T, fmt, axis=0)
+    PB, XB = _quantize(W, fmt, axis=0)
+    return PA, XA, PB, XB
+
+
+def _requant(C: np.ndarray, dtype: str, books) -> tuple[torch.Tensor, torch.Tensor]:
+    """The A operand a chained stage receives: the device requantizer's output, ``(P [N][M], X [N/32][M])``.
+
+    The requantizer reads the accumulator out of SMEM, which holds bf16, blocks each row along N and
+    writes one E8M0 scale per block; mxq's quantizer on that bf16 value is the same thing for
+    fp8_e4m3 (measured, see the module docstring). The formats mxq cannot follow go to the device
+    model.
+    """
+    if _scheme.is_codebook(dtype) or dtype in _DEVICE_REQUANT:
+        return _device_requant(C, dtype, books)
+    return _requant_mxq(C, dtype)
+
+
+def _requant_mxq(C: np.ndarray, dtype: str) -> tuple[torch.Tensor, torch.Tensor]:
+    if C.shape[1] % BLOCK:                       # the device blocks its output in 32s along N; mxq would pad
+        raise Unavailable(f"{dtype} chained: the requantizer blocks its output in {BLOCK}s along N, and this "
+                          f"stage's N is {C.shape[1]}. A partial block is not what the device does with a full tile.")
+    C_bf16 = torch.from_numpy(np.ascontiguousarray(C, np.float32)).to(torch.bfloat16).to(torch.float32).numpy()
+    P, X = _quantize(C_bf16, _scheme.mxq_format(dtype), axis=1)
+    return P.t().contiguous(), X.t().contiguous()
+
+
+def _mesh_hw(recipe, arith, sched, window: int, dtype: str, fmt: str):
+    """``A[M][K] @ W[K][N]`` on the operands the device is given, through mxq's systolic column."""
     from mxq import matmul
-    from app.mxq_golden import quantize_operand, wire_to_px
+    codebook = _scheme.is_codebook(dtype)
 
     def mesh(A: np.ndarray, W: np.ndarray, a_px) -> np.ndarray:
-        bc, bsc, bl = quantize_operand(np.ascontiguousarray(W, np.float32), side="b", dtype=dtype)
-        if a_px is not None:
-            PA, XA = a_px                            # a chained operand: the requantizer already made it
+        if codebook:
+            PA, XA, PB, XB = _device_operands(A, W, dtype, a_px)
         else:
-            ac, asc, al = quantize_operand(np.ascontiguousarray(A, np.float32), side="a", dtype=dtype)
-            PA, XA = wire_to_px(ac, asc, side="a", dtype=dtype, books=al)
-        PB, XB = wire_to_px(bc, bsc, side="b", dtype=dtype, books=bl)
+            PA, XA, PB, XB = _operands(A, W, fmt)
+            if a_px is not None:
+                PA, XA = a_px                        # a chained operand: the requantizer already made it
         Y = matmul.systolic(PA.float(), XA.float(), PB.float(), XB.float(), arith, sched,
                             window=window, block_size=recipe.block)
         return Y.numpy().astype(np.float32)
     return mesh
 
 
-def _mesh_shipped(recipe, arith, sched, window: int, dtype: str):
+def _mesh_shipped(recipe, arith, sched, window: int, fmt: str):
     """MXQuant as published: its own operand codes from the floats, its own arithmetic."""
     from mxq import block, matmul
-    from app import mxformats
-    fmt = mxformats.get(dtype, where="mxquant as-shipped", proven_only=False).mxq
 
     def mesh(A: np.ndarray, W: np.ndarray, a_px) -> np.ndarray:
         PA, XA = block.mxquant.quantize(torch.from_numpy(np.ascontiguousarray(A.T, np.float32)),
@@ -198,3 +242,27 @@ def _mesh_shipped(recipe, arith, sched, window: int, dtype: str):
         Y = matmul.systolic(PA, XA, PB, XB, arith, sched, window=window, block_size=recipe.block)
         return Y.numpy().astype(np.float32)
     return mesh
+
+
+# --- what mxq does not have: the hardware team's device model, app/ -------------------------------
+
+def _device_operands(A: np.ndarray, W: np.ndarray, dtype: str, a_px):
+    """Codebook formats: the wire operands the compiler emits (indices + per-row-pair tables), decoded."""
+    from app.mxq_golden import quantize_operand, wire_to_px
+    bc, bsc, bl = quantize_operand(np.ascontiguousarray(W, np.float32), side="b", dtype=dtype)
+    PB, XB = wire_to_px(bc, bsc, side="b", dtype=dtype, books=bl)
+    if a_px is not None:
+        PA, XA = a_px
+    else:
+        ac, asc, al = quantize_operand(np.ascontiguousarray(A, np.float32), side="a", dtype=dtype)
+        PA, XA = wire_to_px(ac, asc, side="a", dtype=dtype, books=al)
+    return PA, XA, PB, XB
+
+
+def _device_requant(C: np.ndarray, dtype: str, books):
+    """The device requantizer transcribed from gemmini.cc / the extracted mesh model (app/mxq_golden.py)."""
+    from app.mxq_golden import NotModelled, requantize_chained
+    try:
+        return requantize_chained(C, dtype=dtype, books=books)
+    except NotModelled as exc:
+        raise Unavailable(str(exc)) from exc

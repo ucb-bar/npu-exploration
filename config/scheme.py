@@ -28,7 +28,8 @@ Deliberately ignored, because none of them changes a matmul's value: ``array.til
 Refused (``RecipeError``): a per-lane product list that is not uniform (mxq has one product format
 per Arithmetic); an accumulator list whose length is not the mesh dimension; and, for a MODEL-LEVEL
 Scheme only, a codebook (LUT) operand path -- mxq has no codebooks, so the accuracy model cannot run
-those formats. The mxquant model still grades them, through the wire operands the compiler emitted.
+those formats. The mxquant model still grades them, through the wire operands the compiler emitted
+(``models/mxquant/kernel.py`` ``_device_operands``).
 """
 from __future__ import annotations
 
@@ -39,6 +40,12 @@ from config.recipe import Recipe, RecipeError
 
 #: operand format spelled the recipe's way -> mxq's format table key
 FORMAT = {"fp8": "MXFP8_E4M3", "fp6": "MXFP6_E3M2", "fp4": "MXFP4"}
+#: ... and spelled the compiler's way (--dtype). The four CODEBOOK formats travel as 4-bit indices into a
+#: per-row-pair table on this hardware (app/mxlut.py); mxq quantizes them on their full element grid.
+MXQ_FORMAT = {"fp8_e4m3": "MXFP8_E4M3", "fp8_e4m3_quad": "MXFP8_E4M3", "fp8_e5m2": "MXFP8_E5M2",
+              "fp6_e3m2": "MXFP6_E3M2", "fp6_e2m3": "MXFP6_E2M3", "fp4_e2m1": "MXFP4"}
+CODEBOOK = frozenset({"fp8_e4m3_quad", "fp8_e5m2", "fp6_e3m2", "fp6_e2m3"})
+_RECIPE_DTYPE = {"fp8": "fp8_e4m3", "fp6": "fp6_e3m2", "fp4": "fp4_e2m1"}
 
 #: The hardware's operand rounding since 2026-09-10 (mx_fp_math.h, RNE for every format).
 ROUNDING = "rne"
@@ -50,6 +57,20 @@ def format_name(recipe: Recipe) -> str:
     except KeyError:
         raise RecipeError(f"{recipe.name}: operand_fmt {recipe.operand_fmt!r} has no mxq format; "
                           f"known: {sorted(FORMAT)}") from None
+
+
+def mxq_format(dtype: str) -> str:
+    """A --dtype name -> the mxq element format it quantizes to."""
+    try:
+        return MXQ_FORMAT[dtype]
+    except KeyError:
+        raise RecipeError(f"operand format {dtype!r} has no mxq format; known: {sorted(MXQ_FORMAT)}") from None
+
+
+def is_codebook(dtype: str) -> bool:
+    """Does this hardware send ``dtype`` through a codebook (LUT) rather than as element codes?"""
+    mxq_format(dtype)
+    return dtype in CODEBOOK
 
 
 def scale_floor_default() -> float:
@@ -99,14 +120,13 @@ def shipped_datapath(recipe: Recipe):
 
 def refuse_codebooks(recipe: Recipe) -> None:
     """A model-level Scheme cannot run a codebook (LUT) operand path: mxq has no codebooks."""
-    from app import mxformats
     raw = recipe.raw
     if raw.get("runtime", {}).get("use_lut") or raw.get("mx", {}).get("enable_lut"):
         raise RecipeError(f"{recipe.name}: use_lut/enable_lut is set; mxq has no codebooks, so this recipe "
                           "cannot run at model level (the mxquant model still grades it via wire operands)")
-    f = mxformats.get(recipe.operand_mlir_dtype, where="config.scheme", proven_only=False)
-    if f.lut:
-        raise RecipeError(f"{recipe.name}: operand format {f.name} is codebook-indexed on this hardware; "
+    dtype = _RECIPE_DTYPE.get(recipe.operand_fmt, recipe.operand_fmt)
+    if is_codebook(dtype):
+        raise RecipeError(f"{recipe.name}: operand format {dtype} is codebook-indexed on this hardware; "
                           "mxq has no codebooks, so it cannot run at model level")
 
 

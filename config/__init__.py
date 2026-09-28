@@ -2,7 +2,7 @@
 
 A recipe is consumed by THREE models of the same machine:
 
-  * ``models/mxquant/mxquant.py``  — the Python model on mxq (the bits we expect)
+  * ``models/mxquant/kernel.py``  — the Python model on mxq (the bits we expect)
   * ``models/spike/build_spike.py`` — patches libgemmini's C model, seconds to build
   * ``config/scala/JsonGemminiConfig.scala`` — Chisel elaboration, tens of minutes
 
