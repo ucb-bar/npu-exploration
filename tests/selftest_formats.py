@@ -26,13 +26,12 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parent.parent
-for _p in (REPO, REPO / "app", REPO / "compiler" / "targets" / "mx_gemmini_rocket",
-           REPO / "merlin" / "merlin" / "python"):
+for _p in (REPO, REPO / "app", REPO / "compiler" / "targets" / "mx_gemmini_rocket"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-import mxiface                                   # noqa: E402
 from app import mxformats                        # noqa: E402
+from compiler.lower import MatmulStage, command_buffer   # noqa: E402
 from backend import runner                       # noqa: E402
 
 ROCC = REPO.parent / "software" / "gemmini-rocc-tests"
@@ -98,9 +97,8 @@ def run_case(fmt_name: str, header: str, test: str) -> tuple[bool, str]:
                                  ("c_lut", "C_lut", M >> g)):
             bundle[key] = parse_array(text, name)[0].reshape(n_lut, words)
 
-    stage = mxiface.MatmulStage(m=M, k=K, n=N, weight="W0", out="Y0", lhs="X", out_dtype="bf16")
-    iface = mxiface.chain_interface_mlir([stage], operand_fmt=f.name)
-    cb = mxiface.to_command_buffer(iface, [bundle])
+    stage = MatmulStage(m=M, k=K, n=N, weight="W0", out="Y0", lhs="X", out_dtype="bf16")
+    cb = command_buffer([stage], [bundle], operand_fmt=f.name)
 
     with tempfile.TemporaryDirectory() as td:
         elf = runner.compile_command_buffer(cb, td)
@@ -167,11 +165,10 @@ def run_chain_case(fmt_name: str, header: str, test: str) -> tuple[bool, str]:
 
     et = f.mlir or f.name
     stages = [
-        mxiface.MatmulStage(m=M, k=K, n=N, weight="W0", out="T0", lhs="X", out_dtype=et),
-        mxiface.MatmulStage(m=M, k=N, n=N, weight="W1", out="Y0", lhs="T0", out_dtype="bf16"),
+        MatmulStage(m=M, k=K, n=N, weight="W0", out="T0", lhs="X", out_dtype=et),
+        MatmulStage(m=M, k=N, n=N, weight="W1", out="Y0", lhs="T0", out_dtype="bf16"),
     ]
-    cb = mxiface.to_command_buffer(
-        mxiface.chain_interface_mlir(stages, operand_fmt=f.name), bundles)
+    cb = command_buffer(stages, bundles, operand_fmt=f.name)
 
     with tempfile.TemporaryDirectory() as td:
         elf = runner.compile_command_buffer(cb, td)

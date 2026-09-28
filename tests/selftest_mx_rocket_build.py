@@ -24,15 +24,14 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-for _p in (REPO, REPO / "app", REPO / "compiler" / "targets" / "mx_gemmini_rocket",
-           REPO / "merlin" / "merlin" / "python"):
+for _p in (REPO, REPO / "app", REPO / "compiler" / "targets" / "mx_gemmini_rocket"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
 import numpy as np                                    # noqa: E402
 
-import mxiface                                        # noqa: E402
 from app.mxq_golden import quantize_operand           # noqa: E402
+from compiler.lower import MatmulStage, command_buffer   # noqa: E402
 from backend import runner                            # noqa: E402
 from backend.mxgemm_emit import generate_driver       # noqa: E402
 
@@ -51,12 +50,11 @@ def _cb(stages):
                 rng.standard_normal((m, k)).astype(np.float32), side="a")
             bundle |= {"a_codes": a_codes, "a_scales": a_scales}
         bundles.append(bundle)
-        ms.append(mxiface.MatmulStage(
+        ms.append(MatmulStage(
             m=m, k=k, n=n, weight=f"W{i}", out="Y0" if last else f"T{i}",
             lhs="X" if i == 0 else f"T{i - 1}",
             out_dtype="bf16" if last else "f8E4M3FN"))
-    iface = mxiface.chain_interface_mlir(ms)
-    return mxiface.to_command_buffer(iface, bundles)
+    return command_buffer(ms, bundles)
 
 
 CASES = {

@@ -30,14 +30,13 @@ so itself (`ConfigsFP.scala:328`): *"Faithful standalone twin of the Radiance MX
 ## Layout
 
 ```
-contracts/target_contract.yaml   the capability manifest — ABI, encoding, datapath, oracle ladder
-contracts/dialect_plan.yaml      (Step 3+, deferred — see plan Q4)
-backend/                         (Step 4-6) command buffer -> MX RoCC C driver, + the spike runner
+backend/mxgemm_emit.py           chain command buffer -> MX RoCC C driver
+backend/mxgraph_emit.py          graph command buffer -> C driver with the host ops inline
+backend/runner.py                gcc, spike, console parser
+backend/runtime/mx_host.h        the host-side C the drivers include
 ```
 
-`backend/` does not exist yet, which is why the contract carries **no `plugin:` block**: merlin
-requires every plugin reference to resolve inside the package, and an unresolvable pointer is an
-error, not a no-op. The block lands in Step 4 alongside the module it names.
+The command buffer comes from `compiler/lower.py`; there is no merlin contract or plugin here.
 
 ## Two conventions this package follows
 

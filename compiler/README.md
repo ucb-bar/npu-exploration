@@ -10,7 +10,6 @@ consumes a command buffer and emits + builds + runs a bare-metal ELF.
 | file | role |
 |---|---|
 | `lower.py` | KernelSpec + format → command buffer (fused chain, graph, or per-stage records) and edges |
-| `contracts/target_contract.yaml` | the capability manifest merlin reads |
 | `backend/mxgemm_emit.py` | command buffer → C driver |
 | `backend/runner.py` | toolchain, compile, run on spike, parse OUT/METRIC/DONE |
 | `backend/mxgraph_emit.py` | graph command buffer → C driver (one ELF with host ops) |

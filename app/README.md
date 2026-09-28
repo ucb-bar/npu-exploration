@@ -7,7 +7,6 @@ describing the computation in the compiler's input language. **Libraries only �
 | file | role |
 |---|---|
 | `mxquant.py` | float tensors ↔ MX operand codes + E8M0 block scales; bf16 decode; the chain rescale |
-| `mxiface.py` | emit `merlin_iface` interface MLIR, and lower it to a command buffer via merlin |
 
 Everything operand- and model-specific lives here. The compiler backend receives a command buffer
 and knows nothing about tensors, models, or files.
@@ -24,14 +23,9 @@ A target exponent `e` puts peak codes in `[2**e, 2**(e+1))`; `e=0` leaves 4× he
 `mx_fp_math.h`), so a silent pass would turn an upstream accumulator overflow into a zero and the
 run would look clean.
 
-## The MLIR handoff
+## The handoff to the compiler
 
-`mxiface` emits **`merlin_iface`** — merlin's frozen contract grammar
-(`merlin/contract/interface_grammar.md`), the documented input format for an out-of-tree target
-package — and merlin's own `parse_interface_mlir` lowers it to the command buffer. It is the same
-grammar the shipped MX capsules use, so a capsule and this front end are interchangeable inputs to
-the backend (verified: `MB0_mxfp8_linear` builds and runs on spike). The grammar is deliberately
-xDSL-free: plain text in, plain text out.
+`compiler/lower.py` turns a KernelSpec into the command buffer the backend emits C from; nothing here writes MLIR or talks to merlin any more.
 
 ## Reference
 

@@ -216,7 +216,7 @@ kernels/     registry.py spec.py trace.py            the kernel IR; --list shows
 config/      recipe.py recipes/*.json scheme.py     one JSON = one machine; recipe → mxq
 models/      reference/ mxquant/ spike/ ppa/ perf/ accuracy/   one folder per model of the machine
 grade/       pipeline.py metrics.py report.py telemetry.py     run, compare, record
-app/         mxiface mxgraph mxhost (lowering front half); mxformats mxwire mxlut (the wire);
+app/         mxgraph mxhost (lowering front half); mxformats mxwire mxlut (the wire);
              mxq_golden.py (operand quantizer, renamed in the next PR); mxmesh/; capture_*
 compiler/    lower.py (KernelSpec -> command buffer); targets/mx_gemmini_rocket/ backend/{mxgemm_emit,mxgraph_emit,runner} runtime/
 baremetal/   hand-written TinyLlama kernels and their generators
