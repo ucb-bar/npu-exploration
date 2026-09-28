@@ -170,6 +170,10 @@ def main() -> int:
     check("key changes with the operand rounding", k0 != W.key("tinyllama", base, rounding_mode="ties_away"))
     check("key changes with the scale floor", k0 != W.key("tinyllama", base, scale_floor=1e-38))
     check("key changes with nsamples", k0 != W.key("tinyllama", base, nsamples=4))
+    check("key changes for the whole split and for samples in order",
+          len({k0, W.key("tinyllama", base, nsamples=0), W.key("tinyllama", base, seed=None), W.key("tinyllama", base, nsamples=0, seed=None)}) == 4)
+    check("nsamples=0 and seed=None are accepted overrides",
+          workloads.build("tinyllama", nsamples=0, seed=None).seed is None and workloads.build("tinyllama", nsamples=0).nsamples == 0)
     check("key changes with the reducer", k0 != W.key("tinyllama", base, reduce="exact") != W.key("tinyllama", base, reduce="bf16_tiles"))
     check("the default reducer leaves every existing key as it was", k0 == W.key("tinyllama", base, reduce="hardware")
           and "reduce" not in W._settings(w, base, dtype="fp8_e4m3", rounding_mode="rne", scale_floor=2.0 ** -23))
@@ -199,6 +203,8 @@ def main() -> int:
           ln.startswith("PPL") and "7.3438" in ln and "7.1885" in ln and "+0.1554" in ln and "[cached]" in ln, ln)
     check("line flags a codebook format", "codebook not modelled" in W.line({**fake, "codebook": "not modelled"}))
     check("line names a non-default reducer", "reduce exact" in W.line({**fake, "reduce": "exact"}) and "reduce" not in ln)
+    check("line says 'all' and 'in order' for those sample choices",
+          "allx2048 in order" in W.line({**fake, "nsamples": 0, "seed": None}) and "in order" not in ln)
 
     print("\n[6] the standing numbers (tests/oracle/accuracy_baseline.json) ------------------")
     import json

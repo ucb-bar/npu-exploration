@@ -65,6 +65,12 @@ hardware's own bf16 step. Run all three and the recipe's cost splits into format
 rounding, and the ladder with the truncated product. `--rules linears_no_head` quantizes the
 decoder's projections only (attention included, lm_head not). A non-default reducer is part of the
 cache key and the record; the default leaves existing keys unchanged.
+Which samples: `--nsamples 0` is the whole test split (165 samples at 2048), `--sequential` the first
+N in order, the default the 16 seeded ones MXQuant used. The per-sample perplexity of TinyLlama at 2048
+ranges from 4 to 18, so 16 samples carry about ±0.8 of sample choice: measured on the bf16 model, the
+seeded 16 give 7.1989, the first 16 in order 7.9063, the whole split 8.0328. Differences between
+recipes on the same samples are still meaningful; absolute numbers against the literature want the
+whole split. `--config none` measures the bf16 model alone.
 
 ```bash
 .venv/bin/python -m models.mxquant --list
@@ -72,6 +78,7 @@ cache key and the record; the default leaves existing keys unchanged.
 .venv/bin/python -m models.mxquant --workload tinyllama --config baseline --gpus 0,1,2,3
 .venv/bin/python -m models.mxquant --workload tinyllama --config wide_acc --dtype fp4_e2m1 --gpus 0,1 --nsamples 4
 .venv/bin/python -m models.mxquant --workload tinyllama --config baseline --gpus 0,1,2,3 --reduce exact
+.venv/bin/python -m models.mxquant --workload tinyllama --config none --gpus 0,1,2,3 --nsamples 0        # bf16, whole split: 8.0328
 ```
 
 `tests/selftest_workload.py` holds the two paths to the same bits: a `linear` kernel through

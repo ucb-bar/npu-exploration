@@ -106,8 +106,8 @@ def evaluate(workload, recipe, *, dtype: str | None = None, gpus: str | None = N
     w = _workloads.build(workload, **overrides)
     dtype = _dtype(recipe, dtype)
     _scheme.scheme(recipe, dtype=dtype, rounding_mode=rounding_mode, scale_floor=scale_floor, reduce=reduce)   # refuse before any GPU work
-    if w.nsamples < 1:
-        raise ValueError(f"nsamples must be at least 1, got {w.nsamples}")
+    if w.nsamples < 0:
+        raise ValueError(f"nsamples must be 0 (the whole split) or positive, got {w.nsamples}")
     ok, why = available()
     if not ok:
         raise RuntimeError(why)
@@ -135,11 +135,12 @@ def evaluate(workload, recipe, *, dtype: str | None = None, gpus: str | None = N
 def line(m: dict) -> str:
     """The PPL line."""
     note = "  [codebook not modelled]" if m.get("codebook") else ""
-    if m.get("reduce", "hardware") != "hardware":
+    if m.get("reduce") not in (None, "hardware"):
         note = f"  reduce {m['reduce']}" + note
     return (f"PPL      {m['perplexity']:.4f}   bf16 {m['bf16_perplexity']:.4f}  ({m['delta']:+.4f})   "
             f"{m.get('workload', m['model_id'].rsplit('/', 1)[-1])} {m['dtype'] if m.get('dtype') else ''}  "
-            f"{m['nsamples']}x{m['seqlen']}   rules {m['rules']}   "
+            f"{m['nsamples'] or 'all'}x{m['seqlen']}{'' if m.get('seed', 0) is not None else ' in order'}   "
+            f"{'rules ' + m['rules'] if m.get('rules') else 'bf16 model, no recipe'}   "
             f"{m['seconds']:.0f} s{' [cached]' if m.get('cached') else ''}{note}")
 
 
@@ -168,12 +169,35 @@ def _worker_cmd(w: _workloads.Workload, recipe, *, results_dir: Path, dtype: str
         rpath = str(rfile)
     cmd = [sys.executable, "-m", "models.mxquant._worker", "--recipe", rpath, "--dtype", dtype, "--rules", w.rules,
            "--rounding-mode", rounding_mode, "--scale-floor", repr(scale_floor),
-           "--model-id", w.model_id, "--seqlen", str(w.seqlen), "--nsamples", str(w.nsamples), "--seed", str(w.seed)]
+           "--model-id", w.model_id, "--seqlen", str(w.seqlen), "--nsamples", str(w.nsamples)]
+    cmd += ["--sequential"] if w.seed is None else ["--seed", str(w.seed)]
     if reduce != "hardware":
         cmd += ["--reduce", reduce]
     if not compiled:
         cmd.append("--no-compiled")
     return cmd
+
+
+def _count(w: _workloads.Workload) -> int:
+    """How many samples ``nsamples=0`` means: the loader's answer (tokenizer + dataset, CPU, no CUDA)."""
+    from experiments.llm_ppl import load_samples
+    return load_samples(w.model_id, w.seqlen, 0, w.seed).shape[0]
+
+
+def bf16(workload, *, gpus: str | None = None, results_dir: Path = RESULTS, force: bool = False, tel=None,
+         **overrides) -> dict:
+    """Perplexity of the unpatched bf16 model alone (what ``evaluate`` measures beside every recipe)."""
+    w = _workloads.build(workload, **overrides)
+    ok, why = available()
+    if not ok:
+        raise RuntimeError(why)
+    b = _measure(w, None, dtype="fp8_e4m3", rounding_mode=_scheme.ROUNDING, scale_floor=_scheme.scale_floor_default(),
+                 reduce="hardware", gpus=gpus, compiled=False, results_dir=results_dir, force=force, tel=tel)
+    return {"perplexity": b["perplexity"], "bf16_perplexity": b["perplexity"], "delta": 0.0, "workload": w.name,
+            "model_id": w.model_id, "nsamples": w.nsamples, "seqlen": w.seqlen, "seed": w.seed, "rules": None,
+            "recipe": None, "build_id": None, "dtype": None, "format": None, "codebook": None, "reduce": None,
+            "seconds": b["seconds"], "gpus": gpus, "mxq_commit": b["mxq_commit"], **environment(),
+            "cached": b["cached"], "key": b["key"], "path": str(b["path"]), "bf16_key": b["key"], "bf16_path": str(b["path"])}
 
 
 def _measure(w: _workloads.Workload, recipe, *, dtype: str, rounding_mode: str, scale_floor: float, reduce: str,
@@ -193,10 +217,11 @@ def _measure(w: _workloads.Workload, recipe, *, dtype: str, rounding_mode: str, 
     base = _worker_cmd(w, recipe, results_dir=results_dir, dtype=dtype, rounding_mode=rounding_mode,
                        scale_floor=scale_floor, reduce=reduce, compiled=compiled)
     devices = [g.strip() for g in gpus.split(",") if g.strip()] if gpus else [None]
-    bounds = [round(i * w.nsamples / len(devices)) for i in range(len(devices) + 1)]
+    total = w.nsamples or _count(w)
+    bounds = [round(i * total / len(devices)) for i in range(len(devices) + 1)]
     log = results_dir / f"{k}.log"
     if tel:
-        tel.log("mxquant", f"{what}: {w.nsamples} samples on {len(devices)} worker(s)  (log {log})")
+        tel.log("mxquant", f"{what}: {total} samples on {len(devices)} worker(s)  (log {log})")
     t0, parts, procs = time.time(), [], []
     try:
         with open(log, "a") as lf:

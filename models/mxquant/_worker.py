@@ -39,7 +39,8 @@ def main() -> int:
     ap.add_argument("--model-id", default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
     ap.add_argument("--seqlen", type=int, default=2048)
     ap.add_argument("--nsamples", type=int, default=16)
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=0, help="which samples (MXQuant's protocol)")
+    ap.add_argument("--sequential", action="store_true", help="the first nsamples in order; --nsamples 0 = the whole split")
     ap.add_argument("--chunk", type=int, default=None, help="token rows per reducer call (default: by output width)")
     ap.add_argument("--samples", default=None, help="START:END sample indices (default: all)")
     ap.add_argument("--out", type=Path, default=None, help="part JSON to write")
@@ -81,7 +82,8 @@ def main() -> int:
     if args.out is None:
         ap.error("--out is required unless --dry-run")
 
-    ids = load_samples(args.model_id, args.seqlen, args.nsamples, args.seed)
+    seed = None if args.sequential else args.seed
+    ids = load_samples(args.model_id, args.seqlen, args.nsamples, seed)
     lo, hi = (int(v) for v in args.samples.split(":")) if args.samples else (0, ids.shape[0])
     if hi > ids.shape[0]:
         raise SystemExit(f"--nsamples {args.nsamples}: WikiText-2 test has only {ids.shape[0]} samples of "
@@ -94,7 +96,7 @@ def main() -> int:
               f"{time.time() - t0:.0f}s", flush=True)
 
     record = {
-        "model_id": args.model_id, "seqlen": args.seqlen, "nsamples": args.nsamples, "seed": args.seed,
+        "model_id": args.model_id, "seqlen": args.seqlen, "nsamples": args.nsamples, "seed": seed,
         "rules": None if sch is None else args.rules,
         "recipe": None if recipe is None else recipe.name,
         "build_id": None if recipe is None else recipe.build_id(),

@@ -7,6 +7,7 @@
     .venv/bin/python -m models.mxquant --workload tinyllama --config baseline --gpus 0,1,2,3 --rounding-mode ties_away --scale-floor 1e-38
     .venv/bin/python -m models.mxquant --workload tinyllama --config baseline --gpus 0,1,2,3 --reduce exact        # the format's cost alone
     .venv/bin/python -m models.mxquant --workload tinyllama --config baseline --gpus 0,1,2,3 --reduce bf16_tiles   # + bf16 across blocks
+    .venv/bin/python -m models.mxquant --workload tinyllama --config none --gpus 0,1,2,3 --nsamples 0               # bf16 model, whole split
 
 For one kernel's bits (the same model's other path) use run_kernel.py.
 """
@@ -30,12 +31,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--list", action="store_true", help="the registered workloads")
     ap.add_argument("--workload", default="tinyllama", help="a registered workload (--list)")
-    ap.add_argument("--config", default="baseline", help="recipe name in config/recipes/ or a .json path")
+    ap.add_argument("--config", default="baseline", help="recipe name in config/recipes/ or a .json path; 'none' = the bf16 model alone")
     ap.add_argument("--dtype", default=None, help=f"operand format (default: the recipe's): {', '.join(scheme.MXQ_FORMAT)}")
     ap.add_argument("--gpus", default=None, help="GPUs to split the samples over, e.g. 0,1,2,3 (default: one worker)")
-    ap.add_argument("--nsamples", type=int, default=None, help="override the workload's sample count")
+    ap.add_argument("--nsamples", type=int, default=None, help="override the workload's sample count; 0 = the whole test split")
     ap.add_argument("--seqlen", type=int, default=None, help="override the workload's tokens per sample")
     ap.add_argument("--seed", type=int, default=None, help="override the workload's seed")
+    ap.add_argument("--sequential", action="store_true", help="the first nsamples in order instead of seeded ones")
     ap.add_argument("--rules", default=None, help="override which linear layers: mxquant_layers | all_linear | linears_no_head")
     ap.add_argument("--model-id", default=None, help="override the workload's HF model")
     ap.add_argument("--rounding-mode", default=scheme.ROUNDING, help="operand rounding: rne (hardware) | ties_away")
@@ -56,8 +58,19 @@ def main() -> int:
         return 0
     overrides = {k: v for k, v in (("nsamples", a.nsamples), ("seqlen", a.seqlen), ("seed", a.seed),
                                    ("rules", a.rules), ("model_id", a.model_id)) if v is not None}
+    if a.sequential:
+        overrides["seed"] = None
     tel = Telemetry()
     try:
+        if a.config == "none":
+            m = workload.bf16(a.workload, gpus=a.gpus, results_dir=a.results_dir, force=a.force, tel=tel, **overrides)
+            if a.json:
+                import json
+                print(json.dumps(m, indent=1))
+            print(workload.line(m))
+            print(f"         {m['perplexity']!r}   bf16 model, no recipe   mxq {m['mxq_commit']}")
+            print(f"RESULTS  {m['path']}")
+            return 0
         recipe = load(a.config)
         if a.dry_run:
             return workload.dry_run(a.workload, recipe, dtype=a.dtype, rounding_mode=a.rounding_mode,
