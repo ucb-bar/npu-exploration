@@ -1,7 +1,7 @@
 """Wire-format primitives: the bytes the datapath reads and writes, decoded.
 
 This module does **not** quantize. Quantization is MXQuant, reached through
-:mod:`app.mxq_golden`, and there is deliberately no second implementation of it in this repo —
+:mod:`compiler.operands`, and there is deliberately no second implementation of it in this repo —
 see ``planning/merlin_glue_port_plan.md`` D3. What lives here is the other half: turning the
 device's bytes back into numbers, which is unambiguous and has no convention to disagree about.
 
@@ -113,7 +113,7 @@ def float_to_bf16_bits(v: np.ndarray) -> np.ndarray:
     return np.where((out & 0x7FFF) == 0, np.uint16(0), out).astype(np.uint16)
 
 
-#: format name -> its element decoder. The exact encoders in :mod:`app.mxq_golden` are built by
+#: format name -> its element decoder. The exact encoders in :mod:`compiler.operands` are built by
 #: inverting these over the whole code space, so a decoder is the ONLY place an element format's
 #: semantics are written down.
 DECODERS = {
@@ -131,7 +131,7 @@ DECODERS = {
 #
 # These are NOT the inverse of the decoders above, and that is the whole point. An operand is
 # encoded on the host from a value the reference already produced on the format's grid, so
-# `mxq_golden._exact_encoder` is a lookup and any miss is a bug worth raising. A REQUANT OUTPUT is
+# `operands._exact_encoder` is a lookup and any miss is a bug worth raising. A REQUANT OUTPUT is
 # different: the device rounds an arbitrary accumulator value, and each format rounds it its own
 # way. Diffed against a C oracle built from `mx_fp_math.h` (scratchpad `requant_oracle.cc`), a
 # generic "round to the nearest grid point" model disagrees on 2-9% of elements, three ways:

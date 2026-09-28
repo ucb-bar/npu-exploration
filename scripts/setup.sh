@@ -96,7 +96,7 @@ MERLIN_CHIPYARD) at a full chipyard checkout built with its build-setup.sh."
 # ---- postconditions (shared by the phases and the doctor) ----------------------------
 
 have_python()     { "$REPO/.venv/bin/python" -c 'import torch, numpy' >/dev/null 2>&1; }
-# MXQuant is OPTIONAL (--with-mxquant) since 2026-09-24: app/mxq_golden.py takes the block quantizer
+# MXQuant is OPTIONAL (--with-mxquant) since 2026-09-24: compiler/operands.py takes the block quantizer
 # from models/mxquant/block.py (mxq). The clone serves the capture scripts and
 # tests/selftest_block.py --update, which import end_to_end_linear/mx_block_quant.py from the
 # WORKING TREE (present on MXQuant main, NOT on every branch), and grade/mxquant_ref.py

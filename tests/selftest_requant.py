@@ -35,8 +35,8 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from compiler import formats, wire                  # noqa: E402
-from app import mxlut                               # noqa: E402
-from app.mxq_golden import requantize_chained       # noqa: E402
+from compiler import codebook                       # noqa: E402
+from compiler.operands import requantize_chained    # noqa: E402
 
 # The chipyard tree ($MERLIN_CHIPYARD) is the canonical source of the header; the old
 # sibling software/ layout stays as a fallback for checkouts that used it.
@@ -101,7 +101,7 @@ def python_steps(C: np.ndarray, book_vals: np.ndarray, dtype: str, g: int):
         sc[max_abs == 0.0] = 0
         scale = np.exp2((sc.astype(np.int64) - wire.E8M0_BIAS).astype(np.float64)).astype(np.float32)
         elem = wire.encode_requant((blocks / scale[:, :, None]).reshape(M, N), dtype=dtype)
-        return sc, elem, mxlut.finder_indices(elem, book_vals, fmt=f, axis="row", g=g)
+        return sc, elem, codebook.finder_indices(elem, book_vals, fmt=f, axis="row", g=g)
 
     # The direct 8-bit path: epsilon-clamped scale, no bf16 pre-round, no finder.
     amax = np.maximum(max_abs, np.finfo(np.float32).eps)
@@ -115,10 +115,10 @@ def python_steps(C: np.ndarray, book_vals: np.ndarray, dtype: str, g: int):
 
 def books_for(f, rng, nbooks: int):
     """A codebook drawn from the values the finder can actually distinguish."""
-    cand = mxlut.codebook_values(f)
-    vals = np.stack([np.sort(rng.choice(cand, mxlut.LUT_SIZE, replace=False))
+    cand = codebook.codebook_values(f)
+    vals = np.stack([np.sort(rng.choice(cand, codebook.LUT_SIZE, replace=False))
                      for _ in range(nbooks)])
-    enc = mxlut._value_to_code(f)
+    enc = codebook._value_to_code(f)
     codes = np.array([[enc(v) for v in row] for row in vals.tolist()], np.uint8)
     return vals, codes
 
@@ -142,8 +142,8 @@ def main() -> int:
             C = (rng.standard_normal((M, N)) * scale).astype(np.float32)
             # The direct path has no codebook; the oracle still reads a book block, so send zeros.
             vals, codes = (books_for(f, rng, ((M - 1) >> g) + 1) if dtype in LUT_FMTS
-                           else (np.zeros((((M - 1) >> g) + 1, mxlut.LUT_SIZE), np.float32),
-                                 np.zeros((((M - 1) >> g) + 1, mxlut.LUT_SIZE), np.uint8)))
+                           else (np.zeros((((M - 1) >> g) + 1, codebook.LUT_SIZE), np.float32),
+                                 np.zeros((((M - 1) >> g) + 1, codebook.LUT_SIZE), np.uint8)))
 
             osc, oel, oix = oracle(binary, C, codes, dtype, g)
             psc, pel, pix = python_steps(C, vals, dtype, g)
@@ -164,7 +164,7 @@ def main() -> int:
             # is the book entry the oracle's index names -- or, for the direct path, the decode of
             # the oracle's own element code.
             if dtype in LUT_FMTS:
-                P, _ = requantize_chained(C, dtype=dtype, books=mxlut.pack_codebooks(vals, fmt=f))
+                P, _ = requantize_chained(C, dtype=dtype, books=codebook.pack_codebooks(vals, fmt=f))
                 want = np.take_along_axis(vals[np.arange(M) >> g], oix.astype(np.intp), axis=1)
             else:
                 P, _ = requantize_chained(C, dtype=dtype)

@@ -16,7 +16,7 @@ GPU, so the caller never initialises CUDA. Unavailable without a GPU or the tran
 accelerate packages: ``evaluate`` raises.
 
 Every operand format runs, on its full element grid. The four codebook formats are sent through a 16-entry
-table per row pair on the hardware (``app/mxlut.py``); mxq has no codebooks, so for those the record says
+table per row pair on the hardware (``compiler/codebook.py``); mxq has no codebooks, so for those the record says
 ``codebook: not modelled`` -- the number is the format's cost, as MXQuant's end-to-end measured it, not the
 compressed wire's. Recipes mxq cannot run (non-uniform product lists) are refused before any GPU work.
 """

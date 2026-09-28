@@ -4,7 +4,7 @@ Three claims:
   1. The mapping is the one the recipe states: baseline -> MXGEMMINI(e4m3), the tapeout ladder, window 16;
      flat_acc4 / wide_acc -> flat ladders; narrow_prod -> an e4m2 product.
   2. The Scheme computes what the hardware model computes: for every recipe, scheme(r).matmul(A, B) is
-     bit-identical to app/mxmesh/fp8.tiled_matmul_hwlike (the hardware team's extracted model) driven with
+     bit-identical to rtl_exact/mxmesh/fp8.tiled_matmul_hwlike (the hardware team's extracted model) driven with
      that recipe's product and accumulator lists, on the same codes. Includes an all-zero and a tiny block.
   3. What mxq cannot model is refused, never approximated: a non-uniform product list, an accumulator
      list of the wrong length, and (model level only) a codebook operand path.
@@ -45,7 +45,7 @@ def main() -> int:
         print(f"SKIP: {why}")
         return 0
     from mxq import schedule as mxq_schedule
-    from app.mxmesh import fp8 as M8
+    from rtl_exact.mxmesh import fp8 as M8
 
     print("\n[1] mapping ---------------------------------------------------------")
     arith, sched, window = scheme.datapath(recipe("baseline"))

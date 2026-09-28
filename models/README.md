@@ -20,7 +20,7 @@ same way and a missing submodule fails soft with one message (`mxq_missing()`).
 ## The mxquant model
 
 `mxquant/mxquant.py` computes the bits the recipe's machine must produce. Operands are the bytes the
-ELF carries (`app/mxq_golden.quantize_operand` → `wire_to_px`, codebooks included; a chained stage's
+ELF carries (`compiler/operands.quantize_operand` → `wire_to_px`, codebooks included; a chained stage's
 A operand comes from `requantize_chained`, the transcription of the device's requantizer). The
 matmul is one `mxq.matmul.systolic` call on the recipe's arithmetic (`config/scheme.datapath`:
 `MXGEMMINI(prod)`, the accumulator ladder, window = mesh dim). Before 2026-09-24 this model hardcoded
@@ -34,7 +34,7 @@ with the redefinition (linear/baseline: 51/4096 identical to the hardware instea
 
 `mxquant/block.py` is MXQuant's block-quantizer API (`quantize_mx_block32`, `_broadcast_scales`,
 `BLOCK`) computed by mxq with round-to-nearest-even and the block max floored at 2^-23, which is
-what MXQuant's `_po2` and the hardware requantizer do. `app/mxq_golden.py` imports these three names
+what MXQuant's `_po2` and the hardware requantizer do. `compiler/operands.py` imports these three names
 from here, so compiling a kernel no longer needs the MXQuant clone. `tests/selftest_block.py` holds
 it bit-identical to MXQuant on 60 fixture cases (ties, subnormals, zero and sub-2^-23 blocks, ragged
 shapes, all formats). It lives in this folder because the operand quantizer is this model's
@@ -82,6 +82,6 @@ a GPU the path reports why.
 
 ## What is not here yet
 
-The lowering and the spike run still live in `grade/pipeline.py`; `app/mxq_golden.py` (wire
+The lowering and the spike run still live in `grade/pipeline.py`; `compiler/operands.py` (wire
 encoding, codebooks, requantizer) is still under `app/`. Both move in the next PR, with the compile
 mode entry point.

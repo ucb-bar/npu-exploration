@@ -7,7 +7,7 @@ The fields fall into three groups, deliberately kept in one record because they 
 decision* seen from three layers:
 
 * **quantization** — ``mxq`` (the alias MXQuant's ``quantize_mx_block32`` understands),
-  ``out_pmax``, ``out_requant``. See :mod:`app.mxq_golden`, the only quantizer.
+  ``out_pmax``, ``out_requant``. See :mod:`compiler.operands`, the only quantizer.
 * **the hardware selector** — ``fmt_code`` / ``altfmt`` / ``lut`` / ``entry_bits``. These are not a
   simple enum: the format the mesh decodes is a function of *three* things, two of them in
   ``config_ex`` and one of them a runtime flag. See :data:`SELECTOR_DOC`.
@@ -119,7 +119,7 @@ def chain_refusal(fmt: "MxFormat") -> str | None:
     The requantizer normalizes its output to ``[2**out_pmax, 2**(out_pmax+1))``. The next stage
     reads those values through a codebook, and the hardware's nearest-entry finder compares in a
     fixed-point domain whose width mask makes large magnitudes ALIAS onto small ones
-    (``app/mxlut._fixed_point``). If the requant range starts ABOVE the largest value the finder can
+    (``compiler/codebook._fixed_point``). If the requant range starts ABOVE the largest value the finder can
     represent faithfully, every element aliases and the chain returns noise. That is exactly what
     the codebook formats used to do:
 
@@ -137,11 +137,11 @@ def chain_refusal(fmt: "MxFormat") -> str | None:
     """
     if not fmt.lut:
         return None
-    from app import mxlut
+    from compiler import codebook
     import numpy as np
 
     lo = 2.0 ** fmt.out_pmax
-    finder_max = float(np.abs(mxlut.codebook_values(fmt)).max())
+    finder_max = float(np.abs(codebook.codebook_values(fmt)).max())
     if finder_max < lo:
         return (f"{fmt.name} requantizes into [{lo:g}, {2*lo:g}) but its nearest-entry finder "
                 f"cannot faithfully represent anything above {finder_max:g} -- every intermediate "

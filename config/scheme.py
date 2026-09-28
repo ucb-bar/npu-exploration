@@ -42,7 +42,7 @@ from config.recipe import Recipe, RecipeError
 #: operand format spelled the recipe's way -> mxq's format table key
 FORMAT = {"fp8": "MXFP8_E4M3", "fp6": "MXFP6_E3M2", "fp4": "MXFP4"}
 #: ... and spelled the compiler's way (--dtype). The four CODEBOOK formats travel as 4-bit indices into a
-#: per-row-pair table on this hardware (app/mxlut.py); mxq quantizes them on their full element grid.
+#: per-row-pair table on this hardware (compiler/codebook.py); mxq quantizes them on their full element grid.
 MXQ_FORMAT = {"fp8_e4m3": "MXFP8_E4M3", "fp8_e4m3_quad": "MXFP8_E4M3", "fp8_e5m2": "MXFP8_E5M2",
               "fp6_e3m2": "MXFP6_E3M2", "fp6_e2m3": "MXFP6_E2M3", "fp4_e2m1": "MXFP4"}
 CODEBOOK = frozenset({"fp8_e4m3_quad", "fp8_e5m2", "fp6_e3m2", "fp6_e2m3"})

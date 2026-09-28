@@ -24,7 +24,7 @@ silicon. The fp32 comparison stays as a labelled context line — it measures th
 the format, not correctness. ``--models`` selects which models run; without spike there
 is no verdict.
 
-Every hardware step is a call into this repo's own modules (``app/mxq_golden.py``
+Every hardware step is a call into this repo's own modules (``compiler/operands.py``
 for quantization — MXQuant, never transcribed — ``compiler/lower.py`` for lowering,
 and the ``mx_gemmini_rocket`` backend for codegen). Nothing here reimplements any
 of the three.
@@ -189,7 +189,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
 
     import backend as mx          # the OOT merlin target package
     from compiler import wire as w
-    from app.mxq_golden import quantize_operand
+    from compiler.operands import quantize_operand
     from backend import mxgemm_emit
 
     tel.log("setup", f"repo={repo}  "
@@ -663,7 +663,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
             "intermediate_dtype": INTERMEDIATE_DTYPE if n_stages > 1 else None,
             "block_scale_group": w.BLOCK,
             "quantizer": f"mxq.block.mxgemmini@{models_pkg.mxq_commit()} rne floor=2^-23 "
-                         "(wire encoding: app/mxq_golden.py)",
+                         "(wire encoding: compiler/operands.py)",
             "models": list(models),
             "geometry_defaults": mxgemm_emit.DEFAULT_GEOMETRY,
             "cb_params_override": None,

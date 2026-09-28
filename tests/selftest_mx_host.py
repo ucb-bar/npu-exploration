@@ -2,7 +2,7 @@
 
 `backend/runtime/mx_host.h` is the fp32 host side of a layer: the glue the mesh cannot do
 (RMSNorm, SiLU, softmax, RoPE) plus **the MX quantizer that hands its result back to the mesh**.
-That quantizer has a Python twin in `app/mxq_golden.py`, and the two must produce identical codes
+That quantizer has a Python twin in `compiler/operands.py`, and the two must produce identical codes
 and identical block scales — otherwise a host stage feeds the mesh something the golden does not
 predict, and every downstream comparison is measuring the wrong thing.
 
@@ -28,7 +28,7 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from app.mxq_golden import quantize_operand          # noqa: E402
+from compiler.operands import quantize_operand          # noqa: E402
 from compiler.wire import e8m0_decode                   # noqa: E402
 
 RUNTIME = REPO / "compiler" / "targets" / "mx_gemmini_rocket" / "backend" / "runtime"

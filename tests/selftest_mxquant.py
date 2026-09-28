@@ -5,17 +5,17 @@
      models.mxquant.run(...).y and every intermediate equal grade/mxquant_ref.simulate(rtl_exact=True)
      element for element. Skipped, and said so, when the MXQuant clone is absent.
   2. Recipe-aware. For each of the four recipes, the model equals the extracted hardware model
-     (app/mxmesh/fp8.tiled_matmul_hwlike) driven with that recipe's product and accumulator lists on the
+     (rtl_exact/mxmesh/fp8.tiled_matmul_hwlike) driven with that recipe's product and accumulator lists on the
      same wire operands. The legacy tier could not do this: it hardcoded the tapeout ladder.
   3. Degrade. An edge the requantizer cannot reproduce raises Unavailable, so the pipeline grades on the
      fp32 tier instead of inventing a reference.
   4. As-shipped self-consistency: the informational number is mxq's MXQuant mode.
   5. Recorded bits. Every kernel x format x recipe (120 records, y and every stage) equals
      tests/oracle/mxquant_bits.json, captured from the model BEFORE its operand path moved from
-     app/mxq_golden's wire round trip to mxq's block quantizer (2026-09-28). This is what proves the
+     compiler/operands's wire round trip to mxq's block quantizer (2026-09-28). This is what proves the
      direct formats run on mxq alone without a single bit moving.
   6. The requant rule. For an fp8_e4m3 chain, mxq's quantizer on the bf16 accumulator IS the device
-     requantizer transcribed in app/mxq_golden.py: 0 differing on 10^6 values incl. ties, subnormals,
+     requantizer transcribed in compiler/operands.py: 0 differing on 10^6 values incl. ties, subnormals,
      zero and sub-2^-23 blocks. For fp4_e2m1 it is NOT (two-step rounding), which is why that chain
      edge stays on the device model -- measured here so the exception is a number, not a belief.
 
@@ -63,8 +63,8 @@ def main() -> int:
     from config.recipe import load
     from kernels.registry import build
     from models import mxquant
-    from app.mxmesh import fp8 as M8
-    from app.mxq_golden import quantize_operand, wire_to_px
+    from rtl_exact.mxmesh import fp8 as M8
+    from compiler.operands import quantize_operand, wire_to_px
     from config import scheme
 
     recipes = {n: load(REPO / "config" / "recipes" / f"{n}.json") for n in
@@ -176,8 +176,8 @@ def main() -> int:
             bad.append(key)
     check(f"{n_ok}/{n_all} records identical (y and every stage)", not bad, ", ".join(bad[:6]))
 
-    print("\n[6] the requant rule: mxq quantize(bf16(C)) vs the device requantizer (app/mxq_golden) ----")
-    from app.mxq_golden import requantize_chained
+    print("\n[6] the requant rule: mxq quantize(bf16(C)) vs the device requantizer (compiler/operands) ----")
+    from compiler.operands import requantize_chained
     from models.mxquant import kernel as K
     rng = np.random.default_rng(0)
 

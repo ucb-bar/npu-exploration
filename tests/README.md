@@ -15,7 +15,7 @@ holds it up.
 | `selftest_formats.py` | all 6 MX formats and 3 chains match their shipped fixtures |
 | `selftest_mx_host.py` | the C host runtime (`mx_host.h`) equals its Python twin |
 | `selftest_requant.py` | the chained requantizer, per step, against a C oracle |
-| `selftest_extracted.py` | `app/mxmesh/` still equals the models it was extracted from |
+| `selftest_extracted.py` | `rtl_exact/mxmesh/` still equals the models it was extracted from |
 | `selftest_mx_rocket_build.py` | one C source builds for **both** spike and `MX_ROCKET` |
 | `selftest_lower.py` | `compiler/lower.py` builds the chain command buffer merlin's parser used to build (26 cases recorded once from that parser at b4b89c2, `tests/oracle/command_buffers.json`; the generator is gone with `app/mxiface.py`), picks the lowering the pipeline picks, imports no merlin |
 | `selftest_compile.py` (+ `fixtures/modules.py`) | `compile_kernel.py` writes the same `main.c` as the graded path for every kernel × format and both targets, its spike ELF prints `expected.npy` bit for bit, and it refuses before any build |

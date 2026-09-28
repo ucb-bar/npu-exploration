@@ -8,7 +8,7 @@
 Both build the Scheme with config/scheme.py from the recipe alone; tests/selftest_workload.py holds them to
 the same bits on a linear layer. workloads.py registers what evaluate can run; rules.py names which layers
 get the Scheme; block.py is MXQuant's block-quantizer API computed by mxq, shared with the wire-operand
-encoder in app/mxq_golden.py on purpose: the operands the ELF carries and the operands the model
+encoder in compiler/operands.py on purpose: the operands the ELF carries and the operands the model
 multiplies must be the same bytes. `python -m models.mxquant` runs the perplexity path alone.
 """
 from .kernel import TIER, Unavailable, available, compare, line, run  # noqa: F401

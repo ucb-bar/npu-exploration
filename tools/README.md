@@ -6,7 +6,7 @@ to "occasionally" — it is the everyday way to drive RTL simulations.
 
 | file | role |
 |---|---|
-| `extract_model.py` | pull a datapath model out of an upstream checkout into `app/mxmesh/`, so the repo does not depend on that checkout at run time |
+| `extract_model.py` | pull a datapath model out of an upstream checkout into `rtl_exact/mxmesh/`, so the repo does not depend on that checkout at run time |
 | `simq.py` | queue Chipyard RTL simulation jobs (VCS, Xcelium or Verilator): elaborate each config once (serial, sbt holds a lock), run everything else up to `-j` at a time, pipelined. Run it as `tools/simq` |
 
 ## Using it
@@ -138,7 +138,7 @@ behind; `--rebuild` re-elaborates all of them; `--allow-stale` runs the old one 
 `simq.py` when the configs or binaries vary. `baremetal/mxgemmini/ladder.jobs` is the ladder as a
 job file.
 
-What is extracted is then pinned by `tests/selftest_extracted.py`, which fails if `app/mxmesh/` has
+What is extracted is then pinned by `tests/selftest_extracted.py`, which fails if `rtl_exact/mxmesh/` has
 drifted from the source it came from. Re-extract, don't hand-edit.
 
 See [`../README.md`](../README.md) for install and the run command.

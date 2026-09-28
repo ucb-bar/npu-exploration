@@ -1,6 +1,6 @@
 """MXQuant's block-quantizer API, computed by mxq.
 
-``app/mxq_golden.py`` (the operand encoder both the compiler and the mxquant model use) was written
+``compiler/operands.py`` (the operand encoder both the compiler and the mxquant model use) was written
 against MXQuant's ``end_to_end_linear/mx_block_quant.py``: ``quantize_mx_block32(V, fmt, axis,
 round_mode) -> (P, X)`` and ``_broadcast_scales(X, shape, axis)``. This module provides the same three
 names with the same shapes and numerics, so that file's call sites do not change and the MXQuant

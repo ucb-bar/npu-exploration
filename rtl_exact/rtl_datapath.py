@@ -115,12 +115,12 @@ def _simulate_atw_rtl_serial(self, A, B, P_A, X_A, P_B, X_B, C, window, FM):
 def _golden(cfg: RtlConfig | None = None):
     """The datapath's arithmetic primitives.
 
-    These now live IN THIS REPO (``app/mxarith.py``), mechanically EXTRACTED from
+    These now live IN THIS REPO (``rtl_exact/mxmesh/fp8.py``), mechanically EXTRACTED from
     ``gemmini-rocc-tests/fp8_matmul_model.py`` rather than transcribed. That removes the last
     runtime dependency the graded path had on the reference tree.
 
     The "one implementation, cannot drift" property that the previous cross-tree import provided is
-    preserved as a TEST instead: ``tests/selftest_mxarith.py`` re-runs the extraction, diffs it
+    preserved as a TEST instead: ``tests/selftest_extracted.py`` re-runs the extraction, diffs it
     against the upstream source, and checks the two agree elementwise. A silent divergence fails
     there rather than in a kernel's numbers.
     """
@@ -128,8 +128,8 @@ def _golden(cfg: RtlConfig | None = None):
     repo = HERE.parent
     if str(repo) not in sys.path:
         sys.path.insert(0, str(repo))
-    from app import mxarith
-    return mxarith
+    from rtl_exact.mxmesh import fp8
+    return fp8
 
 
 # --- the three hardware behaviours ---------------------------------------------------------------

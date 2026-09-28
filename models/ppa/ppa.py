@@ -1,7 +1,7 @@
 """Silicon cost of a recipe: adapter to the MxGemmini area/power model.
 
 The model lives OUTSIDE this repo (Amanda Shi's MxGemmini-workspace/ppa) and is
-consumed as a black box, the same way mxq_golden consumes MXQuant: we call it,
+consumed as a black box, the same way compiler/operands.py consumes mxq: we call it,
 never reimplement it, so it cannot drift from its own calibration. It is
 analytical -- table lookups + composition, no EDA tools, milliseconds -- and
 needs nothing from a run: only the recipe. It therefore evaluates in parallel

@@ -149,8 +149,8 @@ def _fused(spec, dtype: str, *, allow_lossy_chain: bool, warn) -> tuple[dict, li
     import numpy as np
 
     from compiler import formats
-    from app import mxlut, mxq_golden
-    from app.mxq_golden import quantize_operand
+    from compiler import codebook, operands
+    from compiler.operands import quantize_operand
 
     f = formats.get(dtype, where="kernel lowering")
     intermediate = f.mlir or f.name
@@ -220,9 +220,9 @@ def _fused(spec, dtype: str, *, allow_lossy_chain: bool, warn) -> tuple[dict, li
                 # [2**out_pmax, 2**(out_pmax+1)) -- [16,32) for E3M2, not the [1,2) MXQuant's own
                 # convention produces. A codebook built without the shift spans +-2 while the
                 # hardware feeds it +-32, and every value saturates onto the top entry.
-                P = mxq_golden.normalized(est, fmt=f.mxq, axis="row", pmax_shift=f.out_pmax)
-                c_book = mxlut.pack_codebooks(
-                    mxlut.build_codebooks(P, axis="row", fmt=f), fmt=f)
+                P = operands.normalized(est, fmt=f.mxq, axis="row", pmax_shift=f.out_pmax)
+                c_book = codebook.pack_codebooks(
+                    codebook.build_codebooks(P, axis="row", fmt=f), fmt=f)
             bundle |= {"a_lut": a_book, "b_lut": b_lut, "c_lut": c_book}
             prev_c_book = c_book
         bundles.append(bundle)

@@ -43,7 +43,7 @@ HERE = Path(__file__).resolve().parent
 NPU = HERE.parents[2]
 DATA = HERE.parent / "data"
 ROCC = NPU.parent / "software" / "gemmini-rocc-tests"
-if not (NPU / "app" / "mxq_golden.py").exists():
+if not (NPU / "compiler" / "operands.py").exists():
     raise SystemExit(f"npu-exploration not found at {NPU}")
 sys.path.insert(0, str(NPU))
 sys.path.insert(0, str(ROCC))

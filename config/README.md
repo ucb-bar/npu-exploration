@@ -88,7 +88,7 @@ because it feeds `datapath()` the wire operands). Ignored knowingly, because mxq
 arithmetic and not the machine around it: `tileRows/tileColumns`, `isRecoded/pad`, `scaleSizeOut`,
 `target_code_exp`, `seam`, `intermediate_dtype`, `out_dtype`, `supported_backends`.
 `tests/selftest_scheme.py` holds `scheme(recipe).matmul` bit-identical to the hardware team's
-extracted model (`app/mxmesh/fp8`) on every recipe.
+extracted model (`rtl_exact/mxmesh/fp8`) on every recipe.
 
 ## Silicon cost (PPA)
 

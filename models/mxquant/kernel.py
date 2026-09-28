@@ -16,8 +16,8 @@ Two things mxq does not have stay on the hardware team's code in ``app/``, in :f
 and :func:`_device_requant` and nowhere else:
 
 * the four CODEBOOK formats (fp8_e4m3_quad, fp8_e5m2, fp6_e3m2, fp6_e2m3): the wire carries 4-bit
-  indices into a per-row-pair table built from the data (``app/mxlut.py``);
-* the fp4_e2m1 chain requantizer, which rounds bf16 -> E3M1 -> E2M1 in two steps (``app/mxmesh/fp4.py``
+  indices into a per-row-pair table built from the data (``compiler/codebook.py``);
+* the fp4_e2m1 chain requantizer, which rounds bf16 -> E3M1 -> E2M1 in two steps (``rtl_exact/mxmesh/fp4.py``
   ``matrix_mx_requantize``); mxq's one-step RNE differs on 629/4096 of a normal block.
 
 ``edges`` (built by the lowering, ``compiler/lower.py``) says how each intermediate reached the mesh:
@@ -93,7 +93,7 @@ def run(spec, recipe, *, dtype: str = "fp8_e4m3", edges: dict | None = None, shi
             "arith": arith.name, "schedule": [list(s) for s in sched], "window": window,
             "block": recipe.block,
             "operand_quantizer": (f"mxq.block.mxgemmini {_scheme.ROUNDING} floor=2^-23"
-                                  + (" + app/mxlut codebooks (wire operands)" if codebook else "")),
+                                  + (" + compiler/codebook codebooks (wire operands)" if codebook else "")),
             "chain_requantizer": ("app/ device model" if codebook or dtype in _DEVICE_REQUANT
                                   else "mxq.block.mxgemmini on the bf16 output"),
             "as_shipped": f"mxq block.mxquant + {s_arith.name}" if shipped else None,
@@ -248,7 +248,7 @@ def _mesh_shipped(recipe, arith, sched, window: int, fmt: str):
 
 def _device_operands(A: np.ndarray, W: np.ndarray, dtype: str, a_px):
     """Codebook formats: the wire operands the compiler emits (indices + per-row-pair tables), decoded."""
-    from app.mxq_golden import quantize_operand, wire_to_px
+    from compiler.operands import quantize_operand, wire_to_px
     bc, bsc, bl = quantize_operand(np.ascontiguousarray(W, np.float32), side="b", dtype=dtype)
     PB, XB = wire_to_px(bc, bsc, side="b", dtype=dtype, books=bl)
     if a_px is not None:
@@ -260,8 +260,8 @@ def _device_operands(A: np.ndarray, W: np.ndarray, dtype: str, a_px):
 
 
 def _device_requant(C: np.ndarray, dtype: str, books):
-    """The device requantizer transcribed from gemmini.cc / the extracted mesh model (app/mxq_golden.py)."""
-    from app.mxq_golden import NotModelled, requantize_chained
+    """The device requantizer transcribed from gemmini.cc / the extracted mesh model (compiler/operands.py)."""
+    from compiler.operands import NotModelled, requantize_chained
     try:
         return requantize_chained(C, dtype=dtype, books=books)
     except NotModelled as exc:

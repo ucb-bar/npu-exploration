@@ -2,9 +2,9 @@
 
 Two claims, checked against two independent artifacts rather than asserted:
 
-1. **It is MXQuant.** ``app/mxq_golden.quantize_operand`` reaches ``quantize_mx_block32`` by import,
+1. **It is MXQuant.** ``compiler/operands.quantize_operand`` reaches ``quantize_mx_block32`` by import,
    never by transcription, so it cannot drift. The wire encoding on top of it is lossless by
-   construction and ``golden()`` asserts that on every call.
+   construction and ``encode()`` asserts that on every call.
 
 2. **It is what the baremetal examples run.** The shipped
    ``gemmini-rocc-tests/include/matmul_fp8_*.h`` headers contain the exact operand bytes spike is
@@ -32,11 +32,12 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from compiler import formats                                    # noqa: E402
-from app.mxq_golden import MXQ_ROOT, quantize_operand        # noqa: E402
+from compiler.operands import quantize_operand                  # noqa: E402
 
 #: The baremetal reference. D1: we depend on this tree for `gemmini.h` and read it for provenance;
 #: nothing here is built against it.
 ROCC = REPO.parent / "software" / "gemmini-rocc-tests"
+MXQ_ROOT = REPO / "MXQuant"                       # the old MXQuant clone, optional: only its logged tiles are read
 DATA = MXQ_ROOT / "end_to_end_linear" / "systolic_simulation" / "data_evalrun_512"
 
 #: (header, M, K, N, layer, projection) — mirrors gen_matmul_llama.SHAPES for the FP8 entries.

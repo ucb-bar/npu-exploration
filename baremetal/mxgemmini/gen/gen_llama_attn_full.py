@@ -35,7 +35,7 @@ DATA = HERE.parent / "data"
 #: gen_matmul_llama.py stays in gemmini-rocc-tests: it generates the matmul_*.h data for the ISA
 #: tests themselves, so it belongs with them. We borrow its FORMATS/quantize/mesh-model helpers.
 ROCC = NPU.parent / "software" / "gemmini-rocc-tests"
-if not (NPU / "app" / "mxq_golden.py").exists():
+if not (NPU / "compiler" / "operands.py").exists():
     raise SystemExit(f"npu-exploration not found at {NPU}")
 if not (ROCC / "gen_matmul_llama.py").exists():
     raise SystemExit(f"gen_matmul_llama.py not found in {ROCC}")

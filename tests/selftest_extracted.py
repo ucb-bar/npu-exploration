@@ -1,4 +1,4 @@
-"""`app/mxarith.py` must stay identical to the model it was extracted from.
+"""`rtl_exact/mxmesh/fp8.py` must stay identical to the model it was extracted from.
 
 Those five primitives — the PE's truncating product, the per-lane RNE quantizer, the exact add, and
 the bf16 pair used for cross-tile accumulation — used to be IMPORTED from
@@ -9,15 +9,15 @@ but it also created a second copy.
 This test is what buys the property back. Two checks:
 
 1. **Textual.** Re-run the extraction against the current upstream file and diff. Anything but an
-   exact match means the model changed and `app/mxarith.py` is stale.
+   exact match means the model changed and `rtl_exact/mxmesh/fp8.py` is stale.
 2. **Behavioural.** Run both implementations over random and edge-case input — subnormals, zeros,
    infinities, NaN, exact ties — and require elementwise identity, NaN patterns included.
 
 Skips cleanly when the reference tree is absent, because the extracted copy is self-sufficient; the
 point of the test is to catch upstream moving, not to reintroduce the dependency.
 
-    .venv/bin/python tests/selftest_mxarith.py            # check
-    .venv/bin/python tests/selftest_mxarith.py --update   # re-extract after an upstream change
+    .venv/bin/python tests/selftest_extracted.py            # check
+    .venv/bin/python tests/selftest_extracted.py --update   # re-extract after an upstream change
 """
 from __future__ import annotations
 
@@ -43,11 +43,11 @@ if not ROCC.is_dir():
 #: every extracted module: (upstream file, our copy, entry points). Keep in step with the
 #: `tools/extract_model.py` invocations recorded in planning/merlin_glue_port_plan.md section 4.16.
 MODULES = [
-    (ROCC / "fp8_matmul_model.py", REPO / "app" / "mxmesh" / "fp8.py",
+    (ROCC / "fp8_matmul_model.py", REPO / "rtl_exact" / "mxmesh" / "fp8.py",
      ["tiled_matmul_hwlike", "matrix_mx_requantize", "tensor_to_custom_fp_codes",
       "make_fp_quantizer", "parse_fp_spec", "mx_product_quantize_trunc", "fp_quantize_rne",
       "fp_add_exact", "q_bf16_rne", "bf16_accum_add"]),
-    (ROCC / "fp4_matmul_model.py", REPO / "app" / "mxmesh" / "fp4.py",
+    (ROCC / "fp4_matmul_model.py", REPO / "rtl_exact" / "mxmesh" / "fp4.py",
      ["tiled_matmul_hwlike", "matrix_mx_requantize", "tensor_to_custom_fp_codes"]),
 ]
 
@@ -106,7 +106,7 @@ def main(argv: list[str]) -> int:
     print("\n[2] behavioural: elementwise identity on edge cases + random ----")
     sys.path.insert(0, str(ROCC))
     import fp8_matmul_model as UP                        # noqa: E402
-    from app.mxmesh import fp8 as OURS                   # noqa: E402
+    from rtl_exact.mxmesh import fp8 as OURS                   # noqa: E402
 
     x = edge_cases()
     y = torch.roll(x, 7)

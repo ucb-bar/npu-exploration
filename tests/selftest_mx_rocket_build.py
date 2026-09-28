@@ -30,7 +30,7 @@ for _p in (REPO, REPO / "app", REPO / "compiler" / "targets" / "mx_gemmini_rocke
 
 import numpy as np                                    # noqa: E402
 
-from app.mxq_golden import quantize_operand           # noqa: E402
+from compiler.operands import quantize_operand           # noqa: E402
 from compiler.lower import MatmulStage, command_buffer   # noqa: E402
 from backend import runner                            # noqa: E402
 from backend.mxgemm_emit import generate_driver       # noqa: E402

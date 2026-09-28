@@ -1,4 +1,4 @@
-"""Golden generator: MXQuant's end-to-end block quantizer -> hardware wire format.
+"""Encoded generator: MXQuant's end-to-end block quantizer -> hardware wire format.
 
 This is the **single source of truth** for what the spike model and the RTL requantizer are
 supposed to produce. It does not reimplement any quantization arithmetic: it calls
@@ -16,7 +16,7 @@ conversion is lossless by construction:
   table is an error, raised loudly, not rounded away.
 * ``X`` is an exact power of two, so its E8M0 code is ``log2(X) + 127``, verified by re-decoding.
 
-``golden()`` therefore returns codes whose decode is *bit-identical* to the reference's own
+``encode()`` therefore returns codes whose decode is *bit-identical* to the reference's own
 ``P * X``; :func:`self_check` asserts exactly that on every element it is given.
 
 The reference's convention, for the record (measured, see ``planning/chain_seam_hw_notes.md``):
@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -48,10 +47,7 @@ import numpy as np
 # --- the reference quantizer: MXQuant's API, computed by mxq ---------------------------------------
 # ``models/mxquant/block.py`` provides ``quantize_mx_block32`` / ``_broadcast_scales`` / ``BLOCK`` with
 # MXQuant's shapes and numerics (round-to-nearest-even, block max floored at FLT_EPSILON) on the mxq
-# submodule, so the MXQuant clone is no longer needed to compile a kernel. ``MXQ_ROOT`` is kept only
-# for the optional real-tile data that ``_llama_tiles`` / ``self_check`` read when it is present.
-
-MXQ_ROOT = Path(__file__).resolve().parent.parent / "MXQuant"
+# submodule, so the MXQuant clone is not needed to compile a kernel.
 
 import torch  # noqa: E402
 from models.mxquant.block import BLOCK, _broadcast_scales, quantize_mx_block32  # noqa: E402
@@ -182,7 +178,7 @@ def e8m0_encode_exact(X: np.ndarray) -> np.ndarray:
 
 
 @dataclass(frozen=True)
-class Golden:
+class Encoded:
     """The reference answer for one tile, in the hardware's wire format."""
     codes: np.ndarray    #: uint8 [R][C] -- one E4M3 code per element
     scales: np.ndarray   #: uint8, [R][C//32] for axis="row", [R//32][C] for axis="col"
@@ -196,8 +192,8 @@ class Golden:
         return "[R][C/32]" if self.axis == "row" else "[R/32][C]"
 
 
-def golden(V: np.ndarray, *, axis: Axis = "row", fmt: str = "MXFP8_E4M3",
-           pmax_shift: int = 0, encode=None, decode=None) -> Golden:
+def encode(V: np.ndarray, *, axis: Axis = "row", fmt: str = "MXFP8_E4M3",
+           pmax_shift: int = 0, encode=None, decode=None) -> Encoded:
     """Quantize ``V[R][C]`` with MXQuant's e2e quantizer and return it in wire format.
 
     ``pmax_shift`` must be 0; see :func:`_require_no_pmax_shift`. It survives as a parameter only so
@@ -240,7 +236,7 @@ def golden(V: np.ndarray, *, axis: Axis = "row", fmt: str = "MXFP8_E4M3",
             f"wire encoding is not lossless at flat index {i}: reference P*X = "
             f"{ref.ravel()[i]!r}, decode(wire) = {recon.ravel()[i]!r}")
 
-    return Golden(codes=codes, scales=scales, recon=recon, P=P, X=X, axis=axis)
+    return Encoded(codes=codes, scales=scales, recon=recon, P=P, X=X, axis=axis)
 
 
 # --- the operand entry point ----------------------------------------------------------------------
@@ -264,7 +260,7 @@ def _exact_encoder(fmt) -> "callable":
 
     decode = DECODERS.get(fmt.name)
     if decode is None:
-        raise MxGoldenError(
+        raise OperandError(
             f"no element decoder for {fmt.name!r}; add one to compiler/wire.DECODERS. The encoder is "
             "derived from the decoder so that a format's semantics live in exactly one place.")
     codes = np.arange(1 << fmt.bits, dtype=np.uint8)
@@ -284,7 +280,7 @@ def _exact_encoder(fmt) -> "callable":
             else:
                 out[i] = c
         if bad:
-            raise MxGoldenError(
+            raise OperandError(
                 f"{len(bad)} value(s) are not exact {fmt.name} values, e.g. {sorted(set(bad))[:8]}. "
                 "The wire encoding is meant to be lossless; rounding here would hide the cause.")
         return out.reshape(v.shape)
@@ -292,7 +288,7 @@ def _exact_encoder(fmt) -> "callable":
     return encode
 
 
-class MxGoldenError(RuntimeError):
+class OperandError(RuntimeError):
     """The reference produced something the wire format cannot carry losslessly."""
 
 
@@ -406,22 +402,22 @@ def quantize_operand(V: np.ndarray, *, side: Literal["a", "b"],
         # A codebook format does not put element codes on the wire: it puts 4-bit INDICES into a
         # per-group codebook built from the data. MXQuant still does the block quantization -- the
         # codebook is a second, coarser step on top of its output, exactly as
-        # microxcaling's level2_scratch does. See app/mxlut.py.
-        from . import mxlut
+        # microxcaling's level2_scratch does. See compiler/codebook.py.
+        from compiler import codebook
 
         out = quantize_mx_block32(torch.from_numpy(V), fmt=f.mxq, axis=axis,
                                   round_mode=ROUND_MODE)
         P = out.P.numpy().astype(np.float32)
-        books = mxlut.build_codebooks(P, axis=axis, fmt=f)
-        idx = mxlut.assign_indices(P, books, axis=axis)
+        books = codebook.build_codebooks(P, axis=axis, fmt=f)
+        idx = codebook.assign_indices(P, books, axis=axis)
         codes = pack_operand(idx, side=side, dtype=dtype)
         scales = e8m0_encode_exact(out.X.numpy().astype(np.float32))
         scales = np.ascontiguousarray(scales.T) if side == "a" else np.ascontiguousarray(scales)
-        return codes, scales, mxlut.pack_codebooks(books, fmt=f)
+        return codes, scales, codebook.pack_codebooks(books, fmt=f)
 
-    # Both halves must be the FORMAT's own: golden() asserts decode(encode(P)) == P*X on every
+    # Both halves must be the FORMAT's own: encode() asserts decode(encode(P)) == P*X on every
     # call, and passing an encoder without its matching decoder turns that gate into a false alarm.
-    g = golden(V, axis=axis, fmt=f.mxq, pmax_shift=0,
+    g = encode(V, axis=axis, fmt=f.mxq, pmax_shift=0,
                encode=_exact_encoder(f), decode=DECODERS[f.name])
     codes = pack_operand(g.codes, side=side, dtype=dtype)
     # A blocks along K with scales [M][GK]; the A-side scale memory indexes [GK][M]
@@ -463,7 +459,7 @@ def requantize_chained(C_bf16: np.ndarray, *, dtype: str = "fp8_e4m3",
         return _requantize_codebook(C_bf16, f, books)
 
     # The hardware's own requantizer, from the extracted mesh model.
-    from .mxmesh import fp4 as M4, fp8 as M8
+    from rtl_exact.mxmesh import fp4 as M4, fp8 as M8
     mm = M8 if (f.spec.startswith("fp8") and not f.lut) else M4
     C_q, C_sc = mm.matrix_mx_requantize(torch.from_numpy(C_bf16), f.spec)
     P = C_q.numpy().astype(np.float32)
@@ -531,7 +527,7 @@ def _requantize_codebook(C: np.ndarray, f, books):
     2. ``scaled = v / scale``, rounded to **bf16** before anything looks at it;
     3. the element code, rounded **as that format rounds** -- :mod:`compiler.wire`'s ``ENCODERS``,
        not a generic nearest-grid-point (see the note there: three separate conventions);
-    4. the hardware's fixed-point nearest-finder picks the index (:func:`mxlut.finder_indices`);
+    4. the hardware's fixed-point nearest-finder picks the index (:func:`codebook.finder_indices`);
     5. the value the next matmul sees is ``book[index]``, decoded.
 
     Verified against a C oracle compiled from ``mx_fp_math.h`` itself: 4096/4096 identical at every
@@ -539,12 +535,12 @@ def _requantize_codebook(C: np.ndarray, f, books):
     right is not enough -- an earlier version had the finder exactly right and still matched
     27/4096, because step 3 rounded ties the wrong way and dropped the sign of zero.
     """
-    from . import mxlut
+    from compiler import codebook
     from compiler.wire import BLOCK, bf16_bits_to_float, encode_requant, float_to_bf16_bits
 
     if books is None:
         raise ValueError(f"{f.name} chains through a codebook; its C book is needed")
-    vals = mxlut.unpack_codebooks(books, fmt=f)
+    vals = codebook.unpack_codebooks(books, fmt=f)
     g = formats.LUT_GRANULARITY
     # The requantizer reads the accumulator out of SMEM, where it is bf16 -- so the block maximum
     # is a maximum over bf16 values, not over the fp32 the caller happens to hold. Under
@@ -567,7 +563,7 @@ def _requantize_codebook(C: np.ndarray, f, books):
     X = np.exp2((scale_code.astype(np.int64) - E8M0_BIAS).astype(np.float64)).astype(np.float32)
 
     elem = encode_requant((blocks / X[:, :, None]).reshape(M, N), dtype=f.name)
-    idx = mxlut.finder_indices(elem, vals, fmt=f, axis="row", g=g)
+    idx = codebook.finder_indices(elem, vals, fmt=f, axis="row", g=g)
     P = np.take_along_axis(vals[np.arange(M) >> g], idx.astype(np.intp), axis=1).astype(np.float32)
     return torch.from_numpy(np.ascontiguousarray(P.T)), torch.from_numpy(np.ascontiguousarray(X.T))
 
@@ -585,7 +581,7 @@ def wire_to_px(codes: np.ndarray, scales: np.ndarray, *, side: Literal["a", "b"]
     with ``X`` ``[K/32][·]`` in both cases.
     """
     from compiler import formats
-    from . import mxlut
+    from compiler import codebook
     from compiler.wire import DECODERS, e8m0_decode
 
     f = formats.get(dtype, where="wire_to_px")
@@ -606,7 +602,7 @@ def wire_to_px(codes: np.ndarray, scales: np.ndarray, *, side: Literal["a", "b"]
         if books is None:
             raise ValueError(f"{f.name} is codebook-indexed; its books are needed to decode")
         g = formats.LUT_GRANULARITY
-        vals = mxlut.unpack_codebooks(books, fmt=f)
+        vals = codebook.unpack_codebooks(books, fmt=f)
         r, c = idx.shape
         if side == "a":                              # one book per 2**G ROWS of A
             P = np.array([[vals[i >> g, idx[i, j]] for j in range(c)] for i in range(r)], np.float32)
@@ -629,7 +625,7 @@ def save(path, tiles: dict[str, np.ndarray], *, axis: Axis = "row") -> None:
     """
     out: dict[str, np.ndarray] = {"__axis__": np.array(axis)}
     for name, V in tiles.items():
-        g = golden(V, axis=axis)
+        g = encode(V, axis=axis)
         out[f"{name}/in"] = np.asarray(V, dtype=np.float32)
         out[f"{name}/codes"] = g.codes
         out[f"{name}/scales"] = g.scales
@@ -670,87 +666,3 @@ def _corner_tiles() -> list[tuple[str, np.ndarray]]:
         ("rounding ties (half away from zero)",
          tile([1.0625, 1.1875, -1.0625, 2.0 ** -9 * 0.5, 2.0 ** -9 * 2.5] + [0.5] * 27)),
     ]
-
-
-def _llama_tiles(limit: int | None = None) -> list[tuple[str, np.ndarray]]:
-    """The real TinyLlama A/W tiles logged by MXQuant's eval run, if present."""
-    root = MXQ_ROOT / "end_to_end_linear" / "systolic_simulation" / "data_evalrun_01"
-    if not root.is_dir():
-        return []
-    files = sorted(root.glob("layer*/*/[AW]_square_0*.npz"))
-    if limit is not None:
-        files = files[:limit]
-    tiles = []
-    for f in files:
-        with np.load(f) as z:
-            tiles.append((str(f.relative_to(root)), z["data"].astype(np.float32)))
-    return tiles
-
-
-def self_check(verbose: bool = True) -> None:
-    """Assert the wire encoding is lossless on corner cases and on the real TinyLlama tiles."""
-    from compiler.wire import e8m0_decode
-
-    if verbose:
-        print(f"reference: {MXQ_ROOT}/end_to_end_linear/mx_block_quant.py::quantize_mx_block32")
-        print(f"\n--- corner tiles (axis='row', reporting column 0's block) ---")
-    for name, V in _corner_tiles():
-        golden(V, axis="row")                 # asserts losslessness internally
-        g = golden(V, axis="col")
-        sc = int(g.scales[0, 0])
-        col = g.codes[:, 0]
-        uniq = sorted(set(int(c) for c in col))[:5]
-        if verbose:
-            print(f"  {name:38s} scale=0x{sc:02X}({sc:3d}) "
-                  f"={e8m0_decode(np.uint8(sc)):>12.6g}  codes[:,0] uniq={[hex(c) for c in uniq]}")
-
-    tiles = _llama_tiles()
-    if not tiles:
-        if verbose:
-            print("\n--- real TinyLlama tiles: NOT FOUND, skipped ---")
-        return
-    n_elem = n_blk = 0
-    for name, V in tiles:
-        for axis in ("row", "col"):
-            g = golden(V, axis=axis)
-            n_elem += g.codes.size
-            n_blk += g.scales.size
-    if verbose:
-        print(f"\n--- real TinyLlama tiles ---")
-        print(f"  {len(tiles)} tiles x 2 axes: {n_blk} blocks, {n_elem} elements, "
-              f"all losslessly encoded")
-        # Distribution facts the RTL/spike fixes will be judged against.
-        subs = clips = zeros = tot = 0
-        for name, V in tiles:
-            g = golden(V, axis="col")
-            z = g.P
-            tot += z.size
-            subs += int(((np.abs(z) > 0) & (np.abs(z) < 2.0 ** -6)).sum())
-            clips += int((np.abs(z) == 448.0).sum())
-            zeros += int((z == 0).sum())
-        print(f"  elements: {100.0*subs/tot:.3f}% in the E4M3 subnormal tail, "
-              f"{100.0*clips/tot:.3f}% saturated at 448, {100.0*zeros/tot:.3f}% zero")
-
-    # Scale layouts, so a consumer cannot get the two axes the wrong way round.
-    V = tiles[0][1]
-    for axis in ("row", "col"):
-        g = golden(V, axis=axis)
-        if verbose:
-            print(f"  axis={axis!r}: tile {V.shape} -> codes {g.codes.shape}, "
-                  f"scales {g.scales.shape} = {g.scale_layout}")
-
-    # save/load round trip
-    import tempfile, os
-    with tempfile.TemporaryDirectory() as d:
-        p = os.path.join(d, "g.npz")
-        save(p, {name: V for name, V in _corner_tiles()}, axis="row")
-        ax, back = load(p)
-        assert ax == "row" and len(back) == len(_corner_tiles())
-        for name, V in _corner_tiles():
-            assert np.array_equal(back[name]["codes"], golden(V, axis="row").codes)
-    if verbose:
-        print(f"  save/load round trip: OK")
-
-
-if __name__ == "__main__":
-    self_check()

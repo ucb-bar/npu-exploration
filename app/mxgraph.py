@@ -171,7 +171,7 @@ def operand_bundles(g: Graph, *, dtype: str = "fp8_e4m3") -> dict:
     A leaf used as both A and B (attention's ``X`` is only an A; a weight only a B) would appear
     twice with different blocking, which is why the key carries the side.
     """
-    from .mxq_golden import quantize_operand
+    from compiler.operands import quantize_operand
 
     out: dict[str, dict] = {}
     for name, V in g.leaves.items():
