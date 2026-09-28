@@ -28,7 +28,7 @@ checked bit-identical to the serial path (`mesh_par.py` self-test).
     PATH=../../.venv/bin:$PATH ../../.venv/bin/python3 gen_llama_mlp_full.py
 
 Needs an --all-neurons capture:
-    cd ../../.. && .venv/bin/python3 -m app.capture_llama_layer --all-heads --all-neurons
+    cd ../../.. && .venv/bin/python3 -m kernels.captures.llama_layer --all-heads --all-neurons
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ DATA.mkdir(parents=True, exist_ok=True)
 import gen_matmul_llama as G      # noqa: E402  -- quantize(), bf16_bits()
 import gen_llama_layer as GL      # noqa: E402  -- FMT, bf16_exact()
 from mesh_par import mesh_parallel  # noqa: E402
-from app.capture_llama_layer import rmsnorm, silu  # noqa: E402
+from kernels.captures.llama_layer import rmsnorm, silu  # noqa: E402
 
 FMT = GL.FMT
 BLOCK = 32
@@ -66,7 +66,7 @@ def load_all_neurons() -> dict:
     if not cands:
         raise SystemExit(
             f"no --all-neurons capture in {CAPTURE}\nRun it first:\n"
-            f"    cd {NPU} && .venv/bin/python3 -m app.capture_llama_layer "
+            f"    cd {NPU} && .venv/bin/python3 -m kernels.captures.llama_layer "
             f"--all-heads --all-neurons")
     with np.load(cands[-1]) as z:
         d = {k: z[k] for k in z.files}
@@ -187,7 +187,7 @@ def emit(b: Blob, d: dict) -> tuple[Path, Path]:
 //
 // A COMPLETE TinyLlama MLP sub-layer: ALL {d['F']} FFN neurons, the full {d['D']}x{d['F']} gate/up
 // and {d['F']}x{d['D']} down projections. Layer {d['layer']}, {d['M']} real tokens of wikitext2,
-// captured by app/capture_llama_layer.py --all-neurons. Quantized by MXQuant (block 32,
+// captured by kernels/captures/llama_layer.py --all-neurons. Quantized by MXQuant (block 32,
 // {FMT.name}); mesh goldens from fp8_matmul_model.tiled_matmul_hwlike at the datapath's own
 // precision schedule, run column-parallel (mesh_par.py, bit-identical to the serial path).
 //

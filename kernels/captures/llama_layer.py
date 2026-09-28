@@ -1,6 +1,6 @@
 """Capture ONE real TinyLlama decoder layer -- activations, weights, RoPE tables, references.
 
-`capture_llama_tiles.py` logs a 512x512 (A, W) pair per projection, each at a *random* and
+`tests/fixtures/llama_tiles.py` logs a 512x512 (A, W) pair per projection, each at a *random* and
 unrecorded (token, in-feature, out-feature) offset (`log_pairs_from_eval.py:183-195`). That is
 enough for a standalone matmul and useless for a layer: `gate_proj`'s out-features and
 `down_proj`'s in-features are different random windows, so `down(silu(gate) * up)` cannot be
@@ -34,9 +34,9 @@ given -- not by re-running torch in a different precision.
 
 Run it with the npu-exploration venv:
 
-    .venv/bin/python3 -m app.capture_llama_layer                     # layer 5, head 0, neurons 0..63
-    .venv/bin/python3 -m app.capture_llama_layer --layer 10 --nf 128
-    .venv/bin/python3 -m app.capture_llama_layer --all-heads --all-neurons   # a WHOLE layer
+    .venv/bin/python3 -m kernels.captures.llama_layer                     # layer 5, head 0, neurons 0..63
+    .venv/bin/python3 -m kernels.captures.llama_layer --layer 10 --nf 128
+    .venv/bin/python3 -m kernels.captures.llama_layer --all-heads --all-neurons   # a WHOLE layer
 
 `--all-heads` and `--all-neurons` each remove one of the two slices, and each buys a reference the
 sliced capture cannot have: the module's own forward output (`attn_torch`, `mlp_torch`). With both,
@@ -52,12 +52,12 @@ from pathlib import Path
 
 import numpy as np
 
-MXQ_ROOT = Path(__file__).resolve().parent.parent / "MXQuant"
+MXQ_ROOT = Path(__file__).resolve().parents[2] / "MXQuant"
 #: Captures land in THIS repo, not in the MXQuant checkout -- MXQuant is upstream and stays clean.
-DEFAULT_OUT = Path(__file__).resolve().parent.parent / "out" / "layer_capture"
+DEFAULT_OUT = Path(__file__).resolve().parents[2] / "out" / "layer_capture"
 
 #: `mxquant/datautils.py:10` asks for the bare dataset id `wikitext`, which datasets>=4 rejects.
-#: Same corpus, canonical id -- identical tokenization to capture_llama_tiles.py.
+#: Same corpus, canonical id -- identical tokenization to tests/fixtures/llama_tiles.py.
 WIKITEXT2 = ("Salesforce/wikitext", "wikitext-2-raw-v1")
 
 

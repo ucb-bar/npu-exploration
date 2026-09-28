@@ -138,7 +138,7 @@ def _attention(*, m: int = 64, k: int = 64, h: int = 64, seed: int = 0, **_) -> 
 
 # --- real data: one TinyLlama decoder layer ------------------------------------------------------
 #
-# Captured by `app/capture_llama_layer.py` from a real forward pass: the residual stream, both
+# Captured by `kernels/captures/llama_layer.py` from a real forward pass: the residual stream, both
 # RMSNorm weights, and the layer's actual projection weights, all index-consistent.
 #
 # `d_model = 2048` is kept FULL, so RMSNorm and every projection INPUT is exact; the slice is on the
@@ -156,7 +156,7 @@ def _capture(path=None):
     if path is None and not fs:
         raise FileNotFoundError(
             f"no captured llama layer in {d}. Make one with:\n"
-            "    .venv/bin/python -m app.capture_llama_layer")
+            "    .venv/bin/python -m kernels.captures.llama_layer")
     return np.load(Path(path) if path else fs[-1], allow_pickle=False)
 
 

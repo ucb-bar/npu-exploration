@@ -15,7 +15,7 @@ Claim 2 is the load-bearing one. It is what makes "the ELF our compiler emits" a
 gemmini-rocc-tests" numerically the same program, which is the premise of the whole port
 (``planning/merlin_glue_port_plan.md`` D1/D3).
 
-Needs the captured tiles (``python3 -m app.capture_llama_tiles``); skips cleanly without them.
+Needs the captured tiles (``python3 -m tests.fixtures.llama_tiles``); skips cleanly without them.
 
     .venv/bin/python tests/selftest_quantizer.py
 """
@@ -80,7 +80,7 @@ def load_pair(M: int, K: int, N: int, layer: str, proj: str):
 def main() -> int:
     if not DATA.is_dir():
         print(f"SKIP: captured tiles missing at {DATA}\n"
-              f"      run: .venv/bin/python3 -m app.capture_llama_tiles")
+              f"      run: .venv/bin/python3 -m tests.fixtures.llama_tiles")
         return 0
     if not (ROCC / "include").is_dir():
         print(f"SKIP: baremetal reference missing at {ROCC}")

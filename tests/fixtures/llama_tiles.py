@@ -24,7 +24,7 @@ wikitext2 test split, since ``max_pairs_per_target=1`` means every tile has been
 
 Run it with the npu-exploration venv:
 
-    .venv/bin/python3 -m app.capture_llama_tiles
+    .venv/bin/python3 -m tests.fixtures.llama_tiles
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-MXQ_ROOT = Path(__file__).resolve().parent.parent / "MXQuant"
+MXQ_ROOT = Path(__file__).resolve().parents[2] / "MXQuant"
 
 #: Tile edge. 512 covers every shape the matmul_tiled tests need (max M=128, K=512, N=256).
 DEFAULT_N = 512

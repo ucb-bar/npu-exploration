@@ -431,7 +431,7 @@ def emit_host(rung: Rung, m: dict) -> str:
     what the kernel reads (`H_PRE_BF16`), and BF16 is exactly representable in fp32, so the C and
     the numpy start from identical values.
     """
-    from app.capture_llama_layer import rmsnorm, softmax_causal, rope
+    from kernels.captures.llama_layer import rmsnorm, softmax_causal, rope
 
     r, M, D, H = G._rows, rung.M, rung.K, rung.N
     GD, GH, GM = D // BLOCK, H // BLOCK, M // BLOCK

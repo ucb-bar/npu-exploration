@@ -1,7 +1,7 @@
 // A REAL TinyLlama attention head, back to back, on MxGemmini -- one ELF, real data, llama dims.
 //
 // Six matmuls on the mesh with the host's fp32 glue in the seams the mesh cannot cross. Operands
-// are a real decoder layer captured from a real forward pass (capture_llama_layer.py ->
+// are a real decoder layer captured from a real forward pass (kernels/captures/llama_layer.py ->
 // gen_llama_layer.py -> include/llama_attn.h): hidden size D = 2048 kept FULL, one query head and
 // its GQA kv head, M real tokens of wikitext2.
 //

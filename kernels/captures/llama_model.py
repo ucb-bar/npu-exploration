@@ -1,9 +1,9 @@
 """Capture the WHOLE TinyLlama model -- every decoder layer, the head, and the true logits.
 
-`capture_llama_layer.py` captures ONE layer, which is what the sub-layer and single-layer kernels
+`kernels/captures/llama_layer.py` captures ONE layer, which is what the sub-layer and single-layer kernels
 needed. A stacked-model kernel needs every layer's weights plus the pieces around them:
 
-    out/model_capture/layer<N>.npz   per layer: the same tensors capture_llama_layer.py emits with
+    out/model_capture/layer<N>.npz   per layer: the same tensors kernels/captures/llama_layer.py emits with
                                      --all-heads --all-neurons (nothing sliced), plus that layer's
                                      own h_pre / h_out from the real forward pass
     out/model_capture/model.npz      embed_out (layer 0's input), the final RMSNorm weight, the
@@ -19,8 +19,8 @@ are the only way to localize a divergence. The kernel feeds layer N the value th
 so a late-layer mismatch says nothing about where it started; comparing each layer's output against
 the model's own says exactly which layer first departs, and by how much it had already drifted.
 
-    .venv/bin/python3 -m app.capture_llama_model                 # all 22 layers
-    .venv/bin/python3 -m app.capture_llama_model --layers 0-1    # just the first two
+    .venv/bin/python3 -m kernels.captures.llama_model                 # all 22 layers
+    .venv/bin/python3 -m kernels.captures.llama_model --layers 0-1    # just the first two
 """
 from __future__ import annotations
 
@@ -31,8 +31,8 @@ from pathlib import Path
 
 import numpy as np
 
-MXQ_ROOT = Path(__file__).resolve().parent.parent / "MXQuant"
-DEFAULT_OUT = Path(__file__).resolve().parent.parent / "out" / "model_capture"
+MXQ_ROOT = Path(__file__).resolve().parents[2] / "MXQuant"
+DEFAULT_OUT = Path(__file__).resolve().parents[2] / "out" / "model_capture"
 WIKITEXT2 = ("Salesforce/wikitext", "wikitext-2-raw-v1")
 
 
@@ -78,7 +78,7 @@ def main() -> int:
     if str(MXQ_ROOT) not in sys.path:
         sys.path.insert(0, str(MXQ_ROOT))
     esq = _load("eval_simquant", MXQ_ROOT / "eval_simquant.py")
-    cll = _load("capture_llama_layer", Path(__file__).resolve().parent / "capture_llama_layer.py")
+    cll = _load("llama_layer", Path(__file__).resolve().parent / "llama_layer.py")
 
     print(f"[load] {args.model_id} via eval_simquant.get_model (bf16, as MXQuant runs it)")
     model = esq.get_model(args.model_id, args.seq, args.seq, gpu=0)

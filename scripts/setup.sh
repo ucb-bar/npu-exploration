@@ -14,7 +14,7 @@
 #   python     .venv + requirements.txt        (every documented .venv/bin/python command)
 #   mxq        <repo>/microscaling-quant        git submodule, pinned: the quantization library the
 #                                                mxquant model runs on (models/, config/scheme.py)
-#   mxquant    <repo>/MXQuant checkout          OPTIONAL (--with-mxquant): app/capture_llama_*.py load the
+#   mxquant    <repo>/MXQuant checkout          OPTIONAL (--with-mxquant): kernels/captures/*.py load the
 #                                                model through it; grade/mxquant_ref.py (legacy) reads
 #                                                origin/chloe-branch-all. Nothing graded needs it.
 #   toolchain  <root>/.conda-env with riscv64-unknown-elf-gcc, dtc, and a host g++

@@ -30,7 +30,7 @@ attention alone, the other an MLP over torch's residual.
     PATH=../../.venv/bin:$PATH ../../.venv/bin/python3 gen_llama_layer_full.py
 
 Needs a capture with BOTH slices removed:
-    cd ../../.. && .venv/bin/python3 -m app.capture_llama_layer --all-heads --all-neurons
+    cd ../../.. && .venv/bin/python3 -m kernels.captures.llama_layer --all-heads --all-neurons
 """
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def load_full_layer() -> dict:
     if not cands:
         raise SystemExit(
             f"no --all-heads --all-neurons capture in {CAPTURE}\nRun it first:\n"
-            f"    cd {NPU} && .venv/bin/python3 -m app.capture_llama_layer "
+            f"    cd {NPU} && .venv/bin/python3 -m kernels.captures.llama_layer "
             f"--all-heads --all-neurons")
     with np.load(cands[-1]) as z:
         d = {k: z[k] for k in z.files}

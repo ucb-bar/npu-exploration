@@ -3,7 +3,7 @@
 This is the REFERENCE the MXFP8 kernels are graded against, computed the same way the rest of this
 repo loads the model (`eval_simquant.get_model` -> bfloat16), so the comparison is like for like.
 
-WHY IT EXISTS SEPARATELY. `capture_llama_model.py` prints a perplexity too, but over the ONE
+WHY IT EXISTS SEPARATELY. `kernels/captures/llama_model.py` prints a perplexity too, but over the ONE
 32-token window it captures -- which is a different quantity and is NOT comparable to published
 numbers. Measured on TinyLlama-1.1B-Chat, bf16:
 

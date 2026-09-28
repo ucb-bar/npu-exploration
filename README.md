@@ -197,7 +197,7 @@ Less common:
 | command | what it does |
 |---|---|
 | `python -m models.mxquant --workload tinyllama --config R --dry-run` | which layers get the recipe's Scheme |
-| `app/capture_llama_layer.py`, `app/capture_llama_tiles.py` | capture real TinyLlama tensors for the llama kernels (needs the MXQuant clone) |
+| `kernels/captures/llama_layer.py`, `tests/fixtures/llama_tiles.py` | capture real TinyLlama tensors for the llama kernels (needs the MXQuant clone) |
 | `baremetal/mxgemmini/gen/gen_*.py` | generators for the hand-written TinyLlama kernels |
 | `tests/verify_rtl_exact.py`, `tests/oracle/make_fixture.py` | the frozen llama-MLP fixture and its verifier (MXQuant under `rtl_exact/` equals the hardware) |
 | `tools/extract_model.py` | one-off extraction from the gemmini tree |
@@ -213,8 +213,7 @@ kernels/     registry.py spec.py trace.py            the kernel IR; --list shows
 config/      recipe.py recipes/*.json scheme.py     one JSON = one machine; recipe → mxq
 models/      reference/ mxquant/ (bits + perplexity) spike/ ppa/ perf/   one folder per model of the machine
 grade/       pipeline.py metrics.py report.py telemetry.py     run, compare, record
-app/         graph host_ops (lowering front half); formats wire codebook (the wire);
-             operands.py (operand quantizer, renamed in the next PR); mxmesh/; capture_*
+app/         ppl_datapath eval_ppl ablate_mx   Nicolas's perplexity scripts (their place is being decided)
 compiler/    lower.py (KernelSpec -> command buffer); targets/mx_gemmini_rocket/ backend/{mxgemm_emit,mxgraph_emit,runner} runtime/
 baremetal/   hand-written TinyLlama kernels and their generators
 rtl_exact/   the MXQuant config that is the hardware (rtl_datapath.py, mxgemmini_rtl.json)
