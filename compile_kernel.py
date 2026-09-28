@@ -232,14 +232,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="with --module: a [M][K] float .npy to use as the input instead of randn")
     ap.add_argument("--config", default="baseline",
                     help="hardware recipe: a name in config/recipes/ or a path to a .json")
-    ap.add_argument("--dtype", default=DEFAULT_DTYPE, help="MX operand format (app/mxformats.py)")
+    ap.add_argument("--dtype", default=DEFAULT_DTYPE, help="MX operand format (compiler/formats.py)")
     ap.add_argument("--m", type=int, default=64, help="batch rows")
     ap.add_argument("--k", type=int, default=64, help="in_features")
     ap.add_argument("--h", type=int, default=64, help="hidden width (chained kernels)")
     ap.add_argument("--n", type=int, default=64, help="out_features")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--allow-lossy-chain", action="store_true",
-                    help="chain a format app/mxformats.chain_refusal would refuse")
+                    help="chain a format compiler/formats.chain_refusal would refuse")
     ap.add_argument("--target", choices=TARGETS, default="spike",
                     help="build define: spike (-DSPIKE_SIM) or mx_rocket (-DMX_ROCKET, the RTL build)")
     ap.add_argument("--out", type=Path, default=None,

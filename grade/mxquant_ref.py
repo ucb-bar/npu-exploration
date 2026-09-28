@@ -148,8 +148,8 @@ def _matmul(env, A: np.ndarray, W: np.ndarray, dtype: str = "fp8_e4m3",
 
 
 def _fmt():
-    from app import mxformats
-    return mxformats
+    from compiler import formats
+    return formats
 
 
 #: How a value reached the mesh as an operand. THE LOWERING DECIDES THIS, not the graph shape —

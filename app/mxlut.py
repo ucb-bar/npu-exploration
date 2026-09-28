@@ -21,8 +21,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import mxformats
-from .mxwire import DECODERS
+from compiler import formats
+from compiler.wire import DECODERS
 
 #: Entries per codebook. Fixed by the hardware: the index is a nibble.
 LUT_SIZE = 16
@@ -44,7 +44,7 @@ LUT_SIZE = 16
 # So the value space a codebook may draw from is not "everything the format represents" -- it is
 # everything the FINDER can distinguish. That is what :func:`codebook_values` returns.
 
-def _fixed_point(fmt: mxformats.MxFormat) -> "callable":
+def _fixed_point(fmt: formats.MxFormat) -> "callable":
     """The finder's code -> signed fixed-point magnitude, per format.
 
     Transcribed from ``mx_fp_math.h`` (``fp6_to_fixed_point``, ``fp6_e2m3_to_fixed_point``,
@@ -97,8 +97,8 @@ _DIFF_MASK = {"fp6_e3m2": 0x1FF, "fp6_e2m3": None, "fp8_e5m2": 0x1FFFFFFFF,
               "fp8_e4m3": 0x7FFFF, "fp8_e4m3_quad": 0x7FFFF}
 
 
-def finder_indices(codes: np.ndarray, books: np.ndarray, *, fmt: mxformats.MxFormat,
-                   axis: str = "row", g: int = mxformats.LUT_GRANULARITY) -> np.ndarray:
+def finder_indices(codes: np.ndarray, books: np.ndarray, *, fmt: formats.MxFormat,
+                   axis: str = "row", g: int = formats.LUT_GRANULARITY) -> np.ndarray:
     """Index assignment **as the HARDWARE does it** — nearest in fixed-point, ties to lower index.
 
     Distinct from :func:`assign_indices`, and the distinction is not pedantry:
@@ -146,7 +146,7 @@ def finder_indices(codes: np.ndarray, books: np.ndarray, *, fmt: mxformats.MxFor
     return out
 
 
-def codebook_values(fmt: mxformats.MxFormat) -> np.ndarray:
+def codebook_values(fmt: formats.MxFormat) -> np.ndarray:
     """The values a codebook may hold: distinct, finite, and **unambiguous to the finder**.
 
     Derived from the format's own decoder, so it cannot disagree with what the mesh will do with an
@@ -156,8 +156,8 @@ def codebook_values(fmt: mxformats.MxFormat) -> np.ndarray:
     """
     decode = DECODERS.get(fmt.name)
     if decode is None:
-        raise mxformats.MxFormatError(
-            f"no element decoder for {fmt.name!r}; add one to app/mxwire.DECODERS")
+        raise formats.MxFormatError(
+            f"no element decoder for {fmt.name!r}; add one to compiler/wire.DECODERS")
     codes = np.arange(1 << fmt.entry_bits, dtype=np.uint8)
     vals = decode(codes)
     fp = _fixed_point(fmt)
@@ -199,8 +199,8 @@ def _kmeans_1d(values: np.ndarray, k: int) -> np.ndarray:
     return centers
 
 
-def build_codebooks(P: np.ndarray, *, axis: str, fmt: mxformats.MxFormat,
-                    g: int = mxformats.LUT_GRANULARITY) -> np.ndarray:
+def build_codebooks(P: np.ndarray, *, axis: str, fmt: formats.MxFormat,
+                    g: int = formats.LUT_GRANULARITY) -> np.ndarray:
     """``[n_groups][16]`` codebook VALUES for an already-MX-quantized tile.
 
     ``axis="row"`` groups rows (the A side), ``axis="col"`` groups columns (the B side) — matching
@@ -233,7 +233,7 @@ def build_codebooks(P: np.ndarray, *, axis: str, fmt: mxformats.MxFormat,
 
 
 def assign_indices(P: np.ndarray, books: np.ndarray, *, axis: str,
-                   g: int = mxformats.LUT_GRANULARITY) -> np.ndarray:
+                   g: int = formats.LUT_GRANULARITY) -> np.ndarray:
     """Nearest-entry index for every element, against ITS group's codebook. ``[R][C]`` of 0..15."""
     P = np.asarray(P, dtype=np.float32)
     idx = np.zeros(P.shape, dtype=np.uint8)
@@ -248,7 +248,7 @@ def assign_indices(P: np.ndarray, books: np.ndarray, *, axis: str,
     return idx
 
 
-def pack_codebooks(books: np.ndarray, *, fmt: mxformats.MxFormat) -> np.ndarray:
+def pack_codebooks(books: np.ndarray, *, fmt: formats.MxFormat) -> np.ndarray:
     """``[n_groups][words]`` uint32, the wire form MX_LOAD_LUT reads.
 
     16 entries of ``entry_bits``, LE-packed: entry *i* occupies bits ``[i*e, i*e+e)`` of the little-
@@ -256,7 +256,7 @@ def pack_codebooks(books: np.ndarray, *, fmt: mxformats.MxFormat) -> np.ndarray:
     ``gemmini.h:68-76``.
     """
     e = fmt.entry_bits
-    words = mxformats.lut_words(e)
+    words = formats.lut_words(e)
     encode = _value_to_code(fmt)
     out = np.zeros((books.shape[0], words), dtype=np.uint32)
     for grp, row in enumerate(books):
@@ -268,7 +268,7 @@ def pack_codebooks(books: np.ndarray, *, fmt: mxformats.MxFormat) -> np.ndarray:
     return out
 
 
-def unpack_codebooks(packed: np.ndarray, *, fmt: mxformats.MxFormat) -> np.ndarray:
+def unpack_codebooks(packed: np.ndarray, *, fmt: formats.MxFormat) -> np.ndarray:
     """Inverse of :func:`pack_codebooks`: ``[n_groups][words]`` uint32 -> ``[n_groups][16]`` values.
 
     Mirrors ``mx_fp_math.h``'s ``unpack_lut_96bit`` / ``unpack_lut_128bit`` -- entry *i* occupies
@@ -287,7 +287,7 @@ def unpack_codebooks(packed: np.ndarray, *, fmt: mxformats.MxFormat) -> np.ndarr
     return out
 
 
-def _value_to_code(fmt: mxformats.MxFormat):
+def _value_to_code(fmt: formats.MxFormat):
     """Exact value -> element code, by inverting the decoder. Raises rather than rounding."""
     decode = DECODERS[fmt.name]
     codes = np.arange(1 << fmt.entry_bits, dtype=np.uint8)
@@ -298,7 +298,7 @@ def _value_to_code(fmt: mxformats.MxFormat):
     def encode(v: float) -> int:
         key = int(np.float32(v).view(np.uint32))
         if key not in table:
-            raise mxformats.MxFormatError(
+            raise formats.MxFormatError(
                 f"{v!r} is not an exact {fmt.name} value, so it cannot be a codebook entry")
         return table[key]
 

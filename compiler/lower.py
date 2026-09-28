@@ -30,7 +30,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 
 #: Default operand format. Every other format is selected with --dtype and gated by
-#: app/mxformats.py, which refuses one this repo has not proven end to end.
+#: compiler/formats.py, which refuses one this repo has not proven end to end.
 DEFAULT_DTYPE = "fp8_e4m3"
 
 
@@ -75,8 +75,8 @@ def command_buffer(stages: list[MatmulStage], bundles: list[dict] | None, *,
     ``bundles`` attaches one dict of wire bytes per stage, in order; a chained stage supplies only
     its ``b_*`` keys because its A operand is produced on device.
     """
-    from app import mxformats
-    elem = {f.name: (f.mlir or f.name) for f in mxformats.FORMATS.values()}
+    from compiler import formats
+    elem = {f.name: (f.mlir or f.name) for f in formats.FORMATS.values()}
     if operand_fmt not in elem:
         raise ValueError(f"operand_fmt {operand_fmt!r} not in {sorted(elem)}")
     if not stages:
@@ -148,10 +148,11 @@ def _fused(spec, dtype: str, *, allow_lossy_chain: bool, warn) -> tuple[dict, li
     """
     import numpy as np
 
-    from app import mxformats, mxlut, mxq_golden
+    from compiler import formats
+    from app import mxlut, mxq_golden
     from app.mxq_golden import quantize_operand
 
-    f = mxformats.get(dtype, where="kernel lowering")
+    f = formats.get(dtype, where="kernel lowering")
     intermediate = f.mlir or f.name
     mnk = spec.stage_mnk()
 
@@ -174,8 +175,8 @@ def _fused(spec, dtype: str, *, allow_lossy_chain: bool, warn) -> tuple[dict, li
     if est is not None:
         # The refusal lives HERE, not in the backend. The emitter drives a codebook chain correctly
         # -- tests/selftest_formats.py proves it bit-exact against the reference's own tables. What
-        # cannot be done for some formats is CHOOSING the table: see mxformats.chain_refusal.
-        why = mxformats.chain_refusal(f)
+        # cannot be done for some formats is CHOOSING the table: see formats.chain_refusal.
+        why = formats.chain_refusal(f)
         if why and not allow_lossy_chain:
             raise ValueError(
                 f"cannot chain {dtype}: {why}\n"

@@ -31,7 +31,7 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from app import mxformats                                    # noqa: E402
+from compiler import formats                                    # noqa: E402
 from app.mxq_golden import MXQ_ROOT, quantize_operand        # noqa: E402
 
 #: The baremetal reference. D1: we depend on this tree for `gemmini.h` and read it for provenance;
@@ -88,25 +88,25 @@ def main() -> int:
     checks = fails = 0
 
     # --- 1. the format table is self-consistent ------------------------------------------------
-    for key, f in mxformats.FORMATS.items():
+    for key, f in formats.FORMATS.items():
         assert f.name == key, f"{key}: name/key mismatch"
         assert f.bits in (4, 8), f"{key}: odd wire width {f.bits}"
         assert (f.entry_bits is not None) == f.lut, f"{key}: entry_bits must be set iff LUT-indexed"
         assert f.out_requant in ("mxquant", "model"), f"{key}: bad out_requant"
         checks += 1
-    print(f"format table          {len(mxformats.FORMATS)} formats, "
-          f"{sum(f.proven for f in mxformats.FORMATS.values())} proven")
+    print(f"format table          {len(formats.FORMATS)} formats, "
+          f"{sum(f.proven for f in formats.FORMATS.values())} proven")
 
     # --- 2. an unproven format fails closed ----------------------------------------------------
     # Picked dynamically: formats become proven as Step 5 lands them, and a hardcoded name here
     # would turn "we proved another format" into a test failure.
-    unproven = next((f.name for f in mxformats.FORMATS.values() if not f.proven), None)
+    unproven = next((f.name for f in formats.FORMATS.values() if not f.proven), None)
     if unproven is None:
         print("  (every format is proven -- nothing left to fail closed)")
     else:
         try:
-            mxformats.get(unproven, where="selftest")
-        except mxformats.MxFormatError:
+            formats.get(unproven, where="selftest")
+        except formats.MxFormatError:
             checks += 1
         else:
             print(f"FAIL: unproven format {unproven} was accepted"); fails += 1
@@ -114,13 +114,13 @@ def main() -> int:
     # --- 3. the elaboration gate actually gates ------------------------------------------------
     # fp4 on an E4M3-only build: spike would run it, the elaborated hardware could not.
     try:
-        mxformats.check_elaboration(["fp4_e2m1"], "MxGemminiRocketConfig")
-    except mxformats.MxFormatError:
+        formats.check_elaboration(["fp4_e2m1"], "MxGemminiRocketConfig")
+    except formats.MxFormatError:
         checks += 1
     else:
         print("FAIL: fp4 was accepted on an E4M3-only elaboration"); fails += 1
-    mxformats.check_elaboration(["fp8_e4m3"], "MxGemminiRocketConfig")
-    mxformats.check_elaboration(["fp4_e2m1"], "MxAllGemminiRocketConfig")
+    formats.check_elaboration(["fp8_e4m3"], "MxGemminiRocketConfig")
+    formats.check_elaboration(["fp4_e2m1"], "MxAllGemminiRocketConfig")
     checks += 2
 
     # --- 4. byte equality with the shipped baremetal headers -----------------------------------

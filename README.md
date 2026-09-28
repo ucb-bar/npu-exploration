@@ -188,7 +188,7 @@ launch several `run_kernel.py` processes; each run writes its own `results/<time
 
 Kernels by name: `linear`, `mlp2` … `mlp8`, `attention`, and `llama_attention` / `llama_mlp` once a
 capture exists. Machines: `baseline`, `flat_acc4`, `wide_acc`, `narrow_prod`, or any recipe JSON.
-Formats: every entry of `app/mxformats.py` on chains; `fp8_e4m3` only on graph kernels.
+Formats: every entry of `compiler/formats.py` on chains; `fp8_e4m3` only on graph kernels.
 `compile_kernel.py` builds and writes `expected.npy` but runs nothing; running the `mx_rocket` ELF
 on VCS or FPGA is the hardware team's step.
 
@@ -213,7 +213,7 @@ kernels/     registry.py spec.py trace.py            the kernel IR; --list shows
 config/      recipe.py recipes/*.json scheme.py     one JSON = one machine; recipe → mxq
 models/      reference/ mxquant/ (bits + perplexity) spike/ ppa/ perf/   one folder per model of the machine
 grade/       pipeline.py metrics.py report.py telemetry.py     run, compare, record
-app/         mxgraph mxhost (lowering front half); mxformats mxwire mxlut (the wire);
+app/         mxgraph mxhost (lowering front half); formats wire mxlut (the wire);
              mxq_golden.py (operand quantizer, renamed in the next PR); mxmesh/; capture_*
 compiler/    lower.py (KernelSpec -> command buffer); targets/mx_gemmini_rocket/ backend/{mxgemm_emit,mxgraph_emit,runner} runtime/
 baremetal/   hand-written TinyLlama kernels and their generators

@@ -19,7 +19,7 @@ import math
 
 import numpy as np
 
-from .mxformats import BLOCK, E8M0_BIAS  # noqa: F401  (re-exported: this is where callers look)
+from compiler.formats import BLOCK, E8M0_BIAS  # noqa: F401  (re-exported: this is where callers look)
 
 __all__ = ["BLOCK", "E8M0_BIAS", "fp8_e4m3_decode", "fp8_e5m2_decode",
            "fp6_e3m2_decode", "fp6_e2m3_decode", "fp4_e2m1_decode", "e8m0_decode",
@@ -317,7 +317,7 @@ def encode_requant(values: np.ndarray, *, dtype: str) -> np.ndarray:
     enc = ENCODERS.get(dtype)
     if enc is None:
         raise KeyError(
-            f"no requant encoder for {dtype!r}; add one to app/mxwire.ENCODERS, transcribed from "
+            f"no requant encoder for {dtype!r}; add one to compiler/wire.ENCODERS, transcribed from "
             "mx_fp_math.h. A format that reaches the requantizer without one would otherwise be "
             "rounded by a generic rule, which disagrees with the hardware on 2-9% of elements.")
     bits = float_to_bf16_bits(values)

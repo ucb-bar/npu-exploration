@@ -137,7 +137,7 @@ def chain_refusal(fmt: "MxFormat") -> str | None:
     """
     if not fmt.lut:
         return None
-    from . import mxlut
+    from app import mxlut
     import numpy as np
 
     lo = 2.0 ** fmt.out_pmax
@@ -146,7 +146,7 @@ def chain_refusal(fmt: "MxFormat") -> str | None:
         return (f"{fmt.name} requantizes into [{lo:g}, {2*lo:g}) but its nearest-entry finder "
                 f"cannot faithfully represent anything above {finder_max:g} -- every intermediate "
                 "value would alias onto a smaller one. This is a datapath property, not a missing "
-                "feature; see app/mxformats.chain_refusal.")
+                "feature; see compiler/formats.chain_refusal.")
     if not fmt.chain_proven:
         return (f"{fmt.name} passes the range check but its chain is UNEXPLAINED: a 2-stage mlp2 "
                 "measures ~99% vs fp32 where ~20% is expected, and the cause is not yet found. "

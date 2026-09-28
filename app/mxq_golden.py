@@ -56,15 +56,15 @@ MXQ_ROOT = Path(__file__).resolve().parent.parent / "MXQuant"
 import torch  # noqa: E402
 from models.mxquant.block import BLOCK, _broadcast_scales, quantize_mx_block32  # noqa: E402
 
-from . import mxformats  # noqa: E402
-from .mxwire import E8M0_BIAS, fp8_e4m3_decode  # noqa: E402
+from compiler import formats  # noqa: E402
+from compiler.wire import E8M0_BIAS, fp8_e4m3_decode  # noqa: E402
 
 # The block size is stated in three places -- the quantizer, our format table, and the RTL. Two of
 # them are importable, so check them against each other rather than trusting that they agree.
-if BLOCK != mxformats.BLOCK:
+if BLOCK != formats.BLOCK:
     raise ImportError(
-        f"block-scale group disagreement: models/mxquant/block.py says {BLOCK}, app/mxformats.py says "
-        f"{mxformats.BLOCK}. One of them is wrong about the hardware.")
+        f"block-scale group disagreement: models/mxquant/block.py says {BLOCK}, compiler/formats.py says "
+        f"{formats.BLOCK}. One of them is wrong about the hardware.")
 
 Axis = Literal["row", "col"]
 
@@ -95,7 +95,7 @@ def _require_no_pmax_shift(pmax_shift: int, fmt: str) -> None:
 
     This guard is what makes the deletion safe: a format that reintroduces a nonzero ``out_pmax``
     gets an error naming the cause, not a quietly wrong golden. Its sibling is
-    ``mxformats.chain_refusal``, dormant for the same reason.
+    ``formats.chain_refusal``, dormant for the same reason.
     """
     if pmax_shift:
         raise NotImplementedError(
@@ -104,7 +104,7 @@ def _require_no_pmax_shift(pmax_shift: int, fmt: str) -> None:
             "Reinstate it from git history if a format brings a nonzero out_pmax back.")
 
 
-#: E4M3 code for NaN. ``mx_fp_math.h:232`` and ``mxwire.fp8_e4m3_decode`` both decode 0x7F as
+#: E4M3 code for NaN. ``mx_fp_math.h:232`` and ``wire.fp8_e4m3_decode`` both decode 0x7F as
 #: 480.0 rather than NaN, so these two codes are held out of the lookup table and handled
 #: explicitly -- ``saturate_normals=True`` means the reference never emits 480, so nothing is lost.
 E4M3_NAN = 0x7F
@@ -226,7 +226,7 @@ def golden(V: np.ndarray, *, axis: Axis = "row", fmt: str = "MXFP8_E4M3",
     scales = e8m0_encode_exact(X)
 
     # Reconstruct from the WIRE values only, then require it to equal the reference's own product.
-    from .mxwire import e8m0_decode
+    from compiler.wire import e8m0_decode
     scale_vals = e8m0_decode(scales)
     tiles = _broadcast_scales(torch.from_numpy(scale_vals), (R, C), axis).numpy()
     recon = ((decode or fp8_e4m3_decode)(codes) * tiles).astype(np.float32)
@@ -260,12 +260,12 @@ def _exact_encoder(fmt) -> "callable":
 
     Keyed on the fp32 BIT PATTERN so -0.0 and +0.0 stay distinct.
     """
-    from .mxwire import DECODERS
+    from compiler.wire import DECODERS
 
     decode = DECODERS.get(fmt.name)
     if decode is None:
         raise MxGoldenError(
-            f"no element decoder for {fmt.name!r}; add one to app/mxwire.DECODERS. The encoder is "
+            f"no element decoder for {fmt.name!r}; add one to compiler/wire.DECODERS. The encoder is "
             "derived from the decoder so that a format's semantics live in exactly one place.")
     codes = np.arange(1 << fmt.bits, dtype=np.uint8)
     table: dict[int, int] = {}
@@ -330,14 +330,14 @@ def pack_operand(codes: np.ndarray, *, side: Literal["a", "b"],
     So A packs DOWN its rows to ``[M/2][K]`` and B packs ACROSS its columns to ``[K][N/2]``. They are
     not the same operation, and at a square shape they are indistinguishable by size alone.
     """
-    from . import mxformats
+    from compiler import formats
 
-    f = mxformats.get(dtype, where=f"pack_operand(side={side!r})")
+    f = formats.get(dtype, where=f"pack_operand(side={side!r})")
     c = np.ascontiguousarray(codes, dtype=np.uint8)
     if f.bits == 8:
         return c
     if f.bits != 4:
-        raise mxformats.MxFormatError(f"no packing defined for {f.bits}-bit {f.name}")
+        raise formats.MxFormatError(f"no packing defined for {f.bits}-bit {f.name}")
     if (c > 0xF).any():
         raise ValueError(f"{f.name} codes must be 4-bit; found values above 0xF")
 
@@ -380,9 +380,9 @@ def quantize_operand(V: np.ndarray, *, side: Literal["a", "b"],
     ``axis="col"`` and writes ``B_scales_col[GK][N]`` directly. Verified in
     ``tests/selftest_quantizer.py``.
     """
-    from . import mxformats
+    from compiler import formats
 
-    f = mxformats.get(dtype, where=f"quantize_operand(side={side!r})")
+    f = formats.get(dtype, where=f"quantize_operand(side={side!r})")
     V = np.ascontiguousarray(V, dtype=np.float32)
 
     # Refuse non-finite input rather than coding it. The element encoders map NaN/Inf to a code
@@ -398,7 +398,7 @@ def quantize_operand(V: np.ndarray, *, side: Literal["a", "b"],
 
     if side not in ("a", "b"):
         raise ValueError(f"side must be 'a' or 'b', got {side!r}")
-    from .mxwire import DECODERS
+    from compiler.wire import DECODERS
 
     axis = "row" if side == "a" else "col"
 
@@ -450,10 +450,10 @@ def requantize_chained(C_bf16: np.ndarray, *, dtype: str = "fp8_e4m3",
 
     Returns ``(P, X)`` in the model's orientation, ready for `rtl_datapath`'s wire-operand hook.
     """
-    from . import mxformats
-    from .mxwire import e8m0_decode
+    from compiler import formats
+    from compiler.wire import e8m0_decode
 
-    f = mxformats.get(dtype, where="requantize_chained")
+    f = formats.get(dtype, where="requantize_chained")
     C_bf16 = np.ascontiguousarray(C_bf16, dtype=np.float32)
 
     if not f.lut and f.bits == 8:
@@ -489,7 +489,7 @@ def _requantize_direct_e4m3(C: np.ndarray, f):
 
     No finder and no codebook: the output is an 8-bit code the next stage decodes directly.
     """
-    from .mxwire import (BLOCK, bf16_bits_to_float, float_to_bf16_bits, fp8_e4m3_decode,
+    from compiler.wire import (BLOCK, bf16_bits_to_float, float_to_bf16_bits, fp8_e4m3_decode,
                          fp8_e4m3_encode_f32)
 
     C = bf16_bits_to_float(float_to_bf16_bits(C))     # smem holds bf16; the block max is over those
@@ -529,7 +529,7 @@ def _requantize_codebook(C: np.ndarray, f, books):
 
     1. block along COLUMNS in 32s, per row -- one E8M0 scale per (row, block), ``log2_pmax = 0``;
     2. ``scaled = v / scale``, rounded to **bf16** before anything looks at it;
-    3. the element code, rounded **as that format rounds** -- :mod:`app.mxwire`'s ``ENCODERS``,
+    3. the element code, rounded **as that format rounds** -- :mod:`compiler.wire`'s ``ENCODERS``,
        not a generic nearest-grid-point (see the note there: three separate conventions);
     4. the hardware's fixed-point nearest-finder picks the index (:func:`mxlut.finder_indices`);
     5. the value the next matmul sees is ``book[index]``, decoded.
@@ -540,12 +540,12 @@ def _requantize_codebook(C: np.ndarray, f, books):
     27/4096, because step 3 rounded ties the wrong way and dropped the sign of zero.
     """
     from . import mxlut
-    from .mxwire import BLOCK, bf16_bits_to_float, encode_requant, float_to_bf16_bits
+    from compiler.wire import BLOCK, bf16_bits_to_float, encode_requant, float_to_bf16_bits
 
     if books is None:
         raise ValueError(f"{f.name} chains through a codebook; its C book is needed")
     vals = mxlut.unpack_codebooks(books, fmt=f)
-    g = mxformats.LUT_GRANULARITY
+    g = formats.LUT_GRANULARITY
     # The requantizer reads the accumulator out of SMEM, where it is bf16 -- so the block maximum
     # is a maximum over bf16 values, not over the fp32 the caller happens to hold. Under
     # `rtl_exact` the caller's array is already bf16-valued and this is a no-op; it is here so the
@@ -584,10 +584,11 @@ def wire_to_px(codes: np.ndarray, scales: np.ndarray, *, side: Literal["a", "b"]
     Returned in the model's orientation: ``P`` is ``[K][M]`` for the A side and ``[K][N]`` for B,
     with ``X`` ``[K/32][·]`` in both cases.
     """
-    from . import mxformats, mxlut
-    from .mxwire import DECODERS, e8m0_decode
+    from compiler import formats
+    from . import mxlut
+    from compiler.wire import DECODERS, e8m0_decode
 
-    f = mxformats.get(dtype, where="wire_to_px")
+    f = formats.get(dtype, where="wire_to_px")
     codes = np.ascontiguousarray(codes, dtype=np.uint8)
     if f.bits == 4:                                  # unpack the nibbles this side packs
         if side == "a":
@@ -604,7 +605,7 @@ def wire_to_px(codes: np.ndarray, scales: np.ndarray, *, side: Literal["a", "b"]
     if f.lut:
         if books is None:
             raise ValueError(f"{f.name} is codebook-indexed; its books are needed to decode")
-        g = mxformats.LUT_GRANULARITY
+        g = formats.LUT_GRANULARITY
         vals = mxlut.unpack_codebooks(books, fmt=f)
         r, c = idx.shape
         if side == "a":                              # one book per 2**G ROWS of A
@@ -688,7 +689,7 @@ def _llama_tiles(limit: int | None = None) -> list[tuple[str, np.ndarray]]:
 
 def self_check(verbose: bool = True) -> None:
     """Assert the wire encoding is lossless on corner cases and on the real TinyLlama tiles."""
-    from .mxwire import e8m0_decode
+    from compiler.wire import e8m0_decode
 
     if verbose:
         print(f"reference: {MXQ_ROOT}/end_to_end_linear/mx_block_quant.py::quantize_mx_block32")

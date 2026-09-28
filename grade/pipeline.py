@@ -188,7 +188,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     import torch
 
     import backend as mx          # the OOT merlin target package
-    from app import mxwire as w
+    from compiler import wire as w
     from app.mxq_golden import quantize_operand
     from backend import mxgemm_emit
 
@@ -266,7 +266,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     # command buffer per matmul, carrying values as float.
     # A non-chain kernel whose every host stage is emittable becomes ONE ELF too, via the graph
     # emitter. That is D4 for attention: no numpy between two stages, ever.
-    from app import mxformats as _mxf
+    from compiler import formats as _mxf
     _f = _mxf.get(dtype, where="kernel lowering")
     INTERMEDIATE_DTYPE = _f.mlir or _f.name
     hw = None

@@ -247,7 +247,7 @@ def build(cap: dict) -> tuple[Blob, dict]:
 
 
 def _e8(codes: np.ndarray) -> np.ndarray:
-    from app.mxwire import e8m0_decode
+    from compiler.wire import e8m0_decode
     return e8m0_decode(codes).astype(np.float32)
 
 

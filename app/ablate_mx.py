@@ -48,7 +48,7 @@ for p in (str(NPU), str(ROCC), str(GEN)):
 import gen_matmul_llama as G          # noqa: E402
 import gen_llama_layer as GL          # noqa: E402
 from app.capture_llama_layer import rmsnorm, rope, softmax_causal, silu  # noqa: E402
-from app.mxwire import e8m0_decode    # noqa: E402
+from compiler.wire import e8m0_decode    # noqa: E402
 
 FMT = GL.FMT
 BLOCK = 32

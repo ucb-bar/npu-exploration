@@ -73,7 +73,7 @@ def main() -> int:
         HostStage("H", fn=lambda t: t * 2.0, src="L0"),
         Stage("L1", weight=torch.randn(64, 64), lhs="H")])
     check("a fn= host stage -> per_stage", lower(fn_spec).kind == "per_stage")
-    # mxformats.chain_refusal refuses nothing today (a live invariant, not an oversight), so the
+    # formats.chain_refusal refuses nothing today (a live invariant, not an oversight), so the
     # accepted-lossy-chain warning has no case to fire on; the hook must at least be inert.
     warned = []
     m2 = lower(build("mlp2"), "fp6_e3m2", warn=warned.append)

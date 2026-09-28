@@ -53,11 +53,11 @@ def main() -> int:
                     help="how the requantized intermediate is made safe for the next stage "
                          "(default: the recipe's software.seam)")
     ap.add_argument("--dtype", default="fp8_e4m3",
-                    help="MX operand format (see app/mxformats.py; unproven formats are refused)")
+                    help="MX operand format (see compiler/formats.py; unproven formats are refused)")
     ap.add_argument("--allow-lossy-chain", action="store_true",
                     help="chain a format whose requant range exceeds what the nearest-entry finder "
                          "can represent (fp6_e3m2, fp8_e5m2). The reference has the same behaviour; "
-                         "see app/mxformats.chain_refusal")
+                         "see compiler/formats.chain_refusal")
     ap.add_argument("--tol", type=float, default=0.15,
                     help="pass threshold on relative Frobenius error vs fp32 (fp32 tier only)")
     ap.add_argument("--simulator", default="spike")

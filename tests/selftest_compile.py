@@ -61,7 +61,7 @@ def main() -> int:
     from kernels.registry import build
     from kernels.spec import HostStage, KernelSpec, Stage
     import torch
-    from app import mxwire as w
+    from compiler import wire as w
     base = load("baseline")
     quiet = Quiet()
 

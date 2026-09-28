@@ -33,11 +33,11 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol, Sequence
 
 # --- Facts from the target contract / gemmini.h. Nothing here is invented. ------------------------
-# The format table lives in ONE place, `app/mxformats.py`, because the same facts are needed by the
+# The format table lives in ONE place, `compiler/formats.py`, because the same facts are needed by the
 # quantizer and (eventually) by hardware generation. The backend reads it rather than restating it.
 # Imported lazily-ish: the app package is on sys.path in every context this backend runs in, and a
 # local fallback would be a second source of truth, which is exactly what the table exists to stop.
-from app import mxformats as _fmt                                          # noqa: E402
+from compiler import formats as _fmt                                          # noqa: E402
 
 #: The output-only pseudo-format: the raw bf16 accumulator readout.
 BF16 = "bf16"

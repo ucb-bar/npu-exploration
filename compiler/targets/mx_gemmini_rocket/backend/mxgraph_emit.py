@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from app import mxformats as _fmt
+from compiler import formats as _fmt
 
 from .mxgemm_emit import (BF16_PER_WORD, DEFAULT_GEOMETRY, MxEmitError, _c_array_2d)
 

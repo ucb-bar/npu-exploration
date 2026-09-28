@@ -29,7 +29,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from app.mxq_golden import quantize_operand          # noqa: E402
-from app.mxwire import e8m0_decode                   # noqa: E402
+from compiler.wire import e8m0_decode                   # noqa: E402
 
 RUNTIME = REPO / "compiler" / "targets" / "mx_gemmini_rocket" / "backend" / "runtime"
 
