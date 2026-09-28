@@ -22,3 +22,4 @@ mxl15           # requant control: I=J=Kt=4, the chain test's own shape
 mxl16           # requant, I=2
 mxl17           # requant, Kt=2
 mxl18           # requant, GN=1 -- the rung that pinned Fault A
+mxl19           # J=1: mxl4 at N=16 -- the shape the 8192-row attention_full plan broke on

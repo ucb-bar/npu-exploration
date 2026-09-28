@@ -46,7 +46,7 @@ def load_samples(model_id: str, seqlen: int, nsamples: int, seed: int):
     from datasets import load_dataset
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id)
-    data = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    data = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
     text = "\n\n".join([x for x in data["text"] if x.strip()])
     ids = tokenizer(text, return_tensors="pt")["input_ids"][0]
     nbatch = ids.numel() // seqlen

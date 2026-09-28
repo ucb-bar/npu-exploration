@@ -32,6 +32,7 @@ those formats. The mxquant model still grades them, through the wire operands th
 """
 from __future__ import annotations
 
+import os
 from functools import partial
 
 import models  # noqa: F401  -- puts the mxq submodule on sys.path
@@ -86,7 +87,8 @@ def datapath(recipe: Recipe):
     """``(Arithmetic, schedule, window)`` of the hardware this recipe describes."""
     from mxq import matmul
     pe, pm = product(recipe)
-    return matmul.MXGEMMINI(pe, pm), schedule(recipe), recipe.dim
+    floor = None if os.environ.get("MXG_PROD_FLOOR") == "none" else -16      # the A/B control switch
+    return matmul.MXGEMMINI(pe, pm, prod_floor=floor), schedule(recipe), recipe.dim
 
 
 def shipped_datapath(recipe: Recipe):

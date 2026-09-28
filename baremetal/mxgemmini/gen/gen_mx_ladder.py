@@ -189,6 +189,16 @@ RUNGS = [
     Rung("mxl18", "requant", 64, 64, 32,
          "one delta from mxl15: N=32, so J=2 and the output has ONE E8M0 block per row instead of "
          "two. Convicts J, and separately tests whether GN=1 is handled.", n2=64),
+
+    # --- J = 1 ---------------------------------------------------------------------------------
+    #
+    # MEASURED on the FPGA: llama_attention_full planned against 8192 spad rows picks proj N=16,
+    # i.e. I=2, J=1, TK=128, and gets ~65477/65536 of Q wrong -- while the SAME kernel at N=64
+    # (mxl4's shape) is bit-exact, and the N=16 plan is bit-exact on spike. No rung had J=1.
+    Rung("mxl19", "plain", 32, 2048, 16,
+         "one delta from the PASSING mxl4: N=16, so J=1 -- a single output column tile -- at "
+         "TK=128. B-side scale window 1024 bytes (64 rows), far under the ceiling. Fails if the "
+         "RTL mishandles a one-tile-wide output at depth."),
 ]
 BY_NAME = {r.name: r for r in RUNGS}
 
@@ -232,7 +242,8 @@ def golden(aP, asc, bP, bsc) -> np.ndarray:
     """One matmul through the bit-exact mesh model. `asc`/`bsc` are the UNTRANSPOSED scale arrays,
     exactly as `gen_llama_layer.mesh()` passes them -- the transpose below is a WIRE layout, not a
     model input, and confusing the two silently grades against the wrong thing."""
-    return G._run_mesh(aP, asc, bP, bsc, FMT)
+    from mesh_par import run_mesh
+    return run_mesh(aP, asc, bP, bsc, FMT)
 
 
 # --- emission ----------------------------------------------------------------------------------
