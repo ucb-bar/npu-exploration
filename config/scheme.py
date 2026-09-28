@@ -50,6 +50,9 @@ _RECIPE_DTYPE = {"fp8": "fp8_e4m3", "fp6": "fp6_e3m2", "fp4": "fp4_e2m1"}
 
 #: The hardware's operand rounding since 2026-09-10 (mx_fp_math.h, RNE for every format).
 ROUNDING = "rne"
+#: How the codes are multiplied (``scheme(reduce=)``): the recipe's array; mxq's exact float64 product (the
+#: format's cost alone); or exact inside each 32-block and the hardware's bf16 step across blocks.
+REDUCERS = ("hardware", "exact", "bf16_tiles")
 
 
 def format_name(recipe: Recipe) -> str:
@@ -143,18 +146,40 @@ def shipped_datapath(recipe: Recipe):
     return matmul.MXQUANT(pe, pm), schedule(recipe), recipe.dim
 
 
+def _bf16_tiles(recipe: Recipe):
+    """The hardware's cross-block step with a perfect in-block accumulator: fp32 products and adds inside each
+    block (the window is the whole block), the finished block folded into the output by MXGEMMINI's own
+    ``tile_add`` (both rounded to bf16, added exactly, rounded to bf16)."""
+    from mxq import matmul
+    hw = mxgemmini(*product(recipe))
+    return matmul.Arithmetic("bf16_tiles", product=lambda a, b: a * b, acc_add=lambda S, p, e, m: S + p,
+                             tile_add=hw.tile_add)
+
+
 def scheme(recipe: Recipe, *, dtype: str | None = None, compiled: bool = False, rounding_mode: str = ROUNDING,
-           scale_floor: float | None = None):
-    """The recipe as one mxq ``Scheme``: quantizer for both operands, the hardware Arithmetic, the
-    recipe's schedule and window. ``dtype`` is the operand format (default: the recipe's); a codebook
-    format runs on its full element grid, see ``is_codebook``. ``compiled=True`` fuses the arithmetic
-    through torch.compile (GPU; bit-identical, 5-7x faster per layer)."""
-    from mxq import Scheme, matmul
+           scale_floor: float | None = None, reduce: str = "hardware"):
+    """The recipe as one mxq ``Scheme``: quantizer for both operands, and how the codes are multiplied.
+    ``dtype`` is the operand format (default: the recipe's); a codebook format runs on its full element grid,
+    see ``is_codebook``. ``reduce`` is one of ``REDUCERS``: "hardware" is the recipe's array (its Arithmetic,
+    schedule and window; ``compiled=True`` fuses it through torch.compile, GPU, bit-identical, 5-7x faster per
+    layer); "exact" is mxq's ``fp64_accum``; "bf16_tiles" is exact inside each block, bf16 across (``compiled``
+    applies to it too). The three share the quantizers, so their differences are the multiply's alone."""
+    from mxq import Scheme, fp64_accum, matmul
     q = quantizer(recipe, fmt=mxq_format(dtype) if dtype else None, rounding_mode=rounding_mode,
                   scale_floor=scale_floor)
-    arith, sched, window = datapath(recipe)
-    if compiled:
-        arith = matmul.compiled(arith)
-    return Scheme(recipe.name, a=q, b=q,
-                  reduce=partial(matmul.systolic, arith=arith, schedule=sched, window=window,
-                                 block_size=recipe.block))
+    if reduce == "hardware":
+        arith, sched, window = datapath(recipe)
+        if compiled:
+            arith = matmul.compiled(arith)
+        r = partial(matmul.systolic, arith=arith, schedule=sched, window=window, block_size=recipe.block)
+    elif reduce == "exact":
+        r = partial(fp64_accum, block_size=recipe.block)
+    elif reduce == "bf16_tiles":
+        arith = _bf16_tiles(recipe)
+        if compiled:                        # gated bit-identical to eager on the GPU (0/984576 differ, 2026-09-28)
+            arith = matmul.compiled(arith)
+        r = partial(matmul.systolic, arith=arith, schedule=[(8, 7)] * recipe.block, window=recipe.block,
+                    block_size=recipe.block)
+    else:
+        raise RecipeError(f"reduce {reduce!r}; choose from {', '.join(REDUCERS)}")
+    return Scheme(recipe.name if reduce == "hardware" else f"{recipe.name}/{reduce}", a=q, b=q, reduce=r)

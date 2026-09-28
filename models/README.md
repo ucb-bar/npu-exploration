@@ -58,12 +58,20 @@ transformers versions). The bf16 baseline is measured once the same way. `--dtyp
 format (default: the recipe's); every format runs on its full element grid, and for the four
 codebook formats the record says `codebook: not modelled`, since the hardware sends those through a
 16-entry table that mxq does not have (the bit path grades them through the wire operands).
+`--reduce` picks how the codes are multiplied, with the same quantizers in all three cases:
+`hardware` (default) is the recipe's array; `exact` is mxq's `fp64_accum`, the format's cost with a
+perfect multiplier; `bf16_tiles` sums each 32-block in fp32 and folds it into the output with the
+hardware's own bf16 step. Run all three and the recipe's cost splits into format, cross-block
+rounding, and the ladder with the truncated product. `--rules linears_no_head` quantizes the
+decoder's projections only (attention included, lm_head not). A non-default reducer is part of the
+cache key and the record; the default leaves existing keys unchanged.
 
 ```bash
 .venv/bin/python -m models.mxquant --list
 .venv/bin/python -m models.mxquant --workload tinyllama --config baseline --dry-run       # which layers get the Scheme
 .venv/bin/python -m models.mxquant --workload tinyllama --config baseline --gpus 0,1,2,3
 .venv/bin/python -m models.mxquant --workload tinyllama --config wide_acc --dtype fp4_e2m1 --gpus 0,1 --nsamples 4
+.venv/bin/python -m models.mxquant --workload tinyllama --config baseline --gpus 0,1,2,3 --reduce exact
 ```
 
 `tests/selftest_workload.py` holds the two paths to the same bits: a `linear` kernel through

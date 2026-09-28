@@ -7,6 +7,8 @@ record ("mxquant_layers") always means the same layers.
     mxquant_layers   every nn.Linear except the attention projections; lm_head included. This is the layer set
                      MXQuant's eval_complete.py quantizes, so perplexities are comparable to its published numbers.
     all_linear       every nn.Linear, attention projections included.
+    linears_no_head  every nn.Linear except lm_head, attention projections included: the decoder's projections
+                     alone, the layer set of app/ppl_datapath.py.
 """
 from __future__ import annotations
 
@@ -24,7 +26,15 @@ def all_linear(scheme) -> list:
     return [(nn.Linear, scheme)]
 
 
-NAMES = {"mxquant_layers": mxquant_layers, "all_linear": all_linear}
+def is_lm_head(name: str, module, parent) -> bool:
+    return name.rsplit(".", 1)[-1] == "lm_head"
+
+
+def linears_no_head(scheme) -> list:
+    return [(is_lm_head, None), (nn.Linear, scheme)]
+
+
+NAMES = {"mxquant_layers": mxquant_layers, "all_linear": all_linear, "linears_no_head": linears_no_head}
 
 
 def build(name: str, scheme) -> list:

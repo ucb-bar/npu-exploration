@@ -34,6 +34,7 @@ def main() -> int:
     ap.add_argument("--rules", default="mxquant_layers")
     ap.add_argument("--rounding-mode", default=None, help="operand rounding (default: config.scheme.ROUNDING)")
     ap.add_argument("--scale-floor", type=float, default=None, help="block-max floor (default: 2^-23)")
+    ap.add_argument("--reduce", default="hardware", help="how the codes are multiplied: hardware | exact | bf16_tiles")
     ap.add_argument("--no-compiled", action="store_true", help="do not torch.compile the arithmetic (5-7x slower, same bits)")
     ap.add_argument("--model-id", default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
     ap.add_argument("--seqlen", type=int, default=2048)
@@ -61,7 +62,8 @@ def main() -> int:
     recipe = None if args.recipe == "none" else load(args.recipe)
     dtype = None if recipe is None else (args.dtype or S.recipe_dtype(recipe))
     knobs = {k: v for k, v in (("rounding_mode", args.rounding_mode), ("scale_floor", args.scale_floor)) if v is not None}
-    sch = None if recipe is None else S.scheme(recipe, dtype=dtype, compiled=not args.no_compiled, **knobs)
+    sch = None if recipe is None else S.scheme(recipe, dtype=dtype, compiled=not args.no_compiled, reduce=args.reduce,
+                                               **knobs)
     rule_list = None if sch is None else R.build(args.rules, sch)
 
     if args.dry_run and sch is None:
@@ -101,6 +103,7 @@ def main() -> int:
         "codebook": "not modelled" if recipe is not None and S.is_codebook(dtype) else None,
         "rounding_mode": None if sch is None else knobs.get("rounding_mode", S.ROUNDING),
         "scale_floor": None if sch is None else knobs.get("scale_floor", S.scale_floor_default()),
+        "reduce": None if sch is None else args.reduce,
         "compiled": None if sch is None else not args.no_compiled,
         "mxq_commit": models.mxq_commit(),
         "scheme": None if sch is None else describe(sch),

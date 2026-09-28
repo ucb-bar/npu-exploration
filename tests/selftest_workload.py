@@ -76,6 +76,11 @@ def main() -> int:
     h2 = patch(toy, rules.build("all_linear", s), dry_run=True)
     check("all_linear puts the Scheme on every Linear", all(sch == s.name for *_, sch in h2.table),
           f"{len(h2.table)} layers")
+    h3 = patch(toy, rules.build("linears_no_head", s), dry_run=True)
+    got3 = {name: sch for name, _, _, _, sch in h3.table}
+    check("linears_no_head leaves lm_head alone and takes every other Linear, attention included",
+          got3.get("lm_head", "missing") is None and all(v == s.name for n, v in got3.items() if n != "lm_head"),
+          f"{sum(1 for v in got3.values() if v)} of {len(got3)}")
     check("dry_run changed nothing", all(isinstance(m, nn.Linear) for m in toy.modules() if hasattr(m, "weight")))
     try:
         rules.build("everything", s)
@@ -93,6 +98,34 @@ def main() -> int:
     y_direct = matmul.systolic(PA, XA, PB, XB, arith, sched, window=window, block_size=base.block)
     check("Scheme.matmul == quantizer + datapath from the same recipe", torch.equal(y_scheme, y_direct))
     check("wide_acc gives different bits from baseline", not torch.equal(y_scheme, scheme.scheme(wide).matmul(A, B)))
+
+    print("\n[2b] the reducer choice: same quantizers, a different multiply ------------------")
+    from mxq import block
+    ex = scheme.scheme(base, reduce="exact")
+    Aq = block.dequantize(PA, XA, axis=0, block_size=base.block)
+    Bq = block.dequantize(PB, XB, axis=0, block_size=base.block)
+    check("exact == the float64 product of the dequantized operands",
+          torch.equal(ex.matmul(A, B), (Aq.double().t() @ Bq.double()).float()))
+    check("exact shares the quantizers with hardware", ex.a is not None and ex.a.keywords == s.a.keywords)
+    check("exact differs from the hardware array", not torch.equal(ex.matmul(A, B), y_scheme))
+    bt = scheme.scheme(base, reduce="bf16_tiles")
+    A1, B1 = torch.randn(base.block, 32), torch.randn(base.block, 48)         # one block: no cross-block step
+    PA1, XA1 = scheme.quantizer(base)(A1)
+    PB1, XB1 = scheme.quantizer(base)(B1)
+    S = torch.zeros(32, 48)
+    for k in range(base.block):                                              # fp32 products, fp32 adds, in order
+        S = S + PA1[k].unsqueeze(1) * PB1[k].unsqueeze(0)
+    want = (S * (XA1[0].unsqueeze(1) * XB1[0].unsqueeze(0))).to(torch.bfloat16).float()
+    check("bf16_tiles on one block == the fp32 block sum rounded to bf16 once", torch.equal(bt.matmul(A1, B1), want))
+    y_bt = bt.matmul(A, B)
+    check("bf16_tiles on two blocks differs from both exact and hardware",
+          not torch.equal(y_bt, ex.matmul(A, B)) and not torch.equal(y_bt, y_scheme))
+    check("Scheme names say which reducer ran", (s.name, ex.name, bt.name) == ("baseline", "baseline/exact", "baseline/bf16_tiles"))
+    try:
+        scheme.scheme(base, reduce="fp32")
+        check("an unknown reducer is refused", False)
+    except RecipeError as exc:
+        check("an unknown reducer is refused", "fp32" in str(exc))
 
     from compiler.lower import lower
     from kernels.registry import build
@@ -137,6 +170,9 @@ def main() -> int:
     check("key changes with the operand rounding", k0 != W.key("tinyllama", base, rounding_mode="ties_away"))
     check("key changes with the scale floor", k0 != W.key("tinyllama", base, scale_floor=1e-38))
     check("key changes with nsamples", k0 != W.key("tinyllama", base, nsamples=4))
+    check("key changes with the reducer", k0 != W.key("tinyllama", base, reduce="exact") != W.key("tinyllama", base, reduce="bf16_tiles"))
+    check("the default reducer leaves every existing key as it was", k0 == W.key("tinyllama", base, reduce="hardware")
+          and "reduce" not in W._settings(w, base, dtype="fp8_e4m3", rounding_mode="rne", scale_floor=2.0 ** -23))
     check("bf16 key does not depend on the recipe", W.key("tinyllama", None) == W.key("tinyllama", None, rounding_mode="ties_away"))
     st = W._settings(w, base, dtype="fp8_e4m3", rounding_mode="rne", scale_floor=2.0 ** -23)
     check("key includes the mxq commit", models.mxq_commit() and st["mxq_commit"] == models.mxq_commit())
@@ -162,6 +198,7 @@ def main() -> int:
     check("line names the number, the baseline, the delta and [cached]",
           ln.startswith("PPL") and "7.3438" in ln and "7.1885" in ln and "+0.1554" in ln and "[cached]" in ln, ln)
     check("line flags a codebook format", "codebook not modelled" in W.line({**fake, "codebook": "not modelled"}))
+    check("line names a non-default reducer", "reduce exact" in W.line({**fake, "reduce": "exact"}) and "reduce" not in ln)
 
     print("\n[6] the standing numbers (tests/oracle/accuracy_baseline.json) ------------------")
     import json

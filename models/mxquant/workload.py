@@ -63,7 +63,8 @@ def environment() -> dict:
     return {"torch": torch.__version__, "transformers": transformers.__version__}
 
 
-def _settings(w: _workloads.Workload, recipe, *, dtype: str, rounding_mode: str, scale_floor: float) -> dict:
+def _settings(w: _workloads.Workload, recipe, *, dtype: str, rounding_mode: str, scale_floor: float,
+              reduce: str = "hardware") -> dict:
     """Everything the number depends on. The cache key hashes this; the record carries it.
 
     ``compiled`` is not in it: torch.compile changes the speed, not the bits (mxq tests that).
@@ -75,15 +76,17 @@ def _settings(w: _workloads.Workload, recipe, *, dtype: str, rounding_mode: str,
                  rules=w.rules, rounding_mode=rounding_mode, scale_floor=float(scale_floor))
         if _scheme.is_codebook(dtype):
             d["codebook"] = "not modelled"
+        if reduce != "hardware":            # the default leaves every existing key as it was
+            d["reduce"] = reduce
     return d
 
 
 def key(workload, recipe, *, dtype: str | None = None, rounding_mode: str = _scheme.ROUNDING,
-        scale_floor: float | None = None, **overrides) -> str:
+        scale_floor: float | None = None, reduce: str = "hardware", **overrides) -> str:
     """The cache key of one measurement; ``recipe=None`` is the bf16 model."""
     w = _workloads.build(workload, **overrides)
     floor = _scheme.scale_floor_default() if scale_floor is None else float(scale_floor)
-    s = _settings(w, recipe, dtype=_dtype(recipe, dtype), rounding_mode=rounding_mode, scale_floor=floor)
+    s = _settings(w, recipe, dtype=_dtype(recipe, dtype), rounding_mode=rounding_mode, scale_floor=floor, reduce=reduce)
     return hashlib.sha256(json.dumps(s, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -92,24 +95,25 @@ def _dtype(recipe, dtype: str | None) -> str:
 
 
 def evaluate(workload, recipe, *, dtype: str | None = None, gpus: str | None = None,
-             rounding_mode: str = _scheme.ROUNDING, scale_floor: float | None = None, compiled: bool = True,
-             results_dir: Path = RESULTS, force: bool = False, tel=None, **overrides) -> dict:
+             rounding_mode: str = _scheme.ROUNDING, scale_floor: float | None = None, reduce: str = "hardware",
+             compiled: bool = True, results_dir: Path = RESULTS, force: bool = False, tel=None, **overrides) -> dict:
     """Perplexity of the workload on the recipe machine, and of the bf16 model, both cached.
 
     ``workload`` is a registered name or a :class:`workloads.Workload`; ``overrides`` replace its fields
-    (``nsamples=4``, ``model_id=...``). ``dtype`` is the operand format (default: the recipe's). Raises when it
-    cannot run."""
+    (``nsamples=4``, ``model_id=...``). ``dtype`` is the operand format (default: the recipe's). ``reduce``
+    is how the codes are multiplied (``config.scheme.REDUCERS``; "exact" and "bf16_tiles" are the ablations
+    that split the recipe's cost into format, cross-block rounding and the array). Raises when it cannot run."""
     w = _workloads.build(workload, **overrides)
     dtype = _dtype(recipe, dtype)
-    _scheme.scheme(recipe, dtype=dtype, rounding_mode=rounding_mode, scale_floor=scale_floor)   # refuse before any GPU work
+    _scheme.scheme(recipe, dtype=dtype, rounding_mode=rounding_mode, scale_floor=scale_floor, reduce=reduce)   # refuse before any GPU work
     if w.nsamples < 1:
         raise ValueError(f"nsamples must be at least 1, got {w.nsamples}")
     ok, why = available()
     if not ok:
         raise RuntimeError(why)
     floor = _scheme.scale_floor_default() if scale_floor is None else float(scale_floor)
-    common = dict(dtype=dtype, rounding_mode=rounding_mode, scale_floor=floor, gpus=gpus, compiled=compiled,
-                  results_dir=results_dir, force=force, tel=tel)
+    common = dict(dtype=dtype, rounding_mode=rounding_mode, scale_floor=floor, reduce=reduce, gpus=gpus,
+                  compiled=compiled, results_dir=results_dir, force=force, tel=tel)
     q = _measure(w, recipe, **common)
     b = _measure(w, None, **common)
     return {
@@ -119,7 +123,7 @@ def evaluate(workload, recipe, *, dtype: str | None = None, gpus: str | None = N
         "rules": w.rules,
         "recipe": recipe.name, "build_id": recipe.build_id(), "dtype": dtype, "format": _scheme.mxq_format(dtype),
         "codebook": "not modelled" if _scheme.is_codebook(dtype) else None,
-        "rounding_mode": rounding_mode, "scale_floor": floor, "compiled": compiled,
+        "rounding_mode": rounding_mode, "scale_floor": floor, "reduce": reduce, "compiled": compiled,
         "scheme": q["scheme"],
         "layers_quantized": sum(1 for row in q["layers"] if row[4]), "layers_total": len(q["layers"]),
         "seconds": q["seconds"], "gpus": gpus, "mxq_commit": q["mxq_commit"], **environment(),
@@ -131,6 +135,8 @@ def evaluate(workload, recipe, *, dtype: str | None = None, gpus: str | None = N
 def line(m: dict) -> str:
     """The PPL line."""
     note = "  [codebook not modelled]" if m.get("codebook") else ""
+    if m.get("reduce", "hardware") != "hardware":
+        note = f"  reduce {m['reduce']}" + note
     return (f"PPL      {m['perplexity']:.4f}   bf16 {m['bf16_perplexity']:.4f}  ({m['delta']:+.4f})   "
             f"{m.get('workload', m['model_id'].rsplit('/', 1)[-1])} {m['dtype'] if m.get('dtype') else ''}  "
             f"{m['nsamples']}x{m['seqlen']}   rules {m['rules']}   "
@@ -138,19 +144,19 @@ def line(m: dict) -> str:
 
 
 def dry_run(workload, recipe, *, dtype: str | None = None, rounding_mode: str = _scheme.ROUNDING,
-            scale_floor: float | None = None, **overrides) -> int:
+            scale_floor: float | None = None, reduce: str = "hardware", **overrides) -> int:
     """Print which layer gets the recipe's Scheme (loads the model, patches nothing, runs no sample)."""
     w = _workloads.build(workload, **overrides)
     dtype = _dtype(recipe, dtype)
-    _scheme.scheme(recipe, dtype=dtype, rounding_mode=rounding_mode, scale_floor=scale_floor)
+    _scheme.scheme(recipe, dtype=dtype, rounding_mode=rounding_mode, scale_floor=scale_floor, reduce=reduce)
     cmd = _worker_cmd(w, recipe, results_dir=RESULTS, dtype=dtype, rounding_mode=rounding_mode,
                       scale_floor=_scheme.scale_floor_default() if scale_floor is None else float(scale_floor),
-                      compiled=False) + ["--dry-run"]
+                      reduce=reduce, compiled=False) + ["--dry-run"]
     return subprocess.run(cmd, cwd=REPO).returncode
 
 
 def _worker_cmd(w: _workloads.Workload, recipe, *, results_dir: Path, dtype: str, rounding_mode: str,
-                scale_floor: float, compiled: bool) -> list[str]:
+                scale_floor: float, reduce: str, compiled: bool) -> list[str]:
     if recipe is None:
         rpath = "none"
     else:                                   # the worker re-reads the recipe: a Scheme holds partials, not JSON
@@ -163,18 +169,20 @@ def _worker_cmd(w: _workloads.Workload, recipe, *, results_dir: Path, dtype: str
     cmd = [sys.executable, "-m", "models.mxquant._worker", "--recipe", rpath, "--dtype", dtype, "--rules", w.rules,
            "--rounding-mode", rounding_mode, "--scale-floor", repr(scale_floor),
            "--model-id", w.model_id, "--seqlen", str(w.seqlen), "--nsamples", str(w.nsamples), "--seed", str(w.seed)]
+    if reduce != "hardware":
+        cmd += ["--reduce", reduce]
     if not compiled:
         cmd.append("--no-compiled")
     return cmd
 
 
-def _measure(w: _workloads.Workload, recipe, *, dtype: str, rounding_mode: str, scale_floor: float,
+def _measure(w: _workloads.Workload, recipe, *, dtype: str, rounding_mode: str, scale_floor: float, reduce: str,
              gpus: str | None, compiled: bool, results_dir: Path, force: bool, tel) -> dict:
     """One perplexity: from the cache, or measured by one worker per GPU and merged in sample order."""
-    settings = _settings(w, recipe, dtype=dtype, rounding_mode=rounding_mode, scale_floor=scale_floor)
+    settings = _settings(w, recipe, dtype=dtype, rounding_mode=rounding_mode, scale_floor=scale_floor, reduce=reduce)
     k = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:16]
     path = results_dir / f"{k}.json"
-    what = "bf16 model" if recipe is None else f"{recipe.name}/{dtype} ({w.rules})"
+    what = "bf16 model" if recipe is None else f"{recipe.name}/{dtype} ({w.rules}{'' if reduce == 'hardware' else ', ' + reduce})"
     if path.exists() and not force:
         rec = json.loads(path.read_text())
         if tel:
@@ -183,7 +191,7 @@ def _measure(w: _workloads.Workload, recipe, *, dtype: str, rounding_mode: str, 
 
     results_dir.mkdir(parents=True, exist_ok=True)
     base = _worker_cmd(w, recipe, results_dir=results_dir, dtype=dtype, rounding_mode=rounding_mode,
-                       scale_floor=scale_floor, compiled=compiled)
+                       scale_floor=scale_floor, reduce=reduce, compiled=compiled)
     devices = [g.strip() for g in gpus.split(",") if g.strip()] if gpus else [None]
     bounds = [round(i * w.nsamples / len(devices)) for i in range(len(devices) + 1)]
     log = results_dir / f"{k}.log"
