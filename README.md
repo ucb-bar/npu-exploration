@@ -206,6 +206,34 @@ Less common:
 
 Run everything with `.venv/bin/python` from the repo root after `source scripts/env.sh`.
 
+## Which model reads which recipe field
+
+`--hw` picks a hardware recipe (`config/hardware/`) and `--run` a run recipe (`config/run/`); fields
+of the run recipe are written `run.*` below. Every field and its meaning is in
+[`config/README.md`](config/README.md).
+
+| field | mxquant | spike | ppa | perf | emitters |
+|---|---|---|---|---|---|
+| mesh size | window | DIM | cols | rows, cols | tile plan |
+| product precision | yes | yes | yes | | |
+| accumulator ladder | yes | yes | yes | | |
+| `types.prodFloor` | flush | | | | |
+| `mx.scaleSize`, `scaleSizeOut` | block | GROUP, GROUP_OUT | | | |
+| `mx.enable_lut` | refused | | | lut | |
+| `scratchpad` | | | | | bank_num, bank_rows |
+| `implementation` | | | clock, util | clock | |
+| `run.operand_fmt` | format | | stim | act, wei | wire format |
+| `run.rounding`, `scale_floor` | quantizer | | | | |
+| `run.reduce` | reducer | | | | |
+| `run.fp32_tol` | | | | | |
+| `run.allow_lossy_chain` | | | | | lowering |
+
+`run.fp32_tol` is read by the grading step, not by a model: it is the pass threshold on the error
+against fp32. `array.tileRows/tileColumns` and the `accumulator` widths are in `build_id` but no
+Python code reads them. The kernel path accepts only a 16x16 mesh, 32-element blocks, a 4x4096
+scratchpad, `rne`, the 2^-23 floor and `reduce: hardware`; `config.recipe.check` refuses anything
+else before any work, and the perplexity path runs it.
+
 ## Where things are
 
 ```
