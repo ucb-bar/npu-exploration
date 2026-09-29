@@ -43,7 +43,7 @@ def main() -> int:
     ap.add_argument("--rounding-mode", default=scheme.ROUNDING, help="operand rounding: rne (hardware) | ties_away")
     ap.add_argument("--scale-floor", type=float, default=None, help="block-max floor (default 2^-23, the hardware's)")
     ap.add_argument("--reduce", default="hardware", choices=scheme.REDUCERS,
-                    help="how the codes are multiplied: the recipe's array (default), mxq's exact product, or exact "
+                    help="how the codes are multiplied: the recipe's array (default), mxq's exact product, or fp32 "
                          "inside each block with the hardware's bf16 step across blocks")
     ap.add_argument("--no-compiled", action="store_true", help="skip torch.compile (5-7x slower, same bits)")
     ap.add_argument("--force", action="store_true", help="measure again even if cached")
@@ -63,6 +63,15 @@ def main() -> int:
     tel = Telemetry()
     try:
         if a.config == "none":
+            recipe_only = [f for f, v in (("--dtype", a.dtype), ("--rules", a.rules), ("--scale-floor", a.scale_floor)) if v is not None]
+            recipe_only += [f for f, on in (("--reduce", a.reduce != "hardware"), ("--rounding-mode", a.rounding_mode != scheme.ROUNDING),
+                                            ("--no-compiled", a.no_compiled)) if on]
+            if recipe_only:
+                tel.log("error", f"--config none is the bf16 model alone; {' '.join(recipe_only)} need a recipe")
+                return 2
+            if a.dry_run:
+                print("no recipe: the bf16 model, nothing patched")
+                return 0
             m = workload.bf16(a.workload, gpus=a.gpus, results_dir=a.results_dir, force=a.force, tel=tel, **overrides)
             if a.json:
                 import json

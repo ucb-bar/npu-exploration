@@ -78,6 +78,8 @@ def _settings(w: _workloads.Workload, recipe, *, dtype: str, rounding_mode: str,
             d["codebook"] = "not modelled"
         if reduce != "hardware":            # the default leaves every existing key as it was
             d["reduce"] = reduce
+        if os.environ.get("MXG_PROD_FLOOR") == "none":     # the A/B switch in config.scheme.mxgemmini changes the bits
+            d["prod_floor"] = "none"
     return d
 
 
@@ -106,8 +108,7 @@ def evaluate(workload, recipe, *, dtype: str | None = None, gpus: str | None = N
     w = _workloads.build(workload, **overrides)
     dtype = _dtype(recipe, dtype)
     _scheme.scheme(recipe, dtype=dtype, rounding_mode=rounding_mode, scale_floor=scale_floor, reduce=reduce)   # refuse before any GPU work
-    if w.nsamples < 0:
-        raise ValueError(f"nsamples must be 0 (the whole split) or positive, got {w.nsamples}")
+    _check(w)
     ok, why = available()
     if not ok:
         raise RuntimeError(why)
@@ -148,6 +149,7 @@ def dry_run(workload, recipe, *, dtype: str | None = None, rounding_mode: str = 
             scale_floor: float | None = None, reduce: str = "hardware", **overrides) -> int:
     """Print which layer gets the recipe's Scheme (loads the model, patches nothing, runs no sample)."""
     w = _workloads.build(workload, **overrides)
+    _check(w)
     dtype = _dtype(recipe, dtype)
     _scheme.scheme(recipe, dtype=dtype, rounding_mode=rounding_mode, scale_floor=scale_floor, reduce=reduce)
     cmd = _worker_cmd(w, recipe, results_dir=RESULTS, dtype=dtype, rounding_mode=rounding_mode,
@@ -178,6 +180,15 @@ def _worker_cmd(w: _workloads.Workload, recipe, *, results_dir: Path, dtype: str
     return cmd
 
 
+def _check(w: _workloads.Workload) -> None:
+    """Refuse a workload no worker could run, before any GPU work or subprocess."""
+    from models.mxquant import rules
+    if w.nsamples < 0:
+        raise ValueError(f"nsamples must be 0 (the whole split) or positive, got {w.nsamples}")
+    if w.rules not in rules.NAMES:
+        raise ValueError(f"unknown rule list {w.rules!r}; choose from {', '.join(rules.NAMES)}")
+
+
 def _count(w: _workloads.Workload) -> int:
     """How many samples ``nsamples=0`` means: the loader's answer (tokenizer + dataset, CPU, no CUDA)."""
     from experiments.llm_ppl import load_samples
@@ -188,6 +199,7 @@ def bf16(workload, *, gpus: str | None = None, results_dir: Path = RESULTS, forc
          **overrides) -> dict:
     """Perplexity of the unpatched bf16 model alone (what ``evaluate`` measures beside every recipe)."""
     w = _workloads.build(workload, **overrides)
+    _check(w)
     ok, why = available()
     if not ok:
         raise RuntimeError(why)
