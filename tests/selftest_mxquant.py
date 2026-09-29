@@ -60,14 +60,14 @@ def main() -> int:
         return 0
     from grade import pipeline
     pipeline._wire_paths(REPO)
-    from config.recipe import load
+    from config.recipe import load_hardware
     from kernels.registry import build
     from models import mxquant
     from rtl_exact.mxmesh import fp8 as M8
     from compiler.operands import quantize_operand, wire_to_px
     from config import scheme
 
-    recipes = {n: load(REPO / "config" / "recipes" / f"{n}.json") for n in
+    recipes = {n: load_hardware(n) for n in
                ("baseline", "flat_acc4", "wide_acc", "narrow_prod")}
     base = recipes["baseline"]
 

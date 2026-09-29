@@ -1,12 +1,12 @@
 """PyTorch kernel -> ELF for MX-Gemmini. Compile mode: no spike run, no grade.
 
-One command turns a kernel and a hardware recipe into a directory the RTL team can run as is:
+One command turns a kernel, a hardware recipe and a run recipe into a directory the RTL team can run as is:
 
     source scripts/env.sh
     .venv/bin/python compile_kernel.py --list
     .venv/bin/python compile_kernel.py --kernel mlp3                            # out/compile/mlp3/spike/
     .venv/bin/python compile_kernel.py --kernel attention --target mx_rocket    # the RTL build
-    .venv/bin/python compile_kernel.py --kernel linear --config wide_acc --dtype fp4_e2m1 --out /tmp/lin
+    .venv/bin/python compile_kernel.py --kernel linear --hw wide_acc --run fp4_e2m1 --out /tmp/lin
     .venv/bin/python compile_kernel.py --module tests/fixtures/modules.py:Attn --m 64 --k 64
     .venv/bin/python compile_kernel.py --module my_model.py:Block --input x.npy      # a real input
 
@@ -46,37 +46,37 @@ if str(REPO) not in sys.path:
 # built without merlin, so the process refuses to load it rather than depending on the environment.
 sys.modules.setdefault("merlin", None)
 
-from compiler.lower import DEFAULT_DTYPE, lower, refuse_graph_dtype, wire_paths  # noqa: E402
+from compiler.lower import lower, refuse_graph_dtype, wire_paths  # noqa: E402
 
 TARGETS = ("spike", "mx_rocket")
 
 
-def compile(spec, recipe, *, dtype: str = DEFAULT_DTYPE, target: str = "spike", out: Path,
-            allow_lossy_chain: bool = False, tel=None) -> dict:
-    """Lower ``spec`` on ``recipe``'s machine, build the ELF into ``out``, write the expected bits
-    and the manifest. Returns the manifest. Raises ``ValueError`` for anything refused."""
+def compile(spec, recipe, run=None, *, target: str = "spike", out: Path, tel=None) -> dict:
+    """Lower ``spec`` on the hardware recipe ``recipe`` driven by the run recipe ``run`` (default
+    config/run/default.json), build the ELF into ``out``, write the expected bits and the manifest.
+    Returns the manifest. Raises ``ValueError`` for anything refused."""
     from grade.telemetry import Telemetry
     tel = tel or Telemetry()
     wire_paths()
     import numpy as np
     import backend as mx
-    from backend import mxgemm_emit
-    from config.recipe import RecipeError
+    from config.recipe import RecipeError, check, load_run
     from models import mxquant, mxq_commit
 
     if target not in TARGETS:
         raise ValueError(f"unknown target {target!r}; choose from {', '.join(TARGETS)}")
-    if recipe.dim != mxgemm_emit.DEFAULT_GEOMETRY["dim"]:
-        raise ValueError(f"recipe dim={recipe.dim} but the backend plans for "
-                         f"{mxgemm_emit.DEFAULT_GEOMETRY['dim']} (mxgemm_emit.DEFAULT_GEOMETRY)")
+    run = run or load_run("default")
+    check(recipe, run, "kernel")
+    dtype = run.operand_fmt
     tel.log("recipe", f"{recipe.describe()}   build_id={recipe.build_id()}")
+    tel.log("run", f"{run.describe()}   run_id={run.run_id()}")
     tel.log("kernel", f"{spec.describe()}   ({len(spec.stages)} stage"
                       f"{'s' if len(spec.stages) != 1 else ''})")
     errs = spec.validate(dim=recipe.dim, block=recipe.block)
     if errs:
         raise ValueError(f"{spec.name}: {len(errs)} shape violation(s):\n  " + "\n  ".join(errs))
 
-    low = lower(spec, dtype, allow_lossy_chain=allow_lossy_chain,
+    low = lower(spec, dtype, allow_lossy_chain=run.allow_lossy_chain,
                 warn=lambda m: tel.log("warning", m))
     if low.kind == "per_stage":
         host = [st.name for st in spec.stages if not st.on_mesh and not st.emittable]
@@ -86,6 +86,7 @@ def compile(spec, recipe, *, dtype: str = DEFAULT_DTYPE, target: str = "spike", 
             "ELF per matmul, each fed by the previous run. run_kernel.py drives that path.")
     refuse_graph_dtype(low, spec.name, dtype)
     cb = low.cb
+    cb["params"] = recipe.geometry()                 # the emitters' scratchpad plan, from the recipe
     if low.kind == "graph":
         n_mesh = sum(r["where"] == "mesh" for r in low.stages)
         tel.log("lower", f"{len(low.stages)} step(s) -> ONE command buffer via the GRAPH path "
@@ -142,6 +143,7 @@ def compile(spec, recipe, *, dtype: str = DEFAULT_DTYPE, target: str = "spike", 
         "edges": {k: v["via"] for k, v in low.edges.items()},
         "recipe": {"name": recipe.name, "build_id": recipe.build_id(), "path": str(recipe.path),
                    "hardware": recipe.hardware()},
+        "run": {"name": run.name, "run_id": run.run_id(), "path": str(run.path), **run.fields()},
         "repo_head": _git_head(REPO), "mxq_head": mxq_commit(), "gcc": str(gcc),
         "elf": {"path": str(elf), "bytes": elf.stat().st_size, "sha256": _sha256(elf)},
         "main_c_sha256": _sha256(main_c),
@@ -211,8 +213,7 @@ def load_module(ref: str, *, m: int, k: int, seed: int, recipe, input_npy: Path 
 
 
 def main(argv: list[str] | None = None) -> int:
-    from config.recipe import RecipeError, list_recipes
-    from config.recipe import load as load_recipe
+    from config.recipe import RecipeError, list_hardware, list_runs, load_hardware, load_run, removed_flag
     from grade.telemetry import Telemetry
     from kernels.registry import build, list_kernels
 
@@ -226,28 +227,34 @@ def main(argv: list[str] | None = None) -> int:
                           "(--h/--n do not apply: the module fixes its own widths)")
     ap.add_argument("--input", type=Path, default=None,
                     help="with --module: a [M][K] float .npy to use as the input instead of randn")
-    ap.add_argument("--config", default="baseline",
-                    help="hardware recipe: a name in config/recipes/ or a path to a .json")
-    ap.add_argument("--dtype", default=DEFAULT_DTYPE, help="MX operand format (compiler/formats.py)")
+    ap.add_argument("--hw", "--config", dest="hw", default="baseline",
+                    help="hardware recipe: a name in config/hardware/ or a path to a .json")
+    ap.add_argument("--run", default="default",
+                    help="run recipe: a name in config/run/ or a path to a .json (operand format, tolerances)")
     ap.add_argument("--m", type=int, default=64, help="batch rows")
     ap.add_argument("--k", type=int, default=64, help="in_features")
     ap.add_argument("--h", type=int, default=64, help="hidden width (chained kernels)")
     ap.add_argument("--n", type=int, default=64, help="out_features")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--allow-lossy-chain", action="store_true",
-                    help="chain a format compiler/formats.chain_refusal would refuse")
     ap.add_argument("--target", choices=TARGETS, default="spike",
                     help="build define: spike (-DSPIKE_SIM) or mx_rocket (-DMX_ROCKET, the RTL build)")
     ap.add_argument("--out", type=Path, default=None,
                     help="output directory (default out/compile/<kernel>/<target>)")
+    gone = removed_flag(sys.argv[1:] if argv is None else argv)
+    if gone:
+        print(f"[error   ] {gone}", file=sys.stderr)
+        return 2
     a = ap.parse_args(argv)
 
     if a.list:
         print("kernels:")
         for name, desc in list_kernels().items():
             print(f"  {name:10s} {desc}")
-        print("\nhardware recipes (--config):")
-        for name, desc in list_recipes().items():
+        print("\nhardware recipes (--hw):")
+        for name, desc in list_hardware().items():
+            print(f"  {name:14s} {desc}")
+        print("\nrun recipes (--run):")
+        for name, desc in list_runs().items():
             print(f"  {name:14s} {desc}")
         print("\ntargets (--target): " + ", ".join(TARGETS))
         return 0
@@ -256,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
     wire_paths()
     from backend import MxEmitError, MxRunnerError
     try:
-        recipe = load_recipe(a.config)
+        recipe, run = load_hardware(a.hw), load_run(a.run)
         if a.input is not None and a.module is None:
             raise ValueError("--input applies to --module only; registry kernels make their own input")
         if a.module:
@@ -264,8 +271,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             spec = build(a.kernel or "linear", m=a.m, k=a.k, h=a.h, n=a.n, seed=a.seed)
         out = a.out or REPO / "out" / "compile" / spec.name / a.target
-        compile(spec, recipe, dtype=a.dtype, target=a.target, out=out,
-                allow_lossy_chain=a.allow_lossy_chain, tel=tel)
+        compile(spec, recipe, run, target=a.target, out=out, tel=tel)
     except RecipeError as exc:
         tel.log("error", f"bad recipe: {exc}")
         return 2

@@ -32,13 +32,14 @@ def main() -> int:
     import torch
     from torch import nn
     from config import scheme
-    from config.recipe import RecipeError, load
+    from config.recipe import RecipeError, Run, load_hardware, load_run
     from models.mxquant import kernel as K
     from models.mxquant import rules, workload as W, workloads
     from mxq.nn import MXLinear, patch
 
-    base = load("baseline")
-    wide = load("wide_acc")
+    base = load_hardware("baseline")
+    wide = load_hardware("wide_acc")
+    dflt = load_run("default")
 
     print("\n[1] rule lists on a toy model -------------------------------------------")
 
@@ -64,7 +65,7 @@ def main() -> int:
             self.lm_head = nn.Linear(64, 1000)
 
     toy = Toy()
-    s = scheme.scheme(base)                                   # uncompiled: patch's smoke matmul runs on the CPU
+    s = scheme.scheme(base, dflt)                                   # uncompiled: patch's smoke matmul runs on the CPU
     h = patch(toy, rules.build("mxquant_layers", s), dry_run=True)
     got = {name: sch for name, _, _, _, sch in h.table}
     attn = [n for n in got if ".self_attn." in n]
@@ -93,25 +94,25 @@ def main() -> int:
     y_scheme = s.matmul(A, B)
     arith, sched, window = scheme.datapath(base)
     from mxq import matmul
-    PA, XA = scheme.quantizer(base)(A)
-    PB, XB = scheme.quantizer(base)(B)
+    PA, XA = scheme.quantizer(base, dflt)(A)
+    PB, XB = scheme.quantizer(base, dflt)(B)
     y_direct = matmul.systolic(PA, XA, PB, XB, arith, sched, window=window, block_size=base.block)
     check("Scheme.matmul == quantizer + datapath from the same recipe", torch.equal(y_scheme, y_direct))
-    check("wide_acc gives different bits from baseline", not torch.equal(y_scheme, scheme.scheme(wide).matmul(A, B)))
+    check("wide_acc gives different bits from baseline", not torch.equal(y_scheme, scheme.scheme(wide, dflt).matmul(A, B)))
 
     print("\n[2b] the reducer choice: same quantizers, a different multiply ------------------")
     from mxq import block
-    ex = scheme.scheme(base, reduce="exact")
+    ex = scheme.scheme(base, load_run("exact"))
     Aq = block.dequantize(PA, XA, axis=0, block_size=base.block)
     Bq = block.dequantize(PB, XB, axis=0, block_size=base.block)
     check("exact == the float64 product of the dequantized operands",
           torch.equal(ex.matmul(A, B), (Aq.double().t() @ Bq.double()).float()))
     check("exact shares the quantizers with hardware", ex.a is not None and ex.a.keywords == s.a.keywords)
     check("exact differs from the hardware array", not torch.equal(ex.matmul(A, B), y_scheme))
-    bt = scheme.scheme(base, reduce="bf16_tiles")
+    bt = scheme.scheme(base, load_run("bf16_tiles"))
     A1, B1 = torch.randn(base.block, 32), torch.randn(base.block, 48)         # one block: no cross-block step
-    PA1, XA1 = scheme.quantizer(base)(A1)
-    PB1, XB1 = scheme.quantizer(base)(B1)
+    PA1, XA1 = scheme.quantizer(base, dflt)(A1)
+    PB1, XB1 = scheme.quantizer(base, dflt)(B1)
     S = torch.zeros(32, 48)
     for k in range(base.block):                                              # fp32 products, fp32 adds, in order
         S = S + PA1[k].unsqueeze(1) * PB1[k].unsqueeze(0)
@@ -122,7 +123,7 @@ def main() -> int:
           not torch.equal(y_bt, ex.matmul(A, B)) and not torch.equal(y_bt, y_scheme))
     check("Scheme names say which reducer ran", (s.name, ex.name, bt.name) == ("baseline", "baseline/exact", "baseline/bf16_tiles"))
     try:
-        scheme.scheme(base, reduce="fp32")
+        scheme.scheme(base, Run(reduce="fp32"))
         check("an unknown reducer is refused", False)
     except RecipeError as exc:
         check("an unknown reducer is refused", "fp32" in str(exc))
@@ -135,7 +136,7 @@ def main() -> int:
         lin.weight.data = weight_kn.t().contiguous().float()
         return MXLinear(lin, sch)
     for rname, r in (("baseline", base), ("wide_acc", wide)):
-        sch = scheme.scheme(r)
+        sch = scheme.scheme(r, dflt)
         spec = build("linear")
         y_bits = K.run(spec, r, dtype="fp8_e4m3", edges=lower(spec, "fp8_e4m3").edges, shipped=False)["y"]
         y_layer = mxlinear(spec.stages[0].weight, sch)(spec.x.float())
@@ -162,35 +163,36 @@ def main() -> int:
         check("an unknown workload is refused", False)
     except ValueError as exc:
         check("an unknown workload is refused", "nope" in str(exc))
-    k0 = W.key("tinyllama", base)
-    check("key is stable", k0 == W.key("tinyllama", base) and len(k0) == 16, k0)
-    check("key changes with the recipe", k0 != W.key("tinyllama", wide))
-    check("key changes with the operand format", k0 != W.key("tinyllama", base, dtype="fp4_e2m1"))
-    check("key is the same for the recipe's own format spelled out", k0 == W.key("tinyllama", base, dtype="fp8_e4m3"))
-    check("key changes with the operand rounding", k0 != W.key("tinyllama", base, rounding_mode="ties_away"))
-    check("key changes with the scale floor", k0 != W.key("tinyllama", base, scale_floor=1e-38))
+    k0 = W.key("tinyllama", base, dflt)
+    check("key is stable", k0 == W.key("tinyllama", base, dflt) and len(k0) == 16, k0)
+    check("no run recipe means the default one", k0 == W.key("tinyllama", base))
+    check("key changes with the recipe", k0 != W.key("tinyllama", wide, dflt))
+    check("key changes with the operand format", k0 != W.key("tinyllama", base, load_run("fp4_e2m1")))
+    check("key ignores the run recipe's name and fp32_tol (the kernel path's)",
+          k0 == W.key("tinyllama", base, Run(name="other", fp32_tol=0.5, allow_lossy_chain=True)))
+    check("key changes with the operand rounding", k0 != W.key("tinyllama", base, Run(rounding="ties_away")))
+    check("key changes with the scale floor", k0 != W.key("tinyllama", base, Run(scale_floor=1e-38)))
     check("key changes with nsamples", k0 != W.key("tinyllama", base, nsamples=4))
     check("key changes for the whole split and for samples in order",
           len({k0, W.key("tinyllama", base, nsamples=0), W.key("tinyllama", base, seed=None), W.key("tinyllama", base, nsamples=0, seed=None)}) == 4)
     check("nsamples=0 and seed=None are accepted overrides",
           workloads.build("tinyllama", nsamples=0, seed=None).seed is None and workloads.build("tinyllama", nsamples=0).nsamples == 0)
-    check("key changes with the reducer", k0 != W.key("tinyllama", base, reduce="exact") != W.key("tinyllama", base, reduce="bf16_tiles"))
-    check("the default reducer leaves every existing key as it was", k0 == W.key("tinyllama", base, reduce="hardware")
-          and "reduce" not in W._settings(w, base, dtype="fp8_e4m3", rounding_mode="rne", scale_floor=2.0 ** -23))
-    check("bf16 key does not depend on the recipe", W.key("tinyllama", None) == W.key("tinyllama", None, rounding_mode="ties_away"))
-    st = W._settings(w, base, dtype="fp8_e4m3", rounding_mode="rne", scale_floor=2.0 ** -23)
+    check("key changes with the reducer", k0 != W.key("tinyllama", base, load_run("exact")) != W.key("tinyllama", base, load_run("bf16_tiles")))
+    check("the default reducer adds no key field", "reduce" not in W._settings(w, base, dflt))
+    check("bf16 key does not depend on either recipe", W.key("tinyllama", None) == W.key("tinyllama", None, Run(rounding="ties_away")))
+    st = W._settings(w, base, dflt)
     check("key includes the mxq commit", models.mxq_commit() and st["mxq_commit"] == models.mxq_commit())
     check("a direct format carries no codebook note", "codebook" not in st)
-    st6 = W._settings(w, base, dtype="fp6_e3m2", rounding_mode="rne", scale_floor=2.0 ** -23)
+    st6 = W._settings(w, base, Run(operand_fmt="fp6_e3m2"))
     check("a codebook format is run on the full grid and says so", st6.get("codebook") == "not modelled" and st6["format"] == "MXFP6_E3M2")
 
     print("\n[4] refusals and availability ---------------------------------------------")
     try:
-        W.evaluate("tinyllama", base, dtype="fp9", results_dir=Path(tempfile.mkdtemp()))
+        W.evaluate("tinyllama", base, Run(operand_fmt="fp9"), results_dir=Path(tempfile.mkdtemp()))
         check("an unknown operand format is refused before any GPU work", False, "no RecipeError")
     except RecipeError as exc:
         check("an unknown operand format is refused before any GPU work", True, str(exc)[:70])
-    check("a codebook format builds a Scheme (full grid)", scheme.scheme(base, dtype="fp6_e3m2").a.keywords["fmt"] == "MXFP6_E3M2")
+    check("a codebook format builds a Scheme (full grid)", scheme.scheme(base, Run(operand_fmt="fp6_e3m2")).a.keywords["fmt"] == "MXFP6_E3M2")
     ok, why = W.available()
     check("available() answers with a reason", isinstance(ok, bool) and isinstance(why, str), why)
 
@@ -216,9 +218,10 @@ def main() -> int:
         if (e["torch"], e["transformers"]) != (env["torch"], env["transformers"]):
             continue
         r = None if e["recipe"] is None else base
-        k = W.key("tinyllama", r, nsamples=oracle["nsamples"], seqlen=oracle["seqlen"], seed=oracle["seed"],
-                  rules=oracle["rules"], rounding_mode=e["rounding_mode"] or scheme.ROUNDING, scale_floor=e["scale_floor"],
-                  reduce=e.get("reduce", "hardware"))
+        run = Run() if r is None else Run(rounding=e["rounding_mode"], scale_floor=e["scale_floor"],
+                                          reduce=e.get("reduce", "hardware"))
+        k = W.key("tinyllama", r, run, nsamples=oracle["nsamples"], seqlen=oracle["seqlen"], seed=oracle["seed"],
+                  rules=oracle["rules"])
         path = W.RESULTS / f"{k}.json"
         if not path.exists():
             print(f"  skip  {e['name']}: not measured in this environment / mxq commit yet ({path.name})")
@@ -228,7 +231,7 @@ def main() -> int:
         check(f"{e['name']} == {e['perplexity']!r}", got == e["perplexity"], f"measured {got!r}")
     if n_checked == 0:
         print(f"  (no cached measurement for torch {env['torch']} / transformers {env['transformers']} / mxq "
-              f"{models.mxq_commit()}; python -m models.mxquant --workload tinyllama --config baseline --gpus 0,1,2,3 produces one)")
+              f"{models.mxq_commit()}; python -m models.mxquant --workload tinyllama --hw baseline --gpus 0,1,2,3 produces one)")
 
     if "--gpu" in sys.argv:
         print("\n[7] one real sample on GPU 0 ---------------------------------------------------")
@@ -236,12 +239,12 @@ def main() -> int:
             check("GPU run", False, why)
         else:
             tmp = Path(tempfile.mkdtemp(prefix="workload_selftest_"))
-            m = W.evaluate("tinyllama", base, nsamples=1, gpus="0", results_dir=tmp)
+            m = W.evaluate("tinyllama", base, dflt, nsamples=1, gpus="0", results_dir=tmp)
             check("one sample measured", m["perplexity"] > 1 and m["bf16_perplexity"] > 1 and not m["cached"], W.line(m))
             check("cache files written", Path(m["path"]).exists() and Path(m["bf16_path"]).exists())
             check("layers counted", m["layers_quantized"] > 0 and m["layers_quantized"] < m["layers_total"],
                   f"{m['layers_quantized']}/{m['layers_total']}")
-            m2 = W.evaluate("tinyllama", base, nsamples=1, gpus="0", results_dir=tmp)
+            m2 = W.evaluate("tinyllama", base, dflt, nsamples=1, gpus="0", results_dir=tmp)
             check("second call is served from the cache with the same number",
                   m2["cached"] and m2["perplexity"] == m["perplexity"], W.line(m2))
     else:

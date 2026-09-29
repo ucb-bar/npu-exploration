@@ -12,7 +12,7 @@ We never edit the submodule. The four sources are copied into
 through the ``MX_LIBGEMMINI`` override the runner already honours
 (``runner.py:84`` -> ``--extlib=``).
 
-    python -m models.spike.build_spike --config flat_acc4
+    python -m models.spike.build_spike --hw flat_acc4
     python -m models.spike.build_spike --list
 
 Cost: about 30 seconds on a miss, zero on a hit.
@@ -279,18 +279,18 @@ def resolve(recipe, *, quiet: bool = True) -> Path | None:
     A recipe whose hardware matches the stock build needs nothing built: the shipped
     model already IS that machine.
     """
-    from config.recipe import load
-    if recipe.build_id() == load("baseline").build_id():
+    from config.recipe import load_hardware
+    if recipe.build_id() == load_hardware("baseline").build_id():
         return None
     return build(recipe, quiet=quiet)
 
 
 def main() -> int:
-    from config.recipe import RECIPES_DIR, RecipeError, load
+    from config.recipe import HARDWARE_DIR, RecipeError, load_hardware
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--config", default=None, help="recipe name or path")
-    ap.add_argument("--all", action="store_true", help="build every recipe in config/recipes/")
+    ap.add_argument("--hw", "--config", dest="hw", default=None, help="hardware recipe name or path")
+    ap.add_argument("--all", action="store_true", help="build every recipe in config/hardware/")
     ap.add_argument("--list", action="store_true", help="show the build cache")
     ap.add_argument("--force", action="store_true", help="rebuild even on a cache hit")
     ap.add_argument("--gxx", default=None, help="host g++ (default: $MX_HOST_GXX, else the toolchain env g++)")
@@ -308,12 +308,12 @@ def main() -> int:
                       f"{', '.join(m['changes'])}")
         return 0
 
-    names = ([p.stem for p in sorted(RECIPES_DIR.glob("*.json"))] if a.all
-             else [a.config or "baseline"])
+    names = ([p.stem for p in sorted(HARDWARE_DIR.glob("*.json"))] if a.all
+             else [a.hw or "baseline"])
     for n in names:
         try:
-            r = load(n)
-            if r.build_id() == load("baseline").build_id():
+            r = load_hardware(n)
+            if r.build_id() == load_hardware("baseline").build_id():
                 print(f"[stock     ] {n}: hardware identical to baseline, no build needed")
                 continue
             build(r, force=a.force, gxx=a.gxx)

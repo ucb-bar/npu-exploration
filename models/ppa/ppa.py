@@ -25,12 +25,20 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 
-#: Defaults matching the model's own tapeout-baseline invocation (ppa/README.md
-#: "Quick start"): --util 0.965 --blocks-variant new --calib new at 2.0 ns.
-DEFAULT_UTIL = 0.965
-DEFAULT_CLOCK_NS = 2.0
+#: The model's calibration, not a recipe knob: it was fitted to one post-synthesis run (tstech16c,
+#: tt0p8v25c) of the 16x16 mesh with --calib new --blocks-variant new --fmtset mxgemmini (ppa/README.md
+#: "Quick start"). Clock and utilization come from the hardware recipe's implementation section.
 CALIBRATED_DIM = 16
 TECH, CORNER = "tstech16c", "tt0p8v25c"
+CALIBRATION = ("--fmtset", "mxgemmini", "--calib", "new", "--blocks-variant", "new")
+
+
+def operand_family(dtype: str) -> str:
+    """A run recipe's operand format -> the models' format family token (fp8 | fp6 | fp4)."""
+    fam = dtype.split("_", 1)[0]
+    if fam not in ("fp8", "fp6", "fp4"):
+        raise PpaError(f"operand format {dtype!r} has no fp8/fp6/fp4 family")
+    return fam
 
 
 class PpaError(RuntimeError):
@@ -58,9 +66,8 @@ def _run_length(pairs) -> str:
     return " ".join(f"{n}x{e},{s}" for n, (e, s) in groups)
 
 
-def ppa_args(recipe, *, util: float = DEFAULT_UTIL,
-             clock_ns: float = DEFAULT_CLOCK_NS) -> list[str]:
-    """Map a recipe onto compose_gemmini's CLI.
+def ppa_args(recipe, dtype: str = "fp8_e4m3") -> list[str]:
+    """Map a hardware recipe and a run's operand format onto compose_gemmini's CLI.
 
     The model speaks (expWidth, sigWidth); the recipe's properties speak
     (e, m = sig-1), so sig = m + 1 here. The acc ladder is run-length encoded
@@ -71,10 +78,9 @@ def ppa_args(recipe, *, util: float = DEFAULT_UTIL,
     return ["--rows", rows,
             "--prod", f"{recipe.prod_e},{recipe.prod_m + 1}",
             "--cols", str(recipe.dim),
-            "--stim", recipe.operand_fmt,
-            "--fmtset", "mxgemmini",
-            "--calib", "new", "--blocks-variant", "new",
-            "--util", str(util), "--clock-ns", str(clock_ns)]
+            "--stim", operand_family(dtype),
+            *CALIBRATION,
+            "--util", str(recipe.utilization), "--clock-ns", str(recipe.clock_ns)]
     # --lut is left at the model's default (fp6): it selects which QuantLut
     # projection the requantizer block was synthesized with, and fp6 is the
     # hardware as built. Revisit when recipes grow a LUT-format field.
@@ -125,11 +131,11 @@ def _workspace_head(root: Path) -> str | None:
         return None
 
 
-def run_ppa(recipe, *, util: float = DEFAULT_UTIL,
-            clock_ns: float = DEFAULT_CLOCK_NS) -> dict:
-    """Area/power/energy for the machine this recipe describes. Raises PpaError."""
+def run_ppa(recipe, dtype: str = "fp8_e4m3") -> dict:
+    """Area/power/energy for the machine this hardware recipe describes, fed ``dtype`` operands.
+    Raises PpaError."""
     root = ppa_root()
-    args = ppa_args(recipe, util=util, clock_ns=clock_ns)
+    args = ppa_args(recipe, dtype)
     cmd = [sys.executable, str(root / "compose_gemmini.py"), *args]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=root)
@@ -142,7 +148,7 @@ def run_ppa(recipe, *, util: float = DEFAULT_UTIL,
         "source": "MxGemmini-workspace/ppa/compose_gemmini.py",
         "args": " ".join(args),
         "tech": TECH, "corner": CORNER,
-        "clock_ns": clock_ns, "util": util,
+        "clock_ns": recipe.clock_ns, "util": recipe.utilization,
         "post_synthesis": True,
         "calibrated_dim": CALIBRATED_DIM,
         "calibrated": recipe.dim == CALIBRATED_DIM,
@@ -161,22 +167,21 @@ def line(ppa: dict) -> str:
 def main() -> int:
     import argparse
     import json as _json
-    from config.recipe import load
-    ap = argparse.ArgumentParser(description="Silicon cost of a recipe (PPA model)")
-    ap.add_argument("--config", default="baseline")
-    ap.add_argument("--util", type=float, default=DEFAULT_UTIL)
-    ap.add_argument("--clock-ns", type=float, default=DEFAULT_CLOCK_NS)
+    from config.recipe import RecipeError, load_hardware, load_run
+    ap = argparse.ArgumentParser(description="Silicon cost of a hardware recipe (PPA model)")
+    ap.add_argument("--hw", "--config", dest="hw", default="baseline", help="hardware recipe name or .json path")
+    ap.add_argument("--run", default="default", help="run recipe name or .json path (the operand format)")
     ap.add_argument("--json", action="store_true", help="machine-readable output only")
     a = ap.parse_args()
     try:
-        res = run_ppa(load(a.config), util=a.util, clock_ns=a.clock_ns)
-    except PpaError as exc:
+        res = run_ppa(load_hardware(a.hw), load_run(a.run).operand_fmt)
+    except (PpaError, RecipeError) as exc:
         print(f"ppa: {exc}", file=sys.stderr)
         return 2
     if a.json:
         print(_json.dumps(res, indent=1))
     else:
-        print(f"{a.config}: {res['area_um2']/1e3:.1f}k um2  {res['power_mw']:.1f} mW  "
+        print(f"{a.hw}: {res['area_um2']/1e3:.1f}k um2  {res['power_mw']:.1f} mW  "
               f"{res['pj_per_op']:.2f} pJ/op  ({res['throughput_gops']:.1f} Gop/s; "
               f"post-syn {TECH} model, calibrated={res['model']['calibrated']})")
         for name, b in res["blocks"].items():

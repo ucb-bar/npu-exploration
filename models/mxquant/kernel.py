@@ -40,6 +40,7 @@ import torch
 
 import models
 from config import scheme as _scheme
+from config.recipe import KERNEL_ROUNDING
 from models.mxquant.block import BLOCK, SCALE_FLOOR
 
 TIER = "mxquant_recipe_exact"
@@ -66,7 +67,9 @@ def available() -> tuple[bool, str]:
 
 
 def run(spec, recipe, *, dtype: str = "fp8_e4m3", edges: dict | None = None, shipped: bool = True) -> dict:
-    """The reference for one KernelSpec on the machine ``recipe`` describes.
+    """The reference for one KernelSpec on the machine ``recipe`` (a hardware recipe) describes, with operands
+    in ``dtype`` (the run recipe's ``operand_fmt``). Rounding and scale floor are the chip's: the kernel path
+    refuses a run recipe that asks for others (``config.recipe.check``).
 
     Returns ``{"y", "stages", "shipped_y", "tier", "model"}``: ``y`` the final output (fp32 values of
     bf16 bits), ``stages`` every intermediate by name, ``shipped_y`` the as-shipped output or None,
@@ -95,7 +98,7 @@ def run(spec, recipe, *, dtype: str = "fp8_e4m3", edges: dict | None = None, shi
             "source": "mxq", "commit": models.mxq_commit(),
             "arith": arith.name, "schedule": [list(s) for s in sched], "window": window,
             "block": recipe.block,
-            "operand_quantizer": (f"mxq.block.mxgemmini {_scheme.ROUNDING} floor=2^-23"
+            "operand_quantizer": (f"mxq.block.mxgemmini {KERNEL_ROUNDING} floor=2^-23"
                                   + (" + compiler/codebook codebooks (wire operands)" if codebook else "")),
             "chain_requantizer": ("compiler/operands device model" if codebook
                                   else "mxq.block.mxgemmini on the bf16 output" + (" via E3M1" if dtype in _REQUANT_VIA else "")),
@@ -184,7 +187,7 @@ def _quantize(V: np.ndarray, fmt: str, axis: int, *, scale_floor: float = SCALE_
     says otherwise (the fp4 requantizer: 2^-126 and ``via=(3, 1)``)."""
     from mxq import block
     return block.mxgemmini.quantize(torch.from_numpy(np.ascontiguousarray(V, np.float32)), fmt, axis=axis,
-                                    block_size=BLOCK, rounding_mode=_scheme.ROUNDING, scale_floor=scale_floor, via=via)
+                                    block_size=BLOCK, rounding_mode=KERNEL_ROUNDING, scale_floor=scale_floor, via=via)
 
 
 def _operands(A: np.ndarray, W: np.ndarray, fmt: str):

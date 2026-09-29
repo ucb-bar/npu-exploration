@@ -283,7 +283,7 @@ doctor() {
     if [ "$bad" = 0 ]; then
         echo "All required checks pass. Next:"
         echo "    source scripts/env.sh${ROOT:+ $ROOT}"
-        echo "    .venv/bin/python run_kernel.py --kernel linear --config baseline"
+        echo "    .venv/bin/python run_kernel.py --kernel linear --hw baseline"
     else
         echo "FAIL above. Re-run 'bash scripts/setup.sh' (idempotent) or the named phase:"
         echo "    bash scripts/setup.sh --phase <merlin|mxq|python|toolchain|spike|gemmini|libgemmini|ppa|mxquant>"

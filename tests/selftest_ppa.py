@@ -20,7 +20,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from models.ppa.ppa import PpaError, ppa_args, ppa_root, run_ppa  # noqa: E402
-from config.recipe import load  # noqa: E402
+from config.recipe import load_hardware as load, parse_hardware  # noqa: E402
 
 CHECKS = []
 
@@ -41,7 +41,15 @@ def main() -> int:
     check("--prod (e, m+1)", got["--prod"] == "4,4", got["--prod"])
     check("--cols = dim", got["--cols"] == "16", got["--cols"])
     check("--stim = operand_fmt", got["--stim"] == "fp8", got["--stim"])
-    check("--util tapeout default", got["--util"] == "0.965", got["--util"])
+    check("--util = implementation.utilization", got["--util"] == "0.965", got["--util"])
+    check("--clock-ns = implementation.clock_ns", got["--clock-ns"] == "2.0", got["--clock-ns"])
+    check("an fp4 run stimulates fp4", dict(zip(*[iter(ppa_args(r, "fp4_e2m1"))] * 2))["--stim"] == "fp4")
+    import copy
+    raw = copy.deepcopy(r.raw)
+    raw["implementation"].update(clock_ns=1.25, utilization=0.8)
+    fast = dict(zip(*[iter(ppa_args(parse_hardware(raw)))] * 2))
+    check("a recipe's own clock and utilization reach the model",
+          (fast["--clock-ns"], fast["--util"]) == ("1.25", "0.8"), f"{fast['--clock-ns']} {fast['--util']}")
 
     w = load("wide_acc")
     wrows = dict(zip(ppa_args(w)[::2], ppa_args(w)[1::2]))["--rows"]

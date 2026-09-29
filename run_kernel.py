@@ -6,26 +6,27 @@ layer and a stitched model. ``--models`` picks which models run on the recipe's 
     source scripts/env.sh
     .venv/bin/python run_kernel.py --list
     .venv/bin/python run_kernel.py --kernel linear                         # default: reference mxquant spike ppa perf
-    .venv/bin/python run_kernel.py --kernel linear --config wide_acc
+    .venv/bin/python run_kernel.py --kernel linear --hw wide_acc
     .venv/bin/python run_kernel.py --kernel linear --m 32 --k 128 --n 96
-    .venv/bin/python run_kernel.py --kernel linear --dtype fp4_e2m1
+    .venv/bin/python run_kernel.py --kernel linear --run fp4_e2m1
     .venv/bin/python run_kernel.py --kernel mlp2 --h 128 --artifacts
     .venv/bin/python run_kernel.py --kernel linear --build-only            # stop at the ELF
     .venv/bin/python run_kernel.py --kernel linear --models mxquant        # the model alone, no spike, seconds
-    .venv/bin/python -m models.mxquant --workload tinyllama --config wide_acc --gpus 0,1,2,3   # perplexity (minutes)
+    .venv/bin/python -m models.mxquant --workload tinyllama --hw wide_acc --gpus 0,1,2,3   # perplexity (minutes)
 
-VERDICT is bit-identity between spike and the mxquant model (models/mxquant), built from the recipe.
+The hardware recipe (--hw, config/hardware/) is the machine; the run recipe (--run, config/run/) the operand
+format and grading tolerance. VERDICT is bit-identity between spike and the mxquant model (models/mxquant).
 The fp32 reference is context: it measures the cost of the MX format, not the correctness of the
 hardware. Without spike there is no verdict; the run prints the model's own numbers and NO VERDICT.
 """
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import models
-from config.recipe import RecipeError, list_recipes
-from config.recipe import load as load_recipe
+from config.recipe import RecipeError, list_hardware, list_runs, load_hardware, load_run, removed_flag
 from grade.pipeline import run
 from grade.telemetry import Telemetry
 from kernels.registry import build, list_kernels
@@ -37,10 +38,12 @@ def main() -> int:
     ap.add_argument("--list", action="store_true",
                     help="list known kernels, hardware recipes and models, then exit")
     ap.add_argument("--kernel", default="linear", help="kernel name (see --list)")
-    ap.add_argument("--config", default="baseline",
-                    help="hardware recipe: a name in config/recipes/ or a path to a .json. "
-                         "Defines the MX-Gemmini the kernel runs on, and is the single "
-                         "definition shared by every model, spike and Verilator")
+    ap.add_argument("--hw", "--config", dest="hw", default="baseline",
+                    help="hardware recipe: a name in config/hardware/ or a path to a .json. "
+                         "Defines the MX-Gemmini the kernel runs on, for every model and spike")
+    ap.add_argument("--run", default="default",
+                    help="run recipe: a name in config/run/ or a path to a .json "
+                         "(operand format, lossy-chain switch, fp32 tolerance)")
     ap.add_argument("--models", default="default",
                     help="which models run: 'default' (%s), 'all' (the same today), or a comma list of "
                          "%s" % (",".join(models.DEFAULT), ", ".join(models.NAMES)))
@@ -49,17 +52,6 @@ def main() -> int:
     ap.add_argument("--h", type=int, default=64, help="hidden width (chained kernels)")
     ap.add_argument("--n", type=int, default=64, help="out_features")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--seam", choices=("weight", "rescale"), default=None,
-                    help="how the requantized intermediate is made safe for the next stage "
-                         "(default: the recipe's software.seam)")
-    ap.add_argument("--dtype", default="fp8_e4m3",
-                    help="MX operand format (see compiler/formats.py; unproven formats are refused)")
-    ap.add_argument("--allow-lossy-chain", action="store_true",
-                    help="chain a format whose requant range exceeds what the nearest-entry finder "
-                         "can represent (fp6_e3m2, fp8_e5m2). The reference has the same behaviour; "
-                         "see compiler/formats.chain_refusal")
-    ap.add_argument("--tol", type=float, default=0.15,
-                    help="pass threshold on relative Frobenius error vs fp32 (fp32 tier only)")
     ap.add_argument("--simulator", default="spike")
     ap.add_argument("--artifacts", action="store_true",
                     help="write the RTL-replay bundle (interface MLIR + C + operands.npz)")
@@ -73,14 +65,21 @@ def main() -> int:
                          "For the equivalence test only; removed in the next PR")
     ap.add_argument("--workdir", type=Path, default=None)
     ap.add_argument("--results-dir", type=Path, default=None)
+    gone = removed_flag(sys.argv[1:])
+    if gone:
+        print(f"[error   ] {gone}", file=sys.stderr)
+        return 2
     a = ap.parse_args()
 
     if a.list:
         print("kernels:")
         for name, desc in list_kernels().items():
             print(f"  {name:10s} {desc}")
-        print("\nhardware recipes (--config):")
-        for name, desc in list_recipes().items():
+        print("\nhardware recipes (--hw):")
+        for name, desc in list_hardware().items():
+            print(f"  {name:14s} {desc}")
+        print("\nrun recipes (--run):")
+        for name, desc in list_runs().items():
             print(f"  {name:14s} {desc}")
         print("\nmodels (--models): " + ", ".join(models.NAMES)
               + f"   groups: default = {','.join(models.DEFAULT)}; all = every model")
@@ -89,10 +88,9 @@ def main() -> int:
     tel = Telemetry()
     try:
         selected = models.select(a.models)
-        recipe = load_recipe(a.config)
+        recipe, run_recipe = load_hardware(a.hw), load_run(a.run)
         spec = build(a.kernel, m=a.m, k=a.k, h=a.h, n=a.n, seed=a.seed)
-        res = run(spec, recipe=recipe, tol=a.tol, simulator=a.simulator, seam=a.seam,
-                  dtype=a.dtype, allow_lossy_chain=a.allow_lossy_chain,
+        res = run(spec, recipe=recipe, run_recipe=run_recipe, simulator=a.simulator,
                   build_only=a.build_only, artifacts=a.artifacts, per_stage_elf=a.per_stage_elf,
                   workdir=a.workdir, results_dir=a.results_dir, telemetry=tel,
                   models=selected, legacy_mxquant=a.legacy_mxquant)
@@ -117,7 +115,7 @@ def main() -> int:
         print(mxquant.line(m))
     else:
         from models import reference
-        print(reference.line(m, tol=a.tol))
+        print(reference.line(m, tol=run_recipe.fp32_tol))
     if m.get("ppa"):
         from models.ppa import ppa
         print(ppa.line(m["ppa"]))

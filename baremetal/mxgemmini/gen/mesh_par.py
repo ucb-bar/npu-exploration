@@ -71,11 +71,10 @@ def run_mesh(A_P: np.ndarray, A_scales: np.ndarray, B_P: np.ndarray, B_scales: n
     import models  # noqa: F401  -- puts mxq on sys.path
     import gen_matmul_llama as G
     from mxq import matmul
-    from config.scheme import mxgemmini   # passes prod_floor only once the pinned mxq takes it
     x = lambda s: torch.from_numpy(G.e8m0_decode(s).astype(np.float32))
     C = matmul.systolic(torch.from_numpy(np.ascontiguousarray(A_P.T)), x(A_scales).T.contiguous(),
                         torch.from_numpy(np.ascontiguousarray(B_P)), x(B_scales),
-                        mxgemmini(*G.PROD_PRECISION[0], prod_floor=prod_floor),
+                        matmul.MXGEMMINI(*G.PROD_PRECISION[0], prod_floor=prod_floor),
                         list(G.ACC_PRECISION)).numpy().astype(np.float32)
     if not np.isfinite(C).all():
         raise SystemExit("mesh golden produced non-finite output -- operands exceed the accumulator bound")

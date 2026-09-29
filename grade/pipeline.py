@@ -44,7 +44,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
-from compiler.lower import DEFAULT_DTYPE, MatmulStage, command_buffer, lower, refuse_graph_dtype  # noqa: F401
+from compiler.lower import MatmulStage, command_buffer, lower, refuse_graph_dtype  # noqa: F401
 SPEC_INPUT = "x"
 
 # THE SEAM CONSTANTS ARE GONE, deliberately (merlin_glue_port_plan.md D3, Step 1).
@@ -140,15 +140,15 @@ def _libgemmini_fingerprint(mx) -> dict:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
-def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
-        dtype: str = DEFAULT_DTYPE, seam: str | None = None,
-        allow_lossy_chain: bool = False,
+def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
         per_stage_elf: bool = False,
         build_only: bool = False, artifacts: bool = False,
         workdir: Path | None = None, results_dir: Path | None = None,
         repo: Path | None = None, telemetry=None,
         models: tuple[str, ...] | None = None, legacy_mxquant: bool = False) -> dict:
-    """Build, run and grade one KernelSpec (1..N stages). Returns the run record.
+    """Build, run and grade one KernelSpec (1..N stages) on the hardware recipe ``recipe`` driven by the run
+    recipe ``run_recipe`` (default: config/hardware/baseline.json, config/run/default.json). Returns the run
+    record. A pair the kernel path cannot follow is refused before anything is built (config.recipe.check).
 
     ``models`` names which models run on the recipe's machine (see ``models.NAMES``; default
     ``models.DEFAULT``): the fp32 ``reference`` always; ``spike`` builds and runs the ELF; ``mxquant``
@@ -190,7 +190,6 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     import backend as mx          # the OOT merlin target package
     from compiler import wire as w
     from compiler.operands import quantize_operand
-    from backend import mxgemm_emit
 
     tel.log("setup", f"repo={repo}  "
                      f"merlin={'yes' if (repo / 'merlin' / 'merlin').exists() else 'MISSING'}  "
@@ -200,22 +199,17 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     # A recipe says WHICH MX-Gemmini this is: mesh size, the per-column product and accumulator
     # precisions, the block-scale group. It drives the software model, spike and the Chisel from
     # one artifact, so a run cannot be graded against a machine that was never built.
-    from config.recipe import load as load_recipe
-    if recipe is None:
-        recipe = load_recipe("baseline")
-    if simulator not in recipe.supported_backends:
-        raise RuntimeError(f"recipe {recipe.name!r} does not declare support for "
-                           f"{simulator!r} (supported: {', '.join(recipe.supported_backends)})")
-    seam = seam or recipe.seam
+    from config.recipe import check as check_recipes
+    from config.recipe import load_hardware, load_run
+    recipe = recipe or load_hardware("baseline")
+    run_recipe = run_recipe or load_run("default")
+    check_recipes(recipe, run_recipe, "kernel")
+    dtype, tol, allow_lossy_chain = run_recipe.operand_fmt, run_recipe.fp32_tol, run_recipe.allow_lossy_chain
     tel.log("recipe", f"{recipe.describe()}   build_id={recipe.build_id()}  "
                       f"src={recipe.path.name}")
+    tel.log("run", f"{run_recipe.describe()}   run_id={run_recipe.run_id()}")
     for line in recipe.ladder_lines():
         tel.log("ladder", line)
-    if recipe.dim != mxgemm_emit.DEFAULT_GEOMETRY["dim"]:
-        raise RuntimeError(
-            f"recipe dim={recipe.dim} but the backend plans for "
-            f"{mxgemm_emit.DEFAULT_GEOMETRY['dim']} (mxgemm_emit.DEFAULT_GEOMETRY); "
-            "pass it through cb['params'] before running a different mesh size")
 
     # --- the kernel ---------------------------------------------------------------
     n_stages = len(spec.stages)
@@ -301,12 +295,12 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
         if "ppa" in models:
             def _ppa():
                 from models.ppa.ppa import run_ppa
-                return run_ppa(recipe)
+                return run_ppa(recipe, dtype)
             pending["ppa"] = pool.submit(_ppa)
         if "perf" in models:
             def _perf():
                 from models.perf.perf import run_perf
-                return run_perf(recipe, shapes)
+                return run_perf(recipe, dtype, shapes)
             pending["perf"] = pool.submit(_perf)
 
     if "spike" not in models:
@@ -317,6 +311,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
         start_models(edges, stage_records)
     elif graphed:
         cb, stage_records, edges = low.cb, low.stages, low.edges
+        cb["params"] = recipe.geometry()                 # the emitters' scratchpad plan, from the recipe
         gdir = workdir / "graph"
         n_mesh = sum(r["where"] == "mesh" for r in stage_records)
         n_host = len(stage_records) - n_mesh
@@ -345,6 +340,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
             *[int(v) for v in cb["graph"]["shapes"][cb["graph"]["result"]]])
     elif fused:
         cb, stage_records, edges = low.cb, low.stages, low.edges
+        cb["params"] = recipe.geometry()
         chain_dir = workdir / "chain"
         tel.log("lower", f"{len(stage_records)} stage(s) -> ONE command buffer "
                          f"({len(cb['commands'])} commands, {len(cb['tensors'])} leaf tensors)"
@@ -476,6 +472,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
                 [MatmulStage(m=m_, k=k_, n=n_, weight=f"W{i}", out=out_name, lhs=lhs_name,
                              out_dtype=INTERMEDIATE_DTYPE if emit_fp8 else "bf16")],
                 [ops], operand_fmt=dtype)
+            cb["params"] = recipe.geometry()
             stage_dir = workdir / f"stage{i}"
 
             if build_only:
@@ -669,8 +666,9 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
             "quantizer": f"mxq.block.mxgemmini@{models_pkg.mxq_commit()} rne floor=2^-23 "
                          "(wire encoding: compiler/operands.py)",
             "models": list(models),
-            "geometry_defaults": mxgemm_emit.DEFAULT_GEOMETRY,
-            "cb_params_override": None,
+            "run": {"name": run_recipe.name, "run_id": run_recipe.run_id(), "path": str(run_recipe.path),
+                    **run_recipe.fields()},
+            "geometry": recipe.geometry(),
             "tol_rel_fro": tol,
         },
         provenance={

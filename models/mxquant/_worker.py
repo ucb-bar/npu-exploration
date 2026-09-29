@@ -1,9 +1,9 @@
 """One perplexity worker: load the language model, put the recipe's Scheme into its linear layers, sum the
 negative log-likelihood over a slice of the WikiText-2 samples, write one JSON part.
 
-    .venv/bin/python -m models.mxquant._worker --recipe config/recipes/baseline.json --samples 0:4 --out part.json
-    .venv/bin/python -m models.mxquant._worker --recipe none --samples 0:16 --out bf16.json      # the unpatched model
-    .venv/bin/python -m models.mxquant._worker --recipe config/recipes/wide_acc.json --dry-run  # the patch table only
+    .venv/bin/python -m models.mxquant._worker --hw config/hardware/baseline.json --run config/run/default.json --samples 0:4 --out part.json
+    .venv/bin/python -m models.mxquant._worker --hw none --samples 0:16 --out bf16.json          # the unpatched model
+    .venv/bin/python -m models.mxquant._worker --hw config/hardware/wide_acc.json --run config/run/default.json --dry-run
 
 Always a separate process: workload.py launches one per GPU (CUDA_VISIBLE_DEVICES), so the caller never
 initialises CUDA. Data sampling, model loading and the loss are mxq's ``experiments/llm_ppl.py`` (which follows
@@ -29,12 +29,9 @@ from experiments.llm_ppl import describe, load_model, load_samples, sample_nll  
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--recipe", required=True, help="recipe .json path, or 'none' for the unpatched bf16 model")
-    ap.add_argument("--dtype", default=None, help="operand format (default: the recipe's)")
+    ap.add_argument("--hw", required=True, help="hardware recipe .json path, or 'none' for the unpatched bf16 model")
+    ap.add_argument("--run", default=None, help="run recipe .json path (required with a hardware recipe)")
     ap.add_argument("--rules", default="mxquant_layers")
-    ap.add_argument("--rounding-mode", default=None, help="operand rounding (default: config.scheme.ROUNDING)")
-    ap.add_argument("--scale-floor", type=float, default=None, help="block-max floor (default: 2^-23)")
-    ap.add_argument("--reduce", default="hardware", help="how the codes are multiplied: hardware | exact | bf16_tiles")
     ap.add_argument("--no-compiled", action="store_true", help="do not torch.compile the arithmetic (5-7x slower, same bits)")
     ap.add_argument("--model-id", default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
     ap.add_argument("--seqlen", type=int, default=2048)
@@ -48,7 +45,7 @@ def main() -> int:
     args = ap.parse_args()
 
     from config import scheme as S
-    from config.recipe import load
+    from config.recipe import load_hardware, load_run
     from models.mxquant import rules as R
     from mxq.nn import patch
 
@@ -60,11 +57,11 @@ def main() -> int:
         # uncompiled arithmetic either way.
         import torch._inductor.config as inductor_config
         inductor_config.cpp.simdlen = 1
-    recipe = None if args.recipe == "none" else load(args.recipe)
-    dtype = None if recipe is None else (args.dtype or S.recipe_dtype(recipe))
-    knobs = {k: v for k, v in (("rounding_mode", args.rounding_mode), ("scale_floor", args.scale_floor)) if v is not None}
-    sch = None if recipe is None else S.scheme(recipe, dtype=dtype, compiled=not args.no_compiled, reduce=args.reduce,
-                                               **knobs)
+    recipe = None if args.hw == "none" else load_hardware(args.hw)
+    if recipe is not None and args.run is None:
+        ap.error("--run is required with a hardware recipe")
+    run = None if recipe is None else load_run(args.run)
+    sch = None if recipe is None else S.scheme(recipe, run, compiled=not args.no_compiled)
     rule_list = None if sch is None else R.build(args.rules, sch)
 
     if args.dry_run and sch is None:
@@ -100,12 +97,14 @@ def main() -> int:
         "rules": None if sch is None else args.rules,
         "recipe": None if recipe is None else recipe.name,
         "build_id": None if recipe is None else recipe.build_id(),
-        "dtype": dtype,
-        "format": None if recipe is None else S.mxq_format(dtype),
-        "codebook": "not modelled" if recipe is not None and S.is_codebook(dtype) else None,
-        "rounding_mode": None if sch is None else knobs.get("rounding_mode", S.ROUNDING),
-        "scale_floor": None if sch is None else knobs.get("scale_floor", S.scale_floor_default()),
-        "reduce": None if sch is None else args.reduce,
+        "run": None if run is None else run.name,
+        "run_id": None if run is None else run.run_id(),
+        "dtype": None if run is None else run.operand_fmt,
+        "format": None if run is None else S.mxq_format(run.operand_fmt),
+        "codebook": "not modelled" if run is not None and S.is_codebook(run.operand_fmt) else None,
+        "rounding_mode": None if run is None else run.rounding,
+        "scale_floor": None if run is None else run.scale_floor,
+        "reduce": None if run is None else run.reduce,
         "compiled": None if sch is None else not args.no_compiled,
         "mxq_commit": models.mxq_commit(),
         "scheme": None if sch is None else describe(sch),

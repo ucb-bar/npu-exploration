@@ -1,26 +1,28 @@
-"""config/recipes/baseline.json must keep describing the hardware we actually have.
+"""config/hardware/baseline.json must keep describing the hardware we actually have.
 
 `baseline` is the claim "this is the stock MX-Gemmini". That claim is written down in
-five places that nothing keeps in sync:
+several places that nothing else keeps in sync:
 
   1. Chisel      ConfigsFP.scala          meshRows / meshProd… / meshAcc…   (the design)
   2. spike       libgemmini/gemmini.cc    prod_e, prod_m, acc_e[], acc_m[]  (what runs)
   3. spike       libgemmini/gemmini_params.h              DIM
   4. compile     gemmini-rocc-tests/include/gemmini_params.h  DIM
   5. planner     mxgemm_emit.DEFAULT_GEOMETRY / BLOCK_SCALE_GROUP
+  6. spike       libgemmini/gemmini_params.h              BANK_NUM, BANK_ROWS (the scratchpad)
+  7. rtl_exact   mxgemmini_rtl.json, acc_schedule.csv, rtl_datapath.PROD_FLOOR
+  8. mxquant     models/mxquant/block.SCALE_FLOOR vs config.recipe's kernel-path constants
 
 They have already drifted once -- ACC_ROWS is 1024 in (3) and 512 in (4) -- so this is
 a live failure mode, not a hypothetical one. It happens to be harmless (the MX path
 does not touch the accumulator memory), which is exactly why it went unnoticed.
 
-If this test fails, the golden model is describing a machine nobody built.
+If this test fails, the models are describing a machine nobody built.
 
 Run:  .venv/bin/python tests/test_recipe_drift.py
 """
 
 from __future__ import annotations
 
-import os
 import re
 import sys
 from pathlib import Path
@@ -28,7 +30,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from config.recipe import load  # noqa: E402
+from config.recipe import (KERNEL_BLOCK, KERNEL_DIM, KERNEL_SCALE_FLOOR, KERNEL_SCRATCHPAD,  # noqa: E402
+                           load_hardware)
 
 
 def gemmini_root() -> Path:
@@ -121,7 +124,7 @@ def parse_define(p: Path, name: str) -> int | None:
 
 
 def main() -> int:
-    r = load("baseline")
+    r = load_hardware("baseline")
     g = gemmini_root()
     lg = g / "software/libgemmini"
     rt = g / "software/gemmini-rocc-tests/include"
@@ -169,45 +172,33 @@ def main() -> int:
     check("DEFAULT_GEOMETRY['dim']", mxgemm_emit.DEFAULT_GEOMETRY["dim"], r.dim)
     check("BLOCK_SCALE_GROUP", mxgemm_emit.BLOCK_SCALE_GROUP, r.block)
 
-    print("\nschema v2: derived per-format geometry vs the reference models")
-    from config.recipe import RecipeError, derive_format
-    from config.recipe import parse as parse_recipe
-    f8 = derive_format("fp8", r.dim)
-    check("fp8 tile", f8.tile, (16, 16, 16))
-    check("fp8 (codes_per_byte, prod_frac_bits)", (f8.codes_per_byte, f8.prod_frac_bits), (1, 7))
-    fp4_ref = rt.parent / "fp4_matmul_model.py"
-    if fp4_ref.exists():
-        t4 = fp4_ref.read_text(encoding="utf-8")
-        want4 = {k: int(re.search(rf"^{k}\s*=\s*(\d+)", t4, re.M).group(1))
-                 for k in ("TILE_M", "TILE_N", "TILE_K", "PROD_MANT_BITS")}
-        f4 = derive_format("fp4", r.dim)
-        check("fp4 tile vs fp4_matmul_model.py", f4.tile,
-              (want4["TILE_M"], want4["TILE_N"], want4["TILE_K"]))
-        check("fp4 prod_frac_bits vs fp4_matmul_model.py", f4.prod_frac_bits,
-              want4["PROD_MANT_BITS"])
-        check("fp4 codes_per_byte", f4.codes_per_byte, 2)
-    else:
-        print(f"  skip  fp4_matmul_model.py not found at {fp4_ref}")
+    print("\nbaseline.json vs libgemmini/gemmini_params.h (spike's scratchpad at DIM 16)")
+    gp = (lg / "gemmini_params.h").read_text(encoding="utf-8")
+    bank_num = int(re.search(r"#define BANK_NUM\s+(\d+)", gp).group(1))
+    rows = re.search(r"(?s)#if GEMMINI_DIM == 8.*?#else\s*#define BANK_ROWS\s+(\d+)", gp) \
+        or re.search(r"#define BANK_ROWS\s+(\d+)", gp)
+    check("BANK_NUM", bank_num, r.banks)
+    check("BANK_ROWS", int(rows.group(1)), r.rows)
 
-    print("\nschema v2: formats stays out of build_id; illegal blocks fail closed")
-    import copy
-    raw2 = copy.deepcopy(r.raw)
-    raw2["formats"] = {"fp8": {"tile": [16, 16, 16]}}
-    check("build_id unchanged by an explicit formats block",
-          parse_recipe(raw2).build_id(), r.build_id())
+    print("\nbaseline.json vs rtl_exact (the extracted hardware model)")
+    import json
+    rj = json.loads((REPO / "rtl_exact" / "mxgemmini_rtl.json").read_text(encoding="utf-8"))
+    check("mxgemmini_rtl.json mesh.dim", rj["mesh"]["dim"], r.dim)
+    check("mxgemmini_rtl.json mesh.block", rj["mesh"]["block"], r.block)
+    check("mxgemmini_rtl.json product (e, m)", (rj["formats"]["product"]["exp"], rj["formats"]["product"]["man"]),
+          (r.prod_e, r.prod_m))
+    check("mxgemmini_rtl.json acc_schedule", tuple(tuple(x) for x in rj["acc_schedule"]), tuple(zip(r.acc_e, r.acc_m)))
+    csv = (REPO / "rtl_exact" / "acc_schedule.csv").read_text(encoding="utf-8").split()[1:]
+    check("acc_schedule.csv", tuple(tuple(int(v) for v in ln.split(",")[1:]) for ln in csv), tuple(zip(r.acc_e, r.acc_m)))
+    from rtl_exact import rtl_datapath
+    check("rtl_datapath.PROD_FLOOR == types.prodFloor", rtl_datapath.PROD_FLOOR, r.prod_floor)
 
-    def rejects(label, formats_block):
-        raw3 = copy.deepcopy(r.raw)
-        raw3["formats"] = formats_block
-        try:
-            parse_recipe(raw3)
-            check(label, "accepted", "RecipeError")
-        except RecipeError:
-            check(label, "RecipeError", "RecipeError")
-
-    rejects("contradictory formats.fp8.tile rejected", {"fp8": {"tile": [8, 8, 8]}})
-    rejects("formats.fp6 rejected (unpinned)", {"fp6": {"via_lut": True}})
-    rejects("unknown key under formats.fp8 rejected", {"fp8": {"bogus": 1}})
+    print("\nkernel-path constants (config.recipe) vs baseline and the code they describe")
+    check("KERNEL_DIM == baseline dim", KERNEL_DIM, r.dim)
+    check("KERNEL_BLOCK == baseline block", KERNEL_BLOCK, r.block)
+    check("KERNEL_SCRATCHPAD == baseline scratchpad", KERNEL_SCRATCHPAD, (r.banks, r.rows))
+    from models.mxquant import block as mxblock
+    check("KERNEL_SCALE_FLOOR == models/mxquant/block.SCALE_FLOOR", KERNEL_SCALE_FLOOR, mxblock.SCALE_FLOOR)
 
     print()
     if fails:
@@ -215,7 +206,7 @@ def main() -> int:
         for f in fails:
             print(f"  - {f}")
         return 1
-    print("NO DRIFT — baseline.json agrees with Chisel, spike, both headers and the planner.")
+    print("NO DRIFT — baseline.json agrees with Chisel, spike, both headers, the planner and rtl_exact.")
     return 0
 
 

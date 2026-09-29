@@ -1,42 +1,52 @@
-"""Load, validate and fingerprint a hardware recipe.
+"""The two recipes: the hardware one (a design point) and the run one (how it is driven).
 
-The recipe answers one question: WHICH MX-Gemmini are we running the kernel on. Its
-``array``/``types``/``mx``/``accumulator`` sections are the hardware itself and are
-hashed into a ``build_id``; ``software``/``runtime`` are not, because they change no
-gate and no line of the C model.
+``config/hardware/<name>.json`` is the machine: mesh, product format, accumulator ladder, product
+flush, block size, scratchpad, clock and utilization. Every field except ``name``, ``description``
+and ``provenance`` is hashed into ``build_id``, which keys the spike build, the perplexity cache and
+every record. ``config/run/<name>.json`` is how that machine is driven: operand format, rounding,
+scale floor, reducer and the grading tolerance; ``run_id`` hashes it the same way. A run recipe
+never triggers a build.
 
-Field names and nesting mirror ``JsonGemminiConfig.scala`` exactly. That file is the
-Chisel-side parser and it rejects unknown keys, so a recipe that loads here is a
-recipe Verilator can elaborate — no translation layer to drift.
+Every key is read by something; an unknown key is refused by name. ``check(hw, run, path)`` refuses
+the combinations a path cannot follow (the kernel path runs on spike and the chip's requantizer, the
+perplexity path only on mxq).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-RECIPES_DIR = Path(__file__).resolve().parent / "recipes"
+CONFIG = Path(__file__).resolve().parent
+HARDWARE_DIR = CONFIG / "hardware"
+RUN_DIR = CONFIG / "run"
 
-#: Sections that describe the machine. Only these are hashed into the build id.
-HARDWARE_SECTIONS = ("array", "types", "mx", "accumulator")
+#: Fields that name or explain a recipe and change no number: left out of build_id / run_id.
+_LABELS = {"name", "description", "provenance"}
 
-_ALLOWED_TOP = {"name", "description", "array", "types", "mx", "accumulator",
-                "supported_backends", "software", "runtime", "provenance", "formats"}
-_ALLOWED_ARRAY = {"meshRows", "meshColumns", "tileRows", "tileColumns"}
-_ALLOWED_MXFLOAT = {"expWidth", "sigWidth", "count", "isRecoded", "pad"}
-_ALLOWED_MX = {"scaleSize", "scaleSizeOut", "enable_lut", "lut"}
-_ALLOWED_SOFTWARE = {"block", "target_code_exp", "seam", "intermediate_dtype"}
-_ALLOWED_RUNTIME = {"operand_fmt", "out_dtype", "use_lut"}
+_HW_TOP = {"name", "description", "provenance", "array", "types", "mx", "accumulator", "scratchpad",
+           "implementation"}
+_HW_SECTIONS = {
+    "array": {"meshRows", "meshColumns", "tileRows", "tileColumns"},
+    "types": {"meshProdPrecisionList", "meshAccPrecisionList", "prodFloor"},
+    "mx": {"scaleSize", "scaleSizeOut", "enable_lut"},
+    "accumulator": {"acc_read_full_width", "acc_read_small_width"},
+    "scratchpad": {"banks", "rows"},
+    "implementation": {"clock_ns", "utilization"},
+}
+_MXFLOAT = {"expWidth", "sigWidth", "count", "isRecoded", "pad"}
+_RUN_KEYS = {"name", "description", "operand_fmt", "rounding", "scale_floor", "reduce",
+             "allow_lossy_chain", "fp32_tol"}
 
-#: Operand formats the emitter and libgemmini both know (mxgemm_emit.DTYPE_TO_FMT).
-_OPERAND_FMT = {"fp8": "f8E4M3FN", "fp6": "f6E3M2FN", "fp4": "f4E2M1FN"}
-
-#: Element (exponent, mantissa) bits per operand format (OCP MX element formats).
-_ELEMENT_EM = {"fp8": (4, 3), "fp6": (3, 2), "fp4": (2, 1)}
-
-_ALLOWED_FORMAT = {"tile", "codes_per_byte", "prod_frac_bits", "via_lut"}
+#: What the kernel path can follow. Each is a fact of spike, the emitters or the chip's own
+#: requantizer, not a preference: a recipe asking for anything else is refused by check().
+KERNEL_DIM = 16             # the emitters' tile plan and libgemmini's DIM
+KERNEL_BLOCK = 32           # mx_host.h MX_BLOCK, compiler/formats.BLOCK, spike's GROUP
+KERNEL_SCRATCHPAD = (4, 4096)   # libgemmini gemmini_params.h BANK_NUM, BANK_ROWS at DIM 16
+KERNEL_ROUNDING = "rne"     # the requantizer (gemmini.cc) and mx_host.h round to nearest even
+KERNEL_SCALE_FLOOR = 2.0 ** -23     # the fp8 requantizer floors the block max at FLT_EPSILON
 
 
 class RecipeError(ValueError):
@@ -47,12 +57,8 @@ class RecipeError(ValueError):
 
 @dataclass(frozen=True)
 class MxFloatSpec:
-    """One ``MxFloat`` from the Chisel config.
-
-    ``sigWidth`` counts the implicit leading bit, so the mantissa field the C model
-    uses is ``sigWidth - 1`` (verified: ConfigsFP.scala's 16-entry lists map term for
-    term onto gemmini.cc's ``acc_e``/``acc_m``).
-    """
+    """One ``{expWidth, sigWidth}`` entry. ``sigWidth`` counts the implicit leading bit, so the
+    mantissa is ``sigWidth - 1`` (term for term the ``acc_e``/``acc_m`` of gemmini.cc)."""
     expWidth: int
     sigWidth: int
     count: int
@@ -71,7 +77,7 @@ class MxFloatSpec:
     def parse(cls, obj: dict, where: str) -> "MxFloatSpec":
         if not isinstance(obj, dict):
             raise RecipeError(f"{where}: expected an object, got {type(obj).__name__}")
-        _check_keys(obj, _ALLOWED_MXFLOAT, where)
+        _check_keys(obj, _MXFLOAT, where)
         for req in ("expWidth", "sigWidth", "count"):
             if req not in obj:
                 raise RecipeError(f"{where}.{req} is required")
@@ -80,67 +86,24 @@ class MxFloatSpec:
 
 
 @dataclass(frozen=True)
-class FormatSpec:
-    """Per-operand-format execution geometry, DERIVED from the hashed sections.
-
-    [COMPILE] — no JsonGemminiConfig.scala counterpart yet. A recipe may spell a
-    ``formats`` block out explicitly, but only to CONFIRM the derivation: a value
-    that contradicts it is a RecipeError, so ``build_id`` (which does not hash this
-    section) can never disagree with behavior.
-    """
-    tile: tuple[int, int, int]      # hardware tile (M, N, K)
-    codes_per_byte: int             # operand packing density
-    prod_frac_bits: int             # exact product fraction width: 2*m + 1
-    via_lut: bool = False           # decode goes through the LUT SRAMs
-
-
-def derive_format(fmt: str, dim: int) -> FormatSpec:
-    """Geometry/packing for one operand format, from mesh size + element width.
-
-    Grounded in the reference models, not invented here:
-      fp8: gemmini-rocc-tests/fp8_matmul_model.py  TILE=16, PROD_MANT_BITS=7
-      fp4: gemmini-rocc-tests/fp4_matmul_model.py  TILE_M=TILE_N=32, TILE_K=16,
-           PROD_MANT_BITS=3, two codes per byte
-    tests/test_recipe_drift.py holds this derivation to those files.
-    """
-    if fmt == "fp6":
-        raise RecipeError(
-            "formats.fp6 is unpinned: fp6 decodes through QuantLut, which is being "
-            "reworked upstream (gemmini-mx-cleanup WIP commits touch exactly this). "
-            "Pin tile/packing/via_lut from lut_golden_model.py once it settles")
-    if fmt not in _ELEMENT_EM:
-        raise RecipeError(f"unknown operand format {fmt!r}; known: {sorted(_ELEMENT_EM)}")
-    _, m = _ELEMENT_EM[fmt]
-    pack = 2 if fmt == "fp4" else 1
-    # Packed operands widen one tile's M/N footprint; reduction depth stays the
-    # mesh depth.
-    return FormatSpec(tile=(dim * pack, dim * pack, dim),
-                      codes_per_byte=pack,
-                      prod_frac_bits=2 * m + 1)
-
-
-@dataclass(frozen=True)
-class Recipe:
-    """A validated recipe. ``build_id`` identifies the machine, nothing else."""
+class Hardware:
+    """A validated hardware recipe."""
     name: str
     path: Path
     raw: dict
     dim: int
     prod: tuple[MxFloatSpec, ...]
     acc: tuple[MxFloatSpec, ...]
-    block: int              # mx.scaleSize      -> gemmini.cc GROUP
-    block_out: int          # mx.scaleSizeOut   -> gemmini.cc GROUP_OUT
-    operand_fmt: str        # fp8 | fp6 | fp4
-    out_dtype: str
-    target_code_exp: int
-    seam: str
-    intermediate_dtype: str
-    supported_backends: tuple[str, ...]
+    prod_floor: int | None      # types.prodFloor: a product below 2^prodFloor is zero; None = no flush
+    block: int                  # mx.scaleSize      -> gemmini.cc GROUP
+    block_out: int              # mx.scaleSizeOut   -> gemmini.cc GROUP_OUT
+    enable_lut: bool
+    banks: int                  # scratchpad.banks  -> the emitters' bank_num
+    rows: int                   # scratchpad.rows   -> the emitters' bank_rows
+    clock_ns: float             # implementation.clock_ns    -> ppa, perf
+    utilization: float          # implementation.utilization -> ppa
     description: str = ""
     provenance: dict = field(default_factory=dict)
-    formats: dict = field(default_factory=dict)   # fmt -> FormatSpec, derived (not hashed)
-
-    # --- the three things the models actually need -------------------------------
 
     @property
     def prod_e(self) -> int:
@@ -158,43 +121,21 @@ class Recipe:
     def acc_m(self) -> tuple[int, ...]:
         return tuple(s.m for s in self.acc)
 
-    @property
-    def operand_mlir_dtype(self) -> str:
-        return _OPERAND_FMT[self.operand_fmt]
-
-    @property
-    def format_spec(self) -> FormatSpec:
-        """Execution geometry for the active ``runtime.operand_fmt``."""
-        return self.formats[self.operand_fmt]
-
     def hardware(self) -> dict:
-        """Just the sections that describe the machine, canonically ordered."""
-        return {k: self.raw[k] for k in HARDWARE_SECTIONS if k in self.raw}
+        """Every field that describes the machine: the file without its labels."""
+        return {k: v for k, v in self.raw.items() if k not in _LABELS}
 
     def build_id(self) -> str:
-        """sha256 over the hardware sections only.
+        return _digest(self.hardware())
 
-        Two recipes differing only in ``software``/``runtime`` share a build, which is
-        what makes an fp8-vs-fp4 sweep free: those are instruction fields, not gates.
-        """
-        blob = json.dumps(self.hardware(), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+    def geometry(self) -> dict:
+        """The scratchpad plan the emitters read (command buffer ``params``)."""
+        return {"dim": self.dim, "bank_num": self.banks, "bank_rows": self.rows}
 
     def ladder(self) -> list[dict]:
-        """The precision ladder expanded one entry per column.
-
-        ``types.*`` is stored the way ConfigsFP.scala spells it -- a 16-element list
-        whose ``count`` field is a Chisel literal, not a repeat factor -- so the JSON
-        reads as 16 near-identical blocks and the banner squashes it to a range. A
-        run record has to state which column carries which format outright, because
-        that ladder IS the experiment.
-        """
-        return [
-            {"col": i,
-             "prod": f"e{pr.e}m{pr.m}",
-             "acc": f"e{ac.e}m{ac.m}"}
-            for i, (pr, ac) in enumerate(zip(self.prod, self.acc))
-        ]
+        """The precision ladder, one entry per column: a run record states it outright."""
+        return [{"col": i, "prod": f"e{pr.e}m{pr.m}", "acc": f"e{ac.e}m{ac.m}"}
+                for i, (pr, ac) in enumerate(zip(self.prod, self.acc))]
 
     def ladder_lines(self) -> list[str]:
         """``ladder()`` run-length collapsed: one line per contiguous acc format."""
@@ -214,8 +155,39 @@ class Recipe:
         uniform_acc = len(set(zip(self.acc_e, self.acc_m))) == 1
         acc = (f"{self.acc_e[0]}e{self.acc_m[0]}m x{self.dim}" if uniform_acc
                else f"e{self.acc_e[0]}..{self.acc_e[-1]} m{self.acc_m[0]}..{self.acc_m[-1]}")
-        return (f"{self.name}  dim={self.dim}  operand={self.operand_fmt}->{self.out_dtype}  "
-                f"prod=e{self.prod_e}m{self.prod_m}  acc[{acc}]  block={self.block}")
+        flush = "none" if self.prod_floor is None else f"2^{self.prod_floor}"
+        return (f"{self.name}  dim={self.dim}  prod=e{self.prod_e}m{self.prod_m} flush<{flush}  "
+                f"acc[{acc}]  block={self.block}")
+
+
+@dataclass(frozen=True)
+class Run:
+    """A validated run recipe. The defaults are ``config/run/default.json``: what the chip does."""
+    name: str = "default"
+    operand_fmt: str = "fp8_e4m3"
+    rounding: str = KERNEL_ROUNDING
+    scale_floor: float = KERNEL_SCALE_FLOOR
+    reduce: str = "hardware"
+    allow_lossy_chain: bool = False
+    fp32_tol: float = 0.15
+    description: str = ""
+    path: Path | None = None
+
+    def fields(self) -> dict:
+        """Every field that changes a number."""
+        return {k: v for k, v in asdict(self).items() if k not in _LABELS and k != "path"}
+
+    def run_id(self) -> str:
+        return _digest(self.fields())
+
+    def describe(self) -> str:
+        return (f"{self.name}  {self.operand_fmt}  {self.rounding}  floor {self.scale_floor:g}  "
+                f"reduce {self.reduce}")
+
+
+def _digest(obj) -> str:
+    blob = json.dumps(obj, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
 def _check_keys(obj: dict, allowed: set[str], where: str) -> None:
@@ -225,121 +197,128 @@ def _check_keys(obj: dict, allowed: set[str], where: str) -> None:
                           f"allowed: {', '.join(sorted(allowed))}")
 
 
-def _section(raw: dict, key: str, allowed: set[str]) -> dict:
-    sec = raw.get(key, {})
-    if not isinstance(sec, dict):
-        raise RecipeError(f"{key}: expected an object, got {type(sec).__name__}")
-    _check_keys(sec, allowed, key)
-    return sec
-
-
-def load(path: str | Path) -> Recipe:
-    """Read and validate a recipe file."""
+def _read(path: str | Path, folder: Path, what: str) -> tuple[dict, Path]:
     p = Path(path)
     if not p.exists() and not p.suffix:
-        p = RECIPES_DIR / f"{p.name}.json"
+        p = folder / f"{p.name}.json"
     if not p.exists():
-        raise RecipeError(f"no such recipe: {path} (looked in {RECIPES_DIR})")
+        raise RecipeError(f"no such {what} recipe: {path} (looked in {folder})")
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise RecipeError(f"{p}: invalid JSON: {exc}") from exc
-    return parse(raw, path=p)
-
-
-def parse(raw: dict, *, path: Path | None = None) -> Recipe:
     if not isinstance(raw, dict):
-        raise RecipeError("recipe root: expected an object")
-    _check_keys(raw, _ALLOWED_TOP, "recipe root")
+        raise RecipeError(f"{p}: expected an object")
+    return raw, p
 
-    array = _section(raw, "array", _ALLOWED_ARRAY)
-    mx = _section(raw, "mx", _ALLOWED_MX)
-    software = _section(raw, "software", _ALLOWED_SOFTWARE)
-    runtime = _section(raw, "runtime", _ALLOWED_RUNTIME)
 
-    types = raw.get("types", {})
-    if not isinstance(types, dict):
-        raise RecipeError("types: expected an object")
+def load_hardware(path: str | Path) -> Hardware:
+    """A name in ``config/hardware/`` or a path to a .json."""
+    raw, p = _read(path, HARDWARE_DIR, "hardware")
+    return parse_hardware(raw, path=p)
 
+
+def parse_hardware(raw: dict, *, path: Path | None = None) -> Hardware:
+    _check_keys(raw, _HW_TOP, "hardware recipe")
+    sec = {}
+    for key, allowed in _HW_SECTIONS.items():
+        s = raw.get(key, {})
+        if not isinstance(s, dict):
+            raise RecipeError(f"{key}: expected an object, got {type(s).__name__}")
+        _check_keys(s, allowed, key)
+        sec[key] = s
+    for key in ("array", "types", "mx", "scratchpad", "implementation"):
+        if key not in raw:
+            raise RecipeError(f"{key} is required")
+
+    array, types, mx, spad, impl = (sec[k] for k in ("array", "types", "mx", "scratchpad", "implementation"))
     rows = int(array.get("meshRows", 16))
     cols = int(array.get("meshColumns", 16))
     if rows != cols:
         raise RecipeError(f"array: meshRows ({rows}) != meshColumns ({cols}); the backend "
                           "plans a square PE tile (mxgemm_emit uses a single `dim`)")
-
     prod = _parse_list(types, "meshProdPrecisionList", cols)
     acc = _parse_list(types, "meshAccPrecisionList", cols)
-
     if len({(s.e, s.m) for s in prod}) != 1:
         raise RecipeError("types.meshProdPrecisionList: entries differ. The spike model "
                           "declares ONE scalar prod_e/prod_m (gemmini.cc:1145), so a "
                           "non-uniform product precision cannot be represented on spike")
-
-    fmt = runtime.get("operand_fmt", "fp8")
-    if fmt not in _OPERAND_FMT:
-        raise RecipeError(f"runtime.operand_fmt: {fmt!r} not one of {sorted(_OPERAND_FMT)}")
-    if fmt != "fp8":
-        # The field is the right shape -- these ARE runtime instruction bits, and
-        # libgemmini implements all three formats -- but the models do not read it:
-        # the operand format reaches the compiler and the mxquant model through --dtype
-        # (compiler/operands.py encodes every format), so a recipe saying fp4 here would
-        # run whatever --dtype said and report it under an fp4 label. The recipe refactor
-        # (one run recipe carrying the format) retires this refusal.
-        raise RecipeError(
-            f"runtime.operand_fmt={fmt!r} is declared but not wired: the models take the "
-            "operand format from --dtype, not from the recipe, so this recipe would silently "
-            "run --dtype's format. Pass --dtype fp4_e2m1 (or fp6_e3m2) and leave operand_fmt at fp8")
-    seam = software.get("seam", "weight")
-    if seam not in ("weight", "rescale"):
-        raise RecipeError(f"software.seam: {seam!r} not one of 'weight', 'rescale'")
-
-    formats_raw = raw.get("formats", {})
-    if not isinstance(formats_raw, dict):
-        raise RecipeError("formats: expected an object")
-    derived = {f: derive_format(f, cols) for f in ("fp8", "fp4")}
-    for f, spec in formats_raw.items():
-        if f not in derived:
-            derive_format(f, cols)  # fp6/unknown: raises with the right message
-        if not isinstance(spec, dict):
-            raise RecipeError(f"formats.{f}: expected an object")
-        _check_keys(spec, _ALLOWED_FORMAT, f"formats.{f}")
-        d = derived[f]
-        want = {"tile": list(d.tile), "codes_per_byte": d.codes_per_byte,
-                "prod_frac_bits": d.prod_frac_bits, "via_lut": d.via_lut}
-        for k, v in spec.items():
-            v2 = list(v) if isinstance(v, (list, tuple)) else v
-            if v2 != want[k]:
-                raise RecipeError(
-                    f"formats.{f}.{k} = {v!r} contradicts the derivation ({want[k]!r}). "
-                    "An explicit formats block may only confirm derived geometry; "
-                    "fix the value or delete the block")
-
-    backends = tuple(raw.get("supported_backends", ("spike",)))
-    for b in backends:
-        if b not in ("spike", "verilator"):
-            raise RecipeError(f"supported_backends: unknown backend {b!r}")
-
-    r = Recipe(
+    if "prodFloor" not in types:
+        raise RecipeError("types.prodFloor is required: the exponent below which a product is "
+                          "flushed to zero (MxFPMul: -16), or null for no flush")
+    floor = types["prodFloor"]
+    for k in ("banks", "rows"):
+        if k not in spad:
+            raise RecipeError(f"scratchpad.{k} is required")
+    for k in ("clock_ns", "utilization"):
+        if k not in impl:
+            raise RecipeError(f"implementation.{k} is required")
+    return Hardware(
         name=raw.get("name") or (path.stem if path else "unnamed"),
         path=path or Path("<inline>"),
         raw=raw,
         dim=cols,
         prod=prod,
         acc=acc,
+        prod_floor=None if floor is None else int(floor),
         block=int(mx.get("scaleSize", 32)),
         block_out=int(mx.get("scaleSizeOut", mx.get("scaleSize", 32))),
-        operand_fmt=fmt,
-        out_dtype=runtime.get("out_dtype", "bf16"),
-        target_code_exp=int(software.get("target_code_exp", 2)),
-        seam=seam,
-        intermediate_dtype=software.get("intermediate_dtype", "f8E4M3FN"),
-        supported_backends=backends,
+        enable_lut=bool(mx.get("enable_lut", False)),
+        banks=int(spad["banks"]),
+        rows=int(spad["rows"]),
+        clock_ns=float(impl["clock_ns"]),
+        utilization=float(impl["utilization"]),
         description=raw.get("description", ""),
         provenance=raw.get("provenance", {}),
-        formats=derived,
     )
-    _validate_backends(r)
-    return r
+
+
+def load_run(path: str | Path) -> Run:
+    """A name in ``config/run/`` or a path to a .json."""
+    raw, p = _read(path, RUN_DIR, "run")
+    return parse_run(raw, path=p)
+
+
+def parse_run(raw: dict, *, path: Path | None = None) -> Run:
+    _check_keys(raw, _RUN_KEYS, "run recipe")
+    missing = sorted(_RUN_KEYS - {"description"} - set(raw))
+    if missing:
+        raise RecipeError(f"run recipe: {', '.join(missing)} required (write every field; "
+                          "config/run/default.json is the template)")
+    return Run(name=raw["name"], operand_fmt=str(raw["operand_fmt"]), rounding=str(raw["rounding"]),
+               scale_floor=float(raw["scale_floor"]), reduce=str(raw["reduce"]),
+               allow_lossy_chain=bool(raw["allow_lossy_chain"]), fp32_tol=float(raw["fp32_tol"]),
+               description=raw.get("description", ""), path=path)
+
+
+def check(hw: Hardware, run: Run, path: str) -> None:
+    """Refuse what ``path`` cannot follow: "kernel" (spike, the emitters, the chip's requantizer) or
+    "perplexity" (mxq alone)."""
+    from config import scheme                   # the format and reducer vocabulary
+    scheme.mxq_format(run.operand_fmt)
+    if run.reduce not in scheme.REDUCERS:
+        raise RecipeError(f"run {run.name}: reduce {run.reduce!r}; choose from {', '.join(scheme.REDUCERS)}")
+    if path == "perplexity":
+        return
+    if path != "kernel":
+        raise ValueError(f"path {path!r}: 'kernel' or 'perplexity'")
+    refusals = []
+    if hw.dim != KERNEL_DIM:
+        refusals.append(f"mesh {hw.dim}x{hw.dim}: the emitters and libgemmini are built for {KERNEL_DIM}")
+    if hw.block != KERNEL_BLOCK:
+        refusals.append(f"mx.scaleSize {hw.block}: spike, mx_host.h and the compiler block in {KERNEL_BLOCK}s")
+    if (hw.banks, hw.rows) != KERNEL_SCRATCHPAD:
+        refusals.append(f"scratchpad {hw.banks}x{hw.rows}: libgemmini is built with "
+                        f"BANK_NUM {KERNEL_SCRATCHPAD[0]}, BANK_ROWS {KERNEL_SCRATCHPAD[1]}")
+    if run.rounding != KERNEL_ROUNDING:
+        refusals.append(f"rounding {run.rounding}: the chip's requantizer and mx_host.h round to nearest even")
+    if run.scale_floor != KERNEL_SCALE_FLOOR:
+        refusals.append(f"scale_floor {run.scale_floor:g}: the chip's requantizer floors the block max at 2^-23")
+    if run.reduce != "hardware":
+        refusals.append(f"reduce {run.reduce}: the kernel path grades the chip, whose reducer is the recipe's ladder")
+    if refusals:
+        raise RecipeError(f"{hw.name} + run {run.name} on the kernel path: " + "; ".join(refusals)
+                          + " (the perplexity path, python -m models.mxquant, runs these)")
 
 
 def _parse_list(types: dict, key: str, expect: int) -> tuple[MxFloatSpec, ...]:
@@ -354,28 +333,38 @@ def _parse_list(types: dict, key: str, expect: int) -> tuple[MxFloatSpec, ...]:
     return tuple(MxFloatSpec.parse(o, f"types.{key}[{i}]") for i, o in enumerate(items))
 
 
-def _validate_backends(r: Recipe) -> None:
-    """Reject a recipe a declared backend physically cannot build.
-
-    Better here than as a mismatch discovered after a build: a backend that silently
-    ignores a field grades the kernel against a machine we never made.
-    """
-    if "spike" in r.supported_backends:
-        if r.dim != 16:
-            raise RecipeError(
-                f"spike: dim={r.dim} unsupported. libgemmini declares `float A_col[16], "
-                "B_row[16]` (gemmini.cc:1164) and `acc_e[16]/acc_m[16]`, so the C model is "
-                "hard-wired to 16. Drop 'spike' from supported_backends or set dim=16")
-        if r.block not in (32,):
-            raise RecipeError(f"spike: mx.scaleSize={r.block}; only 32 is wired through "
-                              "mxgemm_emit.BLOCK_SCALE_GROUP today")
-
-
-def list_recipes() -> dict[str, str]:
+def _listing(folder: Path, load, describe) -> dict[str, str]:
     out = {}
-    for p in sorted(RECIPES_DIR.glob("*.json")):
+    for p in sorted(folder.glob("*.json")):
         try:
-            out[p.stem] = load(p).describe()
+            out[p.stem] = describe(load(p))
         except RecipeError as exc:
             out[p.stem] = f"INVALID: {exc}"
     return out
+
+
+def list_hardware() -> dict[str, str]:
+    return _listing(HARDWARE_DIR, load_hardware, Hardware.describe)
+
+
+def list_runs() -> dict[str, str]:
+    return _listing(RUN_DIR, load_run, Run.describe)
+
+
+#: Flags the run recipe replaced, and the field that carries each now.
+REMOVED_FLAGS = {"--dtype": "operand_fmt", "--rounding-mode": "rounding", "--scale-floor": "scale_floor",
+                 "--reduce": "reduce", "--tol": "fp32_tol", "--allow-lossy-chain": "allow_lossy_chain",
+                 "--seam": None}
+
+
+def removed_flag(argv: list[str]) -> str | None:
+    """The refusal for a flag the run recipe replaced, or None."""
+    for a in argv:
+        flag = a.split("=", 1)[0]
+        if flag in REMOVED_FLAGS:
+            field = REMOVED_FLAGS[flag]
+            if field is None:
+                return f"{flag} is gone: it chose a workaround for a requantizer behaviour that no longer exists"
+            return (f"{flag} is now the run recipe's '{field}' field: copy config/run/default.json, set "
+                    f"{field}, and pass --run <that file> (config/run/ has default, exact, bf16_tiles, fp4_e2m1)")
+    return None

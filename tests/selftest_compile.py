@@ -18,6 +18,7 @@ Needs the RISC-V toolchain for 1 and spike for 2; each SKIPs with a reason other
 """
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -56,21 +57,30 @@ def main() -> int:
     wire_paths()
     import compile_kernel as ck
     from backend import runner
-    from config.recipe import load
+    from config.recipe import Run, load_hardware
     from grade import pipeline
     from kernels.registry import build
     from kernels.spec import HostStage, KernelSpec, Stage
     import torch
     from compiler import wire as w
-    base = load("baseline")
+    base = load_hardware("baseline")
     quiet = Quiet()
 
     print("[3] refusals, before any build ------------------------------------")
     check("shape violation -> exit 2", ck.main(["--kernel", "linear", "--m", "60", "--out", "/nonexistent/x"]) == 2)
-    check("graph kernel in fp8_e5m2 -> exit 2",
-          ck.main(["--kernel", "attention", "--dtype", "fp8_e5m2", "--out", "/nonexistent/x"]) == 2)
+    with tempfile.TemporaryDirectory() as td:
+        e5 = Path(td) / "e5m2.json"
+        e5.write_text(json.dumps({"name": "e5m2", **Run(operand_fmt="fp8_e5m2").fields()}))
+        check("graph kernel in fp8_e5m2 -> exit 2",
+              ck.main(["--kernel", "attention", "--run", str(e5), "--out", "/nonexistent/x"]) == 2)
     check("graph kernel in fp4_e2m1 -> exit 2",
-          ck.main(["--kernel", "attention", "--dtype", "fp4_e2m1", "--out", "/nonexistent/x"]) == 2)
+          ck.main(["--kernel", "attention", "--run", "fp4_e2m1", "--out", "/nonexistent/x"]) == 2)
+    check("--dtype is refused (the run recipe's operand_fmt now) -> exit 2",
+          ck.main(["--kernel", "linear", "--dtype", "fp4_e2m1", "--out", "/nonexistent/x"]) == 2)
+    check("a run the kernel path cannot follow (reduce exact) -> exit 2",
+          ck.main(["--kernel", "linear", "--run", "exact", "--out", "/nonexistent/x"]) == 2)
+    check("an unknown run recipe -> exit 2",
+          ck.main(["--kernel", "linear", "--run", "nope", "--out", "/nonexistent/x"]) == 2)
     torch.manual_seed(0)
     fn_spec = KernelSpec("fnhost", torch.randn(64, 64), [
         Stage("L0", weight=torch.randn(64, 64)),
@@ -112,13 +122,13 @@ def main() -> int:
         spec = build(k)
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            pipeline.run(spec, recipe=base, dtype=d, build_only=True, models=("spike",),
-                         workdir=td / "pipe", allow_lossy_chain=True, telemetry=quiet)
+            run = Run(operand_fmt=d, allow_lossy_chain=True)
+            pipeline.run(spec, recipe=base, run_recipe=run, build_only=True, models=("spike",),
+                         workdir=td / "pipe", telemetry=quiet)
             ref = next((td / "pipe").glob("*/main.c")).read_bytes()
             srcs = {}
             for target in ("spike", "mx_rocket"):
-                man = ck.compile(spec, base, dtype=d, target=target, out=td / target,
-                                 allow_lossy_chain=True, tel=quiet)
+                man = ck.compile(spec, base, run, target=target, out=td / target, tel=quiet)
                 srcs[target] = (td / target / "main.c").read_bytes()
                 check(f"{k} {d} {target}: ELF built, files listed",
                       (td / target / "mx_gemmini_rocket.elf").exists()
@@ -158,7 +168,6 @@ def main() -> int:
             if rc != 0:
                 check(f"{name}: compiled", False, f"exit {rc}")
                 continue
-            import json
             man = json.loads((Path(td) / "manifest.json").read_text())
             out, _ = runner.parse_output(runner.run_elf(man["elf"]["path"]))
             got = w.bf16_bits_to_float(np.array(out["Y0"], dtype=np.uint16))

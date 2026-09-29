@@ -29,7 +29,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
-#: Default operand format. Every other format is selected with --dtype and gated by
+#: Default operand format. Every other format is selected by the run recipe's operand_fmt and gated by
 #: compiler/formats.py, which refuses one this repo has not proven end to end.
 DEFAULT_DTYPE = "fp8_e4m3"
 
@@ -194,7 +194,7 @@ def _fused(spec, dtype: str, *, allow_lossy_chain: bool, warn) -> tuple[dict, li
         if why and not allow_lossy_chain:
             raise ValueError(
                 f"cannot chain {dtype}: {why}\n"
-                "        Pass allow_lossy_chain=True (--allow-lossy-chain) to run it anyway. The "
+                "        Set allow_lossy_chain in the run recipe (or pass allow_lossy_chain=True) to run it anyway. The "
                 "REFERENCE has the same behaviour -- its own FP6 chain measures 58% against exact "
                 "arithmetic on its own operands -- so this is worth running deliberately, just not "
                 "by accident.")

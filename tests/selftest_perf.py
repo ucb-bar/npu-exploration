@@ -19,7 +19,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from models.perf.perf import PerfError, perf_args, perf_model_path, run_perf  # noqa: E402
-from config.recipe import load  # noqa: E402
+from config.recipe import load_hardware as load, parse_hardware  # noqa: E402
 
 CHECKS = []
 
@@ -33,14 +33,22 @@ def main() -> int:
     r = load("baseline")
 
     print("mapping: baseline + 64x64x64 -> the model's CLI")
-    args = perf_args(r, 64, 64, 64, "f8E4M3FN")
+    args = perf_args(r, "fp8_e4m3", 64, 64, 64, "f8E4M3FN")
     got = dict(zip(args[::2], args[1::2]))
     check("--M/--N/--K", (got["--M"], got["--N"], got["--K"]) == ("64", "64", "64"))
     check("--rows/--cols = dim", (got["--rows"], got["--cols"]) == ("16", "16"))
     check("--act/--wei = operand family", (got["--act"], got["--wei"]) == ("fp8", "fp8"))
     check("--out-fmt f8E4M3FN -> fp8", got["--out-fmt"] == "fp8", got["--out-fmt"])
     check("--as-measured on by default", "--as-measured" in args)
-    args_bf = perf_args(r, 64, 64, 64, "bf16")
+    check("--clock-ns = implementation.clock_ns", got["--clock-ns"] == "2.0", got["--clock-ns"])
+    fp4 = dict(zip(*[iter(perf_args(r, "fp4_e2m1", 64, 64, 64, "bf16"))] * 2))
+    check("an fp4 run gives --act/--wei fp4", (fp4["--act"], fp4["--wei"]) == ("fp4", "fp4"))
+    import copy
+    raw = copy.deepcopy(r.raw)
+    raw["implementation"]["clock_ns"] = 1.25
+    check("a recipe's own clock reaches the model",
+          dict(zip(*[iter(perf_args(parse_hardware(raw), "fp8_e4m3", 64, 64, 64, "bf16"))] * 2))["--clock-ns"] == "1.25")
+    args_bf = perf_args(r, "fp8_e4m3", 64, 64, 64, "bf16")
     check("--out-fmt bf16 passes through",
           dict(zip(args_bf[::2], args_bf[1::2]))["--out-fmt"] == "bf16")
 
@@ -53,7 +61,7 @@ def main() -> int:
         live = False
     if live:
         stage = {"stage": 0, "m": 64, "k": 64, "n": 64, "out_dtype": "f8E4M3FN"}
-        res = run_perf(r, [stage])
+        res = run_perf(r, "fp8_e4m3", [stage])
         s = res["stages"][0]
         check("total == sum of phases",
               s["cycles_predicted"] == sum(s["phases"].values()),
@@ -68,7 +76,7 @@ def main() -> int:
         check("kernel totals = stage sums",
               res["total_cycles_predicted"] == s["cycles_predicted"])
 
-        big = run_perf(r, [{"stage": 0, "m": 1024, "k": 1024, "n": 1024,
+        big = run_perf(r, "fp8_e4m3", [{"stage": 0, "m": 1024, "k": 1024, "n": 1024,
                             "out_dtype": "bf16"}], energy=False)
         check("1024^3 utilization > 64^3 (amortized setup)",
               big["stages"][0]["utilization_pct"] > s["utilization_pct"],
@@ -77,7 +85,7 @@ def main() -> int:
               big["stages"][0]["utilization_pct"] > 90,
               f"{big['stages'][0]['utilization_pct']}%")
 
-        two = run_perf(r, [stage, {"stage": 1, "m": 64, "k": 64, "n": 64,
+        two = run_perf(r, "fp8_e4m3", [stage, {"stage": 1, "m": 64, "k": 64, "n": 64,
                                    "out_dtype": "bf16"}], energy=False)
         check("two stages -> two entries, summed total",
               len(two["stages"]) == 2 and two["total_cycles_predicted"]
