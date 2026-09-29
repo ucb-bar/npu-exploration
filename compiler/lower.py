@@ -119,6 +119,20 @@ class Lowering:
     cb: dict | None           #: the command buffer; None for per_stage
 
 
+GRAPH_DTYPE = "fp8_e4m3"        #: the only format mx_host.h re-quantizes on the host, so the only format a graph ELF carries
+
+
+def refuse_graph_dtype(low, name: str, dtype: str) -> None:
+    """A graph lowering in another format would build an ELF whose host re-quantization writes fp8 codes the
+    device then reads as ``dtype``: spike returns NaN for every element (measured 2026-09-29, attention and
+    llama_mlp in fp4_e2m1, fp8_e5m2, fp6). Refused here, before any build, on both the graded and the
+    compile path; ``--per-stage-elf`` runs the same kernel one matmul per ELF in any format."""
+    if low.kind == "graph" and dtype != GRAPH_DTYPE:
+        raise ValueError(
+            f"{name} lowers as a graph, and a graph re-quantizes every intermediate on the host with "
+            f"mx_host.h, which encodes {GRAPH_DTYPE} only; {dtype} is refused (use --per-stage-elf)")
+
+
 def lower(spec, dtype: str = DEFAULT_DTYPE, *, per_stage: bool = False,
           allow_lossy_chain: bool = False, warn=None) -> Lowering:
     """Lower ``spec`` in ``dtype``. ``warn(text)`` receives the one accepted-lossy-chain warning."""

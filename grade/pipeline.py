@@ -44,7 +44,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
-from compiler.lower import DEFAULT_DTYPE, MatmulStage, command_buffer, lower  # noqa: F401
+from compiler.lower import DEFAULT_DTYPE, MatmulStage, command_buffer, lower, refuse_graph_dtype  # noqa: F401
 SPEC_INPUT = "x"
 
 # THE SEAM CONSTANTS ARE GONE, deliberately (merlin_glue_port_plan.md D3, Step 1).
@@ -272,6 +272,7 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     hw = None
     low = lower(spec, dtype, per_stage=per_stage_elf, allow_lossy_chain=allow_lossy_chain,
                 warn=lambda m: tel.log("warning", m))
+    refuse_graph_dtype(low, spec.name, dtype)          # a non-fp8 graph ELF returns NaN from spike; refuse, do not grade
     graphed, fused = low.kind == "graph", low.kind == "fused"
 
     # --- the models that do not need the hardware output run WHILE spike does ----------------
@@ -637,10 +638,13 @@ def run(spec, *, recipe=None, tol: float = 0.15, simulator: str = "spike",
     run_id = make_run_id(spec.name, shape_tag)
     artifact_paths = {"workdir": str(workdir)}
     if artifacts:
+        art_dir.mkdir(parents=True, exist_ok=True)         # the graph path makes no earlier copy into it
+        if graphed and (workdir / "graph" / "main.c").exists():
+            shutil.copy(workdir / "graph" / "main.c", art_dir / "graph.c")
         np.savez_compressed(art_dir / "operands.npz", **saved)
         artifact_paths["rtl_replay_bundle"] = str(art_dir)
         tel.log("artifacts", f"RTL replay bundle -> {art_dir} (.c"
-                             f"{' for the fused chain' if fused else ' per stage'}, operands.npz)")
+                             f"{' for the graph' if graphed else ' for the fused chain' if fused else ' per stage'}, operands.npz)")
 
     run_dir = write_report(
         results_dir=results_dir, run_id=run_id,

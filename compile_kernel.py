@@ -46,10 +46,9 @@ if str(REPO) not in sys.path:
 # built without merlin, so the process refuses to load it rather than depending on the environment.
 sys.modules.setdefault("merlin", None)
 
-from compiler.lower import DEFAULT_DTYPE, lower, wire_paths  # noqa: E402
+from compiler.lower import DEFAULT_DTYPE, lower, refuse_graph_dtype, wire_paths  # noqa: E402
 
 TARGETS = ("spike", "mx_rocket")
-GRAPH_DTYPE = "fp8_e4m3"        #: the only format mx_host.h can re-quantize on the host
 
 
 def compile(spec, recipe, *, dtype: str = DEFAULT_DTYPE, target: str = "spike", out: Path,
@@ -85,10 +84,7 @@ def compile(spec, recipe, *, dtype: str = DEFAULT_DTYPE, target: str = "spike", 
             f"{spec.name} cannot be compiled ahead of time: host stage(s) {host} carry a Python "
             "function, not an op the emitter knows (kernels/host_ops.OPS), so the only lowering is one "
             "ELF per matmul, each fed by the previous run. run_kernel.py drives that path.")
-    if low.kind == "graph" and dtype != GRAPH_DTYPE:
-        raise ValueError(
-            f"{spec.name} lowers as a graph, and a graph re-quantizes every intermediate on the "
-            f"host with mx_host.h, which encodes {GRAPH_DTYPE} only; {dtype} is refused")
+    refuse_graph_dtype(low, spec.name, dtype)
     cb = low.cb
     if low.kind == "graph":
         n_mesh = sum(r["where"] == "mesh" for r in low.stages)

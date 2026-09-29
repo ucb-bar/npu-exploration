@@ -385,19 +385,33 @@ def _emit_mesh_step(st: dict, shapes: dict, leaves: set, dim: int,
     ]
     if chunks > 1:
         b_spad = spad_rows - (k // dim) * (nc // dim) * dim
+        # The A tiles stay resident across the chunks, so the chunk result cannot land on them: it
+        # goes right after A (spad_dest, 128, is inside A whenever M*K > 128*DIM; before 2026-09-29
+        # chunk 0's store clobbered A and every later chunk multiplied garbage -- rmsnorm(32x512) @
+        # [512x512] came back 8192/16384 identical, the second chunk all inf/NaN). The budget above
+        # already counts A + B + out, so [a_rows, a_rows + out) never reaches b_spad.
+        a_rows = (m * k) // dim
+        chunk_dest = max(spad_dest, a_rows)
+        assert chunk_dest + (m * nc * 2) // dim <= b_spad, (out, m, k, nc, chunk_dest, b_spad)
         lines += [
             f"  /* N-chunked x{chunks}: {m}x{k}x{n} needs "
             f"{(m*k)//dim + (k*n)//dim + (m*n*2)//dim} rows of {spad_rows}; each chunk needs "
             f"{(m*k)//dim + (k*nc)//dim + (m*nc*2)//dim}. */",
             f"  {{ static uint16_t chunk[{m} * {nc}];",
+            f"    static uint8_t bsc[{k // 32} * {nc}];",
             f"    for (int n0 = 0; n0 < {n}; n0 += {nc}) {{",
-            f"      gemmini_mx_load_scales((uint64_t)&{b_tag}_scales[0][n0], "
-            f"{nc} * {k // 32}, 1);",
+            # The B scales are [K/32][N]; the chunk needs columns [n0, n0+nc) of EVERY block row,
+            # which is not one contiguous run (it was loaded as one before 2026-09-29: block row 0's
+            # spill stood in for block row 1, and llama_mlp's Y came back 52764/65536 identical).
+            f"      for (int g = 0; g < {k // 32}; g++)",
+            f"        for (int j = 0; j < {nc}; j++)",
+            f"          bsc[g * {nc} + j] = ((const uint8_t *){b_tag}_scales)[g * {n} + n0 + j];",
+            f"      gemmini_mx_load_scales((uint64_t)bsc, {k // 32} * {nc}, 1);",
             "      gemmini_fence();",
             f"      mvin_B((const uint8_t *){b_tag}_codes, {k}, n0, {nc}, {n}, {b_spad});",
             f"      mesh_matmul({m}, {k}, {nc}, {f.tile_m}, {f.tile_n}, {a_spad}, {spad_rows}, "
-            f"{spad_dest}, (uint64_t)scale_factors);",
-            f"      mvout_bf16(chunk, {spad_dest}, {m}, {nc});",
+            f"{chunk_dest}, (uint64_t)scale_factors);",
+            f"      mvout_bf16(chunk, {chunk_dest}, {m}, {nc});",
             f"      paste_cols({out}_bf16, {n}, chunk, {m}, n0, {nc});",
             "    } }",
         ]

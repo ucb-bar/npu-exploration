@@ -131,9 +131,21 @@ def main() -> int:
     if not runner.available("spike"):
         print("  SKIP  spike or libgemmini.so unavailable")
         return _finish()
-    for k in ("linear", "mlp2", "attention"):
+    # The fourth spec is a graph whose last matmul does not fit the scratchpad and is N-chunked
+    # with its A tiles (32x512: 1024 rows) resident across the chunks. Two emitter bugs lived only
+    # there until 2026-09-29 (chunk result stored onto A; B scales loaded as one contiguous run),
+    # and no registered kernel at its default shape reaches that path.
+    import torch
+    from kernels.spec import HostStage, KernelSpec, Stage
+    g = torch.Generator().manual_seed(0)
+    chunked = KernelSpec(name="chunked", x=torch.randn(32, 512, generator=g), stages=[
+        HostStage("Xn", op="rmsnorm", src="x",
+                  params={"weight": (1 + 0.1 * torch.randn(512, generator=g)).numpy().astype(np.float32), "eps": 1e-5}),
+        Stage("Y", weight=torch.randn(512, 512, generator=g) * 0.1, lhs="Xn")])
+    for k, spec in (("linear", build("linear")), ("mlp2", build("mlp2")), ("attention", build("attention")),
+                    ("rmsnorm->Y 32x512x512 (N-chunked graph)", chunked)):
         with tempfile.TemporaryDirectory() as td:
-            man = ck.compile(build(k), base, out=Path(td), tel=quiet)
+            man = ck.compile(spec, base, out=Path(td), tel=quiet)
             out, _ = runner.parse_output(runner.run_elf(man["elf"]["path"]))
             got = w.bf16_bits_to_float(np.array(out["Y0"], dtype=np.uint16))
             exp = np.load(Path(td) / "expected.npy")
