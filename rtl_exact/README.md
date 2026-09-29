@@ -82,9 +82,9 @@ hardware *worse*. Do not quote the effect of one of them measured with the other
 
 **The arithmetic primitives are imported, not transcribed.** `rtl_datapath` pulls
 `mx_product_quantize_trunc`, `fp_quantize_rne`, `fp_add_exact`, `q_bf16_rne` and `bf16_accum_add`
-from `fp8_matmul_model` in the gemmini tree, so there is one implementation of each and it cannot
-drift. Set `MXGEMMINI_ROOT` if that tree is not at `../../software/gemmini-rocc-tests`; the module
-raises rather than falling back to a lookalike.
+from `rtl_exact/mxmesh/fp8.py`, the hardware team's model extracted verbatim from the gemmini tree's
+`fp8_matmul_model.py` and pinned to it by `tests/selftest_extracted.py`, so there is one
+implementation of each and it cannot drift.
 
 **It is slow.** The golden's `fp_quantize_rne` (exp<8) and `fp_add_exact` are exact-dyadic *scalar
 Python loops* — fine for a layer, painful for a full perplexity sweep. Vectorizing them, with an

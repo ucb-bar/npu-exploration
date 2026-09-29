@@ -209,14 +209,14 @@ Run everything with `.venv/bin/python` from the repo root after `source scripts/
 ```
 run_kernel.py                 the exploration entry point (graded)
 compile_kernel.py             the compile entry point (ELF + expected bits)
-kernels/     registry.py spec.py trace.py            the kernel IR; --list shows what is registered; trace.py = PyTorch module -> KernelSpec
+kernels/     registry.py spec.py trace.py host_ops.py captures/    the kernel IR; --list shows what is registered; trace.py = PyTorch module -> KernelSpec; host_ops = the host op vocabulary; captures/ = real TinyLlama tensors
 config/      recipe.py recipes/*.json scheme.py     one JSON = one machine; recipe → mxq
 models/      reference/ mxquant/ (bits + perplexity) spike/ ppa/ perf/   one folder per model of the machine
 grade/       pipeline.py metrics.py report.py telemetry.py     run, compare, record
-compiler/    lower.py (KernelSpec -> command buffer); targets/mx_gemmini_rocket/ backend/{mxgemm_emit,mxgraph_emit,runner} runtime/
+compiler/    formats.py wire.py codebook.py operands.py graph.py (tensors -> the wire); lower.py (KernelSpec -> command buffer); targets/mx_gemmini_rocket/ backend/{mxgemm_emit,mxgraph_emit,runner} runtime/
 baremetal/   hand-written TinyLlama kernels and their generators
-rtl_exact/   the MXQuant config that is the hardware (rtl_datapath.py, mxgemmini_rtl.json)
-tests/       every test: selftest_*.py, verify_rtl_exact.py, oracle/ fixtures, rtl/ simq regression lists
+rtl_exact/   the MXQuant config that is the hardware (rtl_datapath.py, mxgemmini_rtl.json); mxmesh/ = the hardware team's extracted mesh model
+tests/       every test: selftest_*.py, verify_rtl_exact.py, oracle/ fixtures, fixtures/ (modules, llama tiles), rtl/ simq regression lists
 tools/       simq (RTL job queue), extraction        scripts/ setup.sh env.sh
 merlin/  microscaling-quant/       submodules             MXQuant/   optional clone
 out/  results/  .venv/  toolchain/ generated, gitignored

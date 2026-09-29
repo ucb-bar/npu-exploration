@@ -43,8 +43,8 @@ def build(name: str, **kwargs: Any) -> KernelSpec:
 
 @register("linear", "one nn.Linear (K->N): a single MX matmul")
 def _linear(*, m: int = 64, k: int = 64, n: int = 64, seed: int = 0, **_) -> KernelSpec:
-    # Seed order matches app/torch_linear/run_linear.py exactly, so a graded run is
-    # numerically identical to that baseline.
+    # Seed order is the original torch_linear baseline's (app/, since dissolved), so a graded run
+    # is numerically identical to it.
     torch.manual_seed(seed)
     layer = nn.Linear(k, n, bias=False)
     x = torch.randn(m, k)

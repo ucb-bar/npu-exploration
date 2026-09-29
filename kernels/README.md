@@ -8,6 +8,9 @@ becomes N stages.
 |---|---|
 | `spec.py` | `Stage`, `KernelSpec`, `from_module()` — the machinery; rarely edited |
 | `registry.py` | the catalogue: name → builder. **Add kernels here.** |
+| `host_ops.py` | the host op vocabulary (softmax, rmsnorm, silu, swiglu, add, rope, transpose): Python twin of `mx_host.h`; a `HostStage` names one of these |
+| `trace.py` | PyTorch module → KernelSpec |
+| `captures/llama_layer.py`, `captures/llama_model.py` | real TinyLlama tensors for the llama kernels (`python -m kernels.captures.llama_layer`; needs the MXQuant clone) |
 
 Two stage kinds:
 

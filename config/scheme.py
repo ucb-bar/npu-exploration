@@ -51,7 +51,7 @@ _RECIPE_DTYPE = {"fp8": "fp8_e4m3", "fp6": "fp6_e3m2", "fp4": "fp4_e2m1"}
 #: The hardware's operand rounding since 2026-09-10 (mx_fp_math.h, RNE for every format).
 ROUNDING = "rne"
 #: How the codes are multiplied (``scheme(reduce=)``): the recipe's array; mxq's exact float64 product (the
-#: format's cost alone); or exact inside each 32-block and the hardware's bf16 step across blocks.
+#: format's cost alone); or fp32 inside each 32-block and the hardware's bf16 step across blocks.
 REDUCERS = ("hardware", "exact", "bf16_tiles")
 
 
@@ -162,7 +162,7 @@ def scheme(recipe: Recipe, *, dtype: str | None = None, compiled: bool = False, 
     ``dtype`` is the operand format (default: the recipe's); a codebook format runs on its full element grid,
     see ``is_codebook``. ``reduce`` is one of ``REDUCERS``: "hardware" is the recipe's array (its Arithmetic,
     schedule and window; ``compiled=True`` fuses it through torch.compile, GPU, bit-identical, 5-7x faster per
-    layer); "exact" is mxq's ``fp64_accum``; "bf16_tiles" is exact inside each block, bf16 across (``compiled``
+    layer); "exact" is mxq's ``fp64_accum``; "bf16_tiles" is fp32 inside each block, bf16 across (``compiled``
     applies to it too). The three share the quantizers, so their differences are the multiply's alone."""
     from mxq import Scheme, fp64_accum, matmul
     q = quantizer(recipe, fmt=mxq_format(dtype) if dtype else None, rounding_mode=rounding_mode,

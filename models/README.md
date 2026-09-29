@@ -19,7 +19,7 @@ same way and a missing submodule fails soft with one message (`mxq_missing()`).
 
 ## The mxquant model
 
-`mxquant/mxquant.py` computes the bits the recipe's machine must produce. Operands are the bytes the
+`mxquant/kernel.py` computes the bits the recipe's machine must produce. Operands are the bytes the
 ELF carries (`compiler/operands.quantize_operand` → `wire_to_px`, codebooks included; a chained stage's
 A operand comes from `requantize_chained`, the transcription of the device's requantizer). The
 matmul is one `mxq.matmul.systolic` call on the recipe's arithmetic (`config/scheme.datapath`:

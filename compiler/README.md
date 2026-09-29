@@ -9,6 +9,11 @@ consumes a command buffer and emits + builds + runs a bare-metal ELF.
 
 | file | role |
 |---|---|
+| `formats.py` | the format table: bits, ranges, wire layout per operand format |
+| `wire.py` | float ↔ wire bytes, E8M0 scale rows, requant encode |
+| `codebook.py` | the 4-bit-index + 16-entry-table encoding of the four LUT formats |
+| `operands.py` | the operand encoder: `quantize_operand`, `wire_to_px`, `requantize_chained`, `encode` |
+| `graph.py` | the step list the graph emitter consumes |
 | `lower.py` | KernelSpec + format → command buffer (fused chain, graph, or per-stage records) and edges |
 | `backend/mxgemm_emit.py` | command buffer → C driver |
 | `backend/runner.py` | toolchain, compile, run on spike, parse OUT/METRIC/DONE |

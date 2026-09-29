@@ -17,7 +17,8 @@ conversion is lossless by construction:
 * ``X`` is an exact power of two, so its E8M0 code is ``log2(X) + 127``, verified by re-decoding.
 
 ``encode()`` therefore returns codes whose decode is *bit-identical* to the reference's own
-``P * X``; :func:`self_check` asserts exactly that on every element it is given.
+``P * X``, and asserts it on every element it is given (``tests/selftest_block.py`` and
+``selftest_quantizer.py`` drive it over real tiles).
 
 The reference's convention, for the record (measured, see ``planning/chain_seam_hw_notes.md``):
 

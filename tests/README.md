@@ -17,8 +17,8 @@ holds it up.
 | `selftest_requant.py` | the chained requantizer, per step, against a C oracle |
 | `selftest_extracted.py` | `rtl_exact/mxmesh/` still equals the models it was extracted from |
 | `selftest_mx_rocket_build.py` | one C source builds for **both** spike and `MX_ROCKET` |
-| `selftest_lower.py` | `compiler/lower.py` builds the chain command buffer merlin's parser used to build (26 cases recorded once from that parser at b4b89c2, `tests/oracle/command_buffers.json`; the generator is gone with `app/mxiface.py`), picks the lowering the pipeline picks, imports no merlin |
-| `selftest_compile.py` (+ `fixtures/modules.py`) | `compile_kernel.py` writes the same `main.c` as the graded path for every kernel × format and both targets, its spike ELF prints `expected.npy` bit for bit, and it refuses before any build |
+| `selftest_lower.py` | `compiler/lower.py` builds the chain command buffer merlin's parser used to build (26 cases recorded once from that parser at b4b89c2, `tests/oracle/command_buffers.json`; the generator, `mxiface.py`, is gone with app/), picks the lowering the pipeline picks, imports no merlin |
+| `selftest_compile.py` (+ `fixtures/modules.py`; `fixtures/llama_tiles.py` captures the tiles `selftest_quantizer.py` reads) | `compile_kernel.py` writes the same `main.c` as the graded path for every kernel × format and both targets, its spike ELF prints `expected.npy` bit for bit, and it refuses before any build |
 | `test_recipe_drift.py` | a recipe JSON equals the Chisel it elaborates (see [`../config/`](../config/README.md)) |
 | `verify_rtl_exact.py` | MXQuant under [`../rtl_exact/`](../rtl_exact/README.md) equals the hardware bit for bit on one real llama MLP (`oracle/fixture_llama_mlp.npz`; `oracle/make_fixture.py` regenerates it from a capture) |
 | `rtl/*.jobs` | RTL regression lists for simq: `tools/simq run CONFIG=<cfg> BINARY=tests/rtl/<list>.jobs JOBS=8` (the config is in each file's header) |

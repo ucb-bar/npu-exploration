@@ -180,7 +180,8 @@ def _walk(spec, dtype: str, edges: dict | None, mesh):
 
 
 def _quantize(V: np.ndarray, fmt: str, axis: int, *, scale_floor: float = SCALE_FLOOR, via=None):
-    """mxq's block quantizer in the hardware's convention: RNE, block max floored at 2^-23."""
+    """mxq's block quantizer in the hardware's convention: RNE, block max floored at 2^-23 unless the caller
+    says otherwise (the fp4 requantizer: 2^-126 and ``via=(3, 1)``)."""
     from mxq import block
     return block.mxgemmini.quantize(torch.from_numpy(np.ascontiguousarray(V, np.float32)), fmt, axis=axis,
                                     block_size=BLOCK, rounding_mode=_scheme.ROUNDING, scale_floor=scale_floor, via=via)
