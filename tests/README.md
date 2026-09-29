@@ -7,7 +7,7 @@ holds it up.
 | file | the claim it defends |
 |---|---|
 | `selftest_grade.py` | metrics, telemetry and reporting agree — the bit-identity verdict, the fp32 fallback, NO VERDICT without hardware, the renamed keys, and that events logged before the results directory exists are not dropped |
-| `selftest_scheme.py` | `config/scheme.py` builds from each recipe exactly the arithmetic the hardware team's extracted model runs (0 differing elements, 4 recipes); the refusals; `models.select` |
+| `selftest_scheme.py` | `config/scheme.py` builds from each recipe exactly the arithmetic the hardware team's extracted model runs (0 differing elements, 4 recipes); the refusals; the product flush follows `types.prodFloor`; both recipe kinds load strictly, `build_id`/`run_id` move with every number and no label, `check()` refuses what the kernel path cannot follow; `models.select` |
 | `selftest_mxquant.py` | `models/mxquant` equals the previous reference on every kernel × format (24 pairs, every intermediate), follows the recipe, degrades to `Unavailable` honestly, its as-shipped line is mxq's MXQuant mode; 120 recorded kernel × format × recipe outputs (`oracle/mxquant_bits.json`) hold it bit for bit, and mxq's quantizer on the bf16 accumulator is measured to be the fp8_e4m3 device requantizer |
 | `selftest_block.py` | `models/mxquant/block.py` (mxq) is MXQuant's block quantizer bit for bit — ties, subnormals, zero and sub-2^-23 blocks, ragged shapes, all formats (`oracle/block_fixture.npz`; `--update` regenerates it from MXQuant) |
 | `selftest_workload.py` | the perplexity path patches the right layers with the recipe's Scheme, gives the same bits as the bit path on a linear layer and an mlp2 chain, keys its cache on everything the number depends on, refuses what mxq cannot run; `--gpu` measures one sample and hits the cache |
@@ -19,7 +19,7 @@ holds it up.
 | `selftest_mx_rocket_build.py` | one C source builds for **both** spike and `MX_ROCKET` |
 | `selftest_lower.py` | `compiler/lower.py` builds the chain command buffer merlin's parser used to build (26 cases recorded once from that parser at b4b89c2, `tests/oracle/command_buffers.json`; the generator, `mxiface.py`, is gone with app/), picks the lowering the pipeline picks, imports no merlin |
 | `selftest_compile.py` (+ `fixtures/modules.py`; `fixtures/llama_tiles.py` captures the tiles `selftest_quantizer.py` reads) | `compile_kernel.py` writes the same `main.c` as the graded path for every kernel × format and both targets, its spike ELF prints `expected.npy` bit for bit, and it refuses before any build |
-| `test_recipe_drift.py` | a recipe JSON equals the Chisel it elaborates (see [`../config/`](../config/README.md)) |
+| `test_recipe_drift.py` | `config/hardware/baseline.json` and the kernel-path constants equal libgemmini, the Chisel source, both `gemmini_params.h`, the emitters and `rtl_exact/` (see [`../config/`](../config/README.md)) |
 | `verify_rtl_exact.py` | MXQuant under [`../rtl_exact/`](../rtl_exact/README.md) equals the hardware bit for bit on one real llama MLP (`oracle/fixture_llama_mlp.npz`; `oracle/make_fixture.py` regenerates it from a capture) |
 | `rtl/*.jobs` | RTL regression lists for simq: `tools/simq run CONFIG=<cfg> BINARY=tests/rtl/<list>.jobs JOBS=8` (the config is in each file's header) |
 | `oracle/` | fixtures the above compare against |

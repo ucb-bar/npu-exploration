@@ -1,12 +1,8 @@
-"""The hardware recipe: one file that defines the MX-Gemmini we are running on.
+"""The two recipes a run takes.
 
-A recipe is consumed by THREE models of the same machine:
+  * ``hardware/*.json`` (``--hw``): one MX-Gemmini. Every number is the chip; ``build_id`` is its digest.
+  * ``run/*.json`` (``--run``): how software drives it (operand format, rounding, scale floor, reducer,
+    the kernel path's threshold). ``run_id`` is its digest.
 
-  * ``models/mxquant/kernel.py``  — the Python model on mxq (the bits we expect)
-  * ``models/spike/build_spike.py`` — patches libgemmini's C model, seconds to build
-  * ``config/scala/JsonGemminiConfig.scala`` — Chisel elaboration, tens of minutes
-
-so the schema is the one the Scala parser already enforces (``array`` / ``types`` /
-``mx`` / ``accumulator``), plus two sections it is told to ignore (``software`` /
-``runtime``) that never reach the hardware.
+``config.recipe`` loads and checks both; ``config.scheme`` turns the pair into mxq's Scheme.
 """

@@ -54,7 +54,7 @@ Rebuild and install it from gemmini (`make clean` first — its Makefile misses 
 force a per-recipe rebuild:
 
 ```bash
-.venv/bin/python -m models.spike.build_spike --config <recipe> --force
+.venv/bin/python -m models.spike.build_spike --hw <recipe> --force
 ```
 
 The same code is also what a baremetal test prints when it was built without `-DSPIKE_SIM` and took

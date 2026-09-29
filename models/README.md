@@ -1,7 +1,9 @@
 # models — one folder per model of the recipe's machine
 
-A **recipe** (`config/recipes/*.json`) defines one MX-Gemmini. Each folder here is one model of that
-machine: it takes the recipe (and, where it applies, the kernel), answers one question, and owns
+A **hardware recipe** (`config/hardware/*.json`, `--hw`) defines one MX-Gemmini, and a **run recipe**
+(`config/run/*.json`, `--run`) says how software drives it (see [`../config/`](../config/README.md)).
+Each folder here is one model of that machine: it takes the recipes (and, where it applies, the
+kernel), answers one question, and owns
 the line `run_kernel.py` prints for it. `run_kernel.py --models` picks which ones run:
 all five run by default; any comma list works.
 
@@ -53,12 +55,12 @@ what can run (`tinyllama`: 16 samples × 2048 tokens, seed 0, attention projecti
 `rules.py: mxquant_layers`). One subprocess per GPU (`_worker.py`, on mxq's `experiments/llm_ppl.py`,
 `--gpus 0,1,2,3`), always a subprocess, so the caller never initialises CUDA. Results are cached
 under `results/accuracy/<key>.json`; the key hashes everything the number depends on (model, samples,
-seed, rules, recipe `build_id`, operand format, rounding, scale floor, mxq commit, torch and
-transformers versions). The bf16 baseline is measured once the same way. `--dtype` picks the operand
-format (default: the recipe's); every format runs on its full element grid, and for the four
+seed, rules, hardware recipe `build_id`, operand format, rounding, scale floor, mxq commit, torch and
+transformers versions). The bf16 baseline is measured once the same way. The run recipe's
+`operand_fmt` picks the operand format; every format runs on its full element grid, and for the four
 codebook formats the record says `codebook: not modelled`, since the hardware sends those through a
 16-entry table that mxq does not have (the bit path grades them through the wire operands).
-`--reduce` picks how the codes are multiplied, with the same quantizers in all three cases:
+The run recipe's `reduce` picks how the codes are multiplied, with the same quantizers in all three cases:
 `hardware` (default) is the recipe's array; `exact` is mxq's `fp64_accum`, the format's cost with a
 perfect multiplier; `bf16_tiles` sums each 32-block in fp32 and folds it into the output with the
 hardware's own bf16 step. Run all three and the recipe's cost splits into format, cross-block
@@ -70,25 +72,26 @@ N in order, the default the 16 seeded ones MXQuant used. The per-sample perplexi
 ranges from 4 to 18, so 16 samples carry about ±0.8 of sample choice: measured on the bf16 model, the
 seeded 16 give 7.1989, the first 16 in order 7.9063, the whole split 8.0328. Differences between
 recipes on the same samples are still meaningful; absolute numbers against the literature want the
-whole split. `--config none` measures the bf16 model alone.
+whole split. `--hw none` measures the bf16 model alone.
 
 ```bash
 .venv/bin/python -m models.mxquant --list
-.venv/bin/python -m models.mxquant --workload tinyllama --config baseline --dry-run       # which layers get the Scheme
-.venv/bin/python -m models.mxquant --workload tinyllama --config baseline --gpus 0,1,2,3
-.venv/bin/python -m models.mxquant --workload tinyllama --config wide_acc --dtype fp4_e2m1 --gpus 0,1 --nsamples 4
-.venv/bin/python -m models.mxquant --workload tinyllama --config baseline --gpus 0,1,2,3 --reduce exact
-.venv/bin/python -m models.mxquant --workload tinyllama --config none --gpus 0,1,2,3 --nsamples 0        # bf16, whole split: 8.0328
+.venv/bin/python -m models.mxquant --workload tinyllama --hw baseline --dry-run       # which layers get the Scheme
+.venv/bin/python -m models.mxquant --workload tinyllama --hw baseline --gpus 0,1,2,3   # run recipe "default"
+.venv/bin/python -m models.mxquant --workload tinyllama --hw wide_acc --run fp4_e2m1 --gpus 0,1 --nsamples 4
+.venv/bin/python -m models.mxquant --workload tinyllama --hw baseline --run exact --gpus 0,1,2,3
+.venv/bin/python -m models.mxquant --workload tinyllama --hw none --gpus 0,1,2,3 --nsamples 0        # bf16, whole split: 8.0328
 ```
 
 `tests/selftest_workload.py` holds the two paths to the same bits: a `linear` kernel through
 `mxquant.run` equals `MXLinear` on the same tensors, and an `mlp2` chain equals two `MXLinear` with
 the bf16 accumulator between. Reproduction (2026-09-24, `tests/oracle/accuracy_baseline.json`): with
-`--rounding-mode ties_away --scale-floor 1e-38` (mxq's defaults) the baseline recipe reproduces mxq's
+a run recipe with `rounding: ties_away` and `scale_floor: 1e-38` (mxq's defaults), and the product flush off
+(`types.prodFloor: null`, as mxq was before it modelled the flush), the baseline recipe reproduces mxq's
 recorded `hw_fp8` run exactly, 7.343833269506588, and the unpatched model reproduces MXQuant's bf16
 number, 7.188464705866791, under the interpreter those were taken with (torch 2.9.1, transformers
 4.57.3). Under the repo's `.venv` (torch 2.14.0, transformers 5.17.0) the same samples give 7.346034
-and 7.198868: the bf16 model's own loss moves with the torch and transformers versions, so the
+and 7.198868 (with the flush on, as `baseline.json` has it: 7.346997): the bf16 model's own loss moves with the torch and transformers versions, so the
 versions are part of the cache key and of every record. The standing number for the hardware's
 rounding (rne, 2^-23 floor) in the `.venv` on mxq 5ee8bd4 was 7.365560971111733; the selftest checks
 a cached measurement against the oracle whenever one exists for the running environment and mxq
@@ -98,6 +101,4 @@ a GPU the path reports why.
 ## What is not here yet
 
 The lowering is `compiler/lower.py` and the operand encoder `compiler/operands.py`; the spike run
-still lives in `grade/pipeline.py`. What the models do not yet read from the recipe (the operand
-format, the reducer, the rounding knobs, the emitter geometry) is the next plan: two recipes,
-hardware and run, and no flag that a recipe field could carry.
+still lives in `grade/pipeline.py`.

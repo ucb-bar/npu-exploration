@@ -33,8 +33,8 @@ those three could only fail.
 
 ## What is recorded
 
-Every run lands in `results/<timestamp>_<kernel>_<shape>/`: `config.json` (shapes, seed, recipe +
-ladder, the models that ran, toolchain paths, git heads incl. `mxq_head`, the quantizer that made the
+Every run lands in `results/<timestamp>_<kernel>_<shape>/`: `config.json` (shapes, seed, hardware recipe +
+ladder, the run recipe and its `run_id`, the emitter geometry, the models that ran, toolchain paths, git heads incl. `mxq_head`, the quantizer that made the
 operands, and a hash of the functional model that actually ran), `metrics.json` (with
 `metrics["mxquant"]`: arithmetic, schedule, window, mxq commit), `log.jsonl`, plus
 `hardware_output.npy` (when spike ran), `fp32_reference.npy` and `mxquant_output.npy` (when the

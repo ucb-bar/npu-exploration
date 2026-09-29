@@ -15,7 +15,7 @@ git clone --recurse-submodules git@github.com:ucb-bar/npu-exploration.git
 cd npu-exploration
 bash scripts/setup.sh                       # provisions EVERYTHING (idempotent; see below)
 source scripts/env.sh                       # sets MERLIN_CHIPYARD, RISCV, PATH
-.venv/bin/python run_kernel.py --kernel linear --config baseline
+.venv/bin/python run_kernel.py --kernel linear --hw baseline
 ```
 
 `setup.sh` provisions, inside the clone: the python env (`.venv` + `requirements.txt`), the
@@ -50,9 +50,9 @@ If something fails to start, it is almost always the environment — see
 ```bash
 .venv/bin/python run_kernel.py --list
 .venv/bin/python run_kernel.py --kernel llama_mlp
-.venv/bin/python run_kernel.py --kernel linear --dtype fp4_e2m1 --config wide_acc
-.venv/bin/python run_kernel.py --kernel linear --config wide_acc --models mxquant       # the model alone, no spike
-.venv/bin/python run_kernel.py --kernel linear --config wide_acc --models all --gpus 0,1,2,3   # + perplexity
+.venv/bin/python run_kernel.py --kernel linear --hw wide_acc --run fp4_e2m1
+.venv/bin/python run_kernel.py --kernel linear --hw wide_acc --models mxquant           # the model alone, no spike
+.venv/bin/python -m models.mxquant --workload tinyllama --hw wide_acc --gpus 0,1,2,3    # perplexity
 .venv/bin/python compile_kernel.py --kernel mlp3 --target mx_rocket                       # compile only: ELF + expected bits
 .venv/bin/python compile_kernel.py --module tests/fixtures/modules.py:Attn                # a plain PyTorch module
 ```
@@ -116,11 +116,10 @@ measure stale RTL — the mistake that cost two days in
 | flag | default | meaning |
 |---|---|---|
 | `--kernel` | `linear` | which kernel (`--list`) |
-| `--config` | `baseline` | which hardware recipe (`--list`) |
+| `--hw` | `baseline` | which hardware recipe (`--list`); `--config` is the same flag |
+| `--run` | `default` | which run recipe: operand format, rounding, scale floor, pass threshold (`--list`) |
 | `--models` | `default` | which models run: reference, mxquant, spike, ppa, perf, or a comma list of them |
-| `--dtype` | `fp8_e4m3` | MX operand format |
 | `--m --k --h --n` | 64 | batch rows, in_features, hidden, out_features |
-| `--tol` | 0.15 | pass threshold on relative Frobenius error vs fp32 |
 | `--artifacts` | off | also write an RTL-replay bundle (C + `operands.npz`) |
 | `--build-only` | off | stop at the ELF |
 | `--per-stage-elf` | off | one ELF per matmul, intermediates carried by the host; the default fuses a chain or emits a graph as one ELF |
@@ -175,20 +174,23 @@ launch several `run_kernel.py` processes; each run writes its own `results/<time
 
 | what you want | command |
 |---|---|
-| grade a kernel on a machine, every model at once | `run_kernel.py --kernel attention --config wide_acc` |
-| just the bits a machine must produce, no spike, seconds | `run_kernel.py --kernel mlp3 --config narrow_prod --models mxquant` |
+| grade a kernel on a machine, every model at once | `run_kernel.py --kernel attention --hw wide_acc` |
+| just the bits a machine must produce, no spike, seconds | `run_kernel.py --kernel mlp3 --hw narrow_prod --models mxquant` |
 | compile a kernel to an ELF for spike or the RTL build | `compile_kernel.py --kernel mlp3 --target mx_rocket` |
 | compile a plain PyTorch module, no registry entry | `compile_kernel.py --module my.py:Block --input x.npy` |
-| perplexity of a workload on one machine, same arithmetic | `python -m models.mxquant --workload tinyllama --config baseline --gpus 0,1,2,3` |
-| silicon cost of one machine | `python -m models.ppa.ppa --config baseline` |
-| predicted timeline of one matmul on it | `python -m models.perf.perf --config baseline --m 64 --k 64 --n 64` |
-| build or list the per-recipe functional models | `python -m models.spike.build_spike --config R --force` |
+| perplexity of a workload on one machine, same arithmetic | `python -m models.mxquant --workload tinyllama --hw baseline --run default --gpus 0,1,2,3` |
+| silicon cost of one machine | `python -m models.ppa.ppa --hw baseline` |
+| predicted timeline of one matmul on it | `python -m models.perf.perf --hw baseline --m 64 --k 64 --n 64` |
+| build or list the per-recipe functional models | `python -m models.spike.build_spike --hw R --force` |
 | the claims, one test each | `tests/selftest_*.py` (17 of them) and `tests/test_recipe_drift.py` |
 | environment | `bash scripts/setup.sh --check`, `source scripts/env.sh` |
 
 Kernels by name: `linear`, `mlp2` … `mlp8`, `attention`, and `llama_attention` / `llama_mlp` once a
-capture exists. Machines: `baseline`, `flat_acc4`, `wide_acc`, `narrow_prod`, or any recipe JSON.
-Formats: every entry of `compiler/formats.py` on chains; `fp8_e4m3` only on graph kernels.
+capture exists. Machines: `baseline`, `flat_acc4`, `wide_acc`, `narrow_prod`, or any hardware recipe
+JSON. Run recipes: `default`, `exact`, `bf16_tiles`, `fp4_e2m1`, or any run recipe JSON. Formats
+(the run recipe's `operand_fmt`): every entry of `compiler/formats.py` on chains; `fp8_e4m3` only on
+graph kernels. The old `--dtype`, `--tol` and `--allow-lossy-chain` flags are refused with the run
+field that replaced each.
 `compile_kernel.py` builds and writes `expected.npy` but runs nothing; running the `mx_rocket` ELF
 on VCS or FPGA is the hardware team's step.
 
@@ -196,7 +198,7 @@ Less common:
 
 | command | what it does |
 |---|---|
-| `python -m models.mxquant --workload tinyllama --config R --dry-run` | which layers get the recipe's Scheme |
+| `python -m models.mxquant --workload tinyllama --hw R --dry-run` | which layers get the recipe's Scheme |
 | `kernels/captures/llama_layer.py`, `tests/fixtures/llama_tiles.py` | capture real TinyLlama tensors for the llama kernels (needs the MXQuant clone) |
 | `baremetal/mxgemmini/gen/gen_*.py` | generators for the hand-written TinyLlama kernels |
 | `tests/verify_rtl_exact.py`, `tests/oracle/make_fixture.py` | the frozen llama-MLP fixture and its verifier (MXQuant under `rtl_exact/` equals the hardware) |
@@ -210,7 +212,7 @@ Run everything with `.venv/bin/python` from the repo root after `source scripts/
 run_kernel.py                 the exploration entry point (graded)
 compile_kernel.py             the compile entry point (ELF + expected bits)
 kernels/     registry.py spec.py trace.py host_ops.py captures/    the kernel IR; --list shows what is registered; trace.py = PyTorch module -> KernelSpec; host_ops = the host op vocabulary; captures/ = real TinyLlama tensors
-config/      recipe.py recipes/*.json scheme.py     one JSON = one machine; recipe → mxq
+config/      recipe.py hardware/*.json run/*.json scheme.py     the machine, how it is driven; both → mxq
 models/      reference/ mxquant/ (bits + perplexity) spike/ ppa/ perf/   one folder per model of the machine
 grade/       pipeline.py metrics.py report.py telemetry.py     run, compare, record
 compiler/    formats.py wire.py codebook.py operands.py graph.py (tensors -> the wire); lower.py (KernelSpec -> command buffer); targets/mx_gemmini_rocket/ backend/{mxgemm_emit,mxgraph_emit,runner} runtime/
@@ -228,7 +230,7 @@ Each directory has its own README covering what it holds and what to do there.
 |---|---|
 | [`kernels/`](kernels/README.md) | the kernel registry — a kernel is data, not code. **Add kernels here.** |
 | [`baremetal/`](baremetal/README.md) | hand-written application kernels per target (TinyLlama on MxGemmini) |
-| [`config/`](config/README.md) | hardware recipes: one JSON = one machine (`--config`); `scheme.py` maps a recipe onto mxq |
+| [`config/`](config/README.md) | the two recipes: `hardware/` = one machine (`--hw`), `run/` = how software drives it (`--run`); `scheme.py` maps the pair onto mxq |
 | [`models/`](models/README.md) | one folder per model of that machine: reference, mxquant (bits and perplexity), spike, ppa, perf |
 | [`compiler/`](compiler/README.md) | the lowering (`lower.py`) and the backend that emits, builds and runs the ELF |
 | [`grade/`](grade/README.md) | run, compare, record — and what the verdict means |
@@ -249,5 +251,6 @@ datapath, nearly the same programming model — but nothing here may include, li
 into it. Reimplement; take ideas, not code. Every *fact* the compiler needs is grounded in
 `generators/gemmini/` instead: the headers, the spike model, the RTL Scala.
 
-**One config artifact, two consumers.** `config/recipes/*.json` drives *both* compilation and
-hardware generation — see [`config/README.md`](config/README.md).
+**The machine is one file.** `config/hardware/*.json` is the only description of the machine that
+every model reads: mxquant, spike, ppa and perf. How software drives it is a separate file,
+`config/run/*.json`. See [`config/README.md`](config/README.md).
