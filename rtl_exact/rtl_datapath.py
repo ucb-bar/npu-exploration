@@ -30,10 +30,9 @@ Usage
     sim = eval_complete.MXLinearSim(layer, "MXFP8_E4M3", False,
                                     *cfg.product, cfg.acc_schedule, 0, 0, window=cfg.window)
 
-The arithmetic primitives are IMPORTED from the hardware golden model (`fp8_matmul_model` in the
-gemmini tree) rather than transcribed, so there is exactly one implementation of each and it cannot
-drift. Point `MXGEMMINI_ROOT` at that tree if it is not at the default relative path; this module
-raises rather than falling back to a lookalike.
+The arithmetic primitives are IMPORTED from the hardware team's model, extracted verbatim into
+`rtl_exact/mxmesh/fp8.py` (pinned to the gemmini tree's `fp8_matmul_model.py` by
+`tests/selftest_extracted.py`), so there is one implementation of each and it cannot drift.
 
 Known cost: the golden's `fp_quantize_rne` (exp<8) and `fp_add_exact` are exact-dyadic SCALAR Python
 loops, so an RTL-exact run is far slower than the shipped path -- fine for a layer, painful for a
@@ -89,6 +88,8 @@ def load_config(path: Path | None = None) -> RtlConfig:
 #: Peak device memory the batched window loop may use for its [W, M, N] working set. Lower it if a
 #: run OOMs on a small GPU; it only changes the batch size, never the result.
 RTL_BATCH_BYTES = 2 << 30
+#: The MX block along K. MXQuant's eval_complete says the same (install() checks) and so does mxq.block.BLOCK.
+BLOCK = 32
 
 
 def _simulate_atw_rtl_serial(self, A, B, P_A, X_A, P_B, X_B, C, window, FM):
@@ -202,7 +203,8 @@ def install(eval_complete_module, cfg: RtlConfig | None = None) -> None:
     cfg = cfg or load_config()
     FM = _golden(cfg)
     EC = eval_complete_module
-    BLOCK = EC.BLOCK
+    if EC.BLOCK != BLOCK:
+        raise RuntimeError(f"eval_complete.BLOCK is {EC.BLOCK}, this datapath assumes {BLOCK}")
     _prod_op, _acc_op, _cross_op = (_compiled_ops(FM) if RTL_COMPILE else (None, None, None))
 
     @torch.no_grad()
