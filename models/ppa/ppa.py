@@ -31,6 +31,37 @@ REPO = Path(__file__).resolve().parents[2]
 CALIBRATED_DIM = 16
 TECH, CORNER = "tstech16c", "tt0p8v25c"
 CALIBRATION = ("--fmtset", "mxgemmini", "--calib", "new", "--blocks-variant", "new")
+#: With the LUT path on, the settings the workspace itself uses (perf/perf_model.py energy(), README's quad line):
+#: the PE with the quad arm, the calibration and blocks measured with LUTs, the fp8 QuantLut projection.
+CALIBRATION_LUT = ("--fmtset", "mxgemmini-all", "--calib", "all", "--blocks-variant", "all", "--lut", "fp8")
+
+#: run operand_fmt -> (pair_modes token, compose --stim, ops per PE per cycle, perf_model --act/--wei).
+#: The stim and products are what the workspace's pair_modes.spec(tok, tok, lut) gives for that format, LUT on
+#: exactly for the LUT formats (config.scheme.is_codebook); tests/selftest_ppa.py holds this table equal to it.
+#: fp8n / fp8qn are the NaN-safe E4M3 kernels (operands capped at 256; mxgen reads E4M3 272..448 as NaN).
+FORMATS = {
+    "fp8_e4m3":      ("e4m3",  "fp8n",     1, "fp8"),
+    "fp8_e4m3_quad": ("e4m3q", "fp8qn",    4, "fp8"),      # perf: fp8 + --lut is the quad arm
+    "fp8_e5m2":      ("e5m2",  "fp8e5m2",  4, "fp8e5m2"),
+    "fp6_e3m2":      ("e3m2",  "fp6",      4, "fp6"),
+    "fp6_e2m3":      ("e2m3",  "fp6e2m3q", 4, "fp6e2m3"),
+    "fp4_e2m1":      ("e2m1",  "fp4",      4, "fp4"),
+}
+
+
+def format_tokens(dtype: str) -> tuple[str, str, int, str]:
+    """A run recipe's operand format -> (pair_modes token, --stim, products, perf token). See FORMATS."""
+    try:
+        return FORMATS[dtype]
+    except KeyError:
+        raise PpaError(f"operand format {dtype!r} has no PPA model tokens; known: {sorted(FORMATS)}") from None
+
+
+def uses_lut(dtype: str) -> bool:
+    """Does this format reach the mesh through LUTs? The kernels compiled for it carry them, whatever the
+    hardware recipe's mx.enable_lut says (config.recipe.check warns about that mismatch)."""
+    from config.scheme import is_codebook
+    return is_codebook(dtype)
 
 
 def operand_family(dtype: str) -> str:
@@ -73,17 +104,25 @@ def ppa_args(recipe, dtype: str = "fp8_e4m3") -> list[str]:
     (e, m = sig-1), so sig = m + 1 here. The acc ladder is run-length encoded
     per the model's --rows grammar; baseline must come out exactly as the
     model's documented tapeout invocation (tests/selftest_ppa.py pins this).
+    A LUT format is priced on the LUT hardware the way the workspace prices it
+    (CALIBRATION_LUT, the pair_modes products), matching its README quad line.
     """
-    rows = _run_length([(e, m + 1) for e, m in zip(recipe.acc_e, recipe.acc_m)])
-    return ["--rows", rows,
+    _, stim, products, _ = format_tokens(dtype)
+    lut = uses_lut(dtype)
+    args = ["--rows", acc_rows(recipe),
             "--prod", f"{recipe.prod_e},{recipe.prod_m + 1}",
             "--cols", str(recipe.dim),
-            "--stim", operand_family(dtype),
-            *CALIBRATION,
+            "--stim", stim,
+            *(CALIBRATION_LUT if lut else CALIBRATION),
             "--util", str(recipe.utilization), "--clock-ns", str(recipe.clock_ns)]
-    # --lut is left at the model's default (fp6): it selects which QuantLut
-    # projection the requantizer block was synthesized with, and fp6 is the
-    # hardware as built. Revisit when recipes grow a LUT-format field.
+    if lut:
+        args += ["--products", str(products)]   # without a LUT the model's own default is the same number
+    return args
+
+
+def acc_rows(recipe) -> str:
+    """The recipe's accumulator ladder in the models' --rows / --acc-rows spelling."""
+    return _run_length([(e, m + 1) for e, m in zip(recipe.acc_e, recipe.acc_m)])
 
 
 _ROW = re.compile(r"^(?P<name>\S.*?)\s{2,}(?P<area>\d+(?:\.\d+)?)k\s+"
@@ -152,6 +191,8 @@ def run_ppa(recipe, dtype: str = "fp8_e4m3") -> dict:
         "post_synthesis": True,
         "calibrated_dim": CALIBRATED_DIM,
         "calibrated": recipe.dim == CALIBRATED_DIM,
+        "lut": uses_lut(dtype),
+        "enable_lut": recipe.enable_lut,
         "workspace_head": _workspace_head(root),
     }
     return out

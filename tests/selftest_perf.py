@@ -18,7 +18,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from models.perf.perf import PerfError, perf_args, perf_model_path, run_perf  # noqa: E402
+from models.perf.perf import PerfError, perf_args, perf_model_path, run_perf, spad_kb  # noqa: E402
 from config.recipe import load_hardware as load, parse_hardware  # noqa: E402
 
 CHECKS = []
@@ -37,7 +37,28 @@ def main() -> int:
     got = dict(zip(args[::2], args[1::2]))
     check("--M/--N/--K", (got["--M"], got["--N"], got["--K"]) == ("64", "64", "64"))
     check("--rows/--cols = dim", (got["--rows"], got["--cols"]) == ("16", "16"))
-    check("--act/--wei = operand family", (got["--act"], got["--wei"]) == ("fp8", "fp8"))
+    check("--act/--wei = the format's token", (got["--act"], got["--wei"]) == ("fp8", "fp8"))
+    check("a direct format runs without the LUT", "--lut" not in args)
+    for fmt, tok in (("fp8_e5m2", "fp8e5m2"), ("fp6_e2m3", "fp6e2m3"), ("fp6_e3m2", "fp6"), ("fp8_e4m3_quad", "fp8")):
+        a6 = perf_args(r, fmt, 128, 64, 256, "bf16")
+        g6 = dict(zip(a6[::2], a6[1::2]))
+        i = a6.index("--lut-a")
+        check(f"{fmt}: --act {tok}, --lut, one LUT per 2 rows of A / cols of W / rows of C, only needed tables",
+              g6["--act"] == tok and "--lut" in a6 and a6[i:i + 9] == ["--lut-a", "2", "256", "--lut-w", "256", "2",
+                                                                       "--lut-c", "2", "64"] and "--lut-full-set" not in a6,
+              " ".join(a6[i:i + 9]))
+    g2 = perf_args(r, "fp6_e3m2", 128, 64, 256, "bf16", lut_group=2)
+    check("lut_group 2 -> LUTs of 4 rows", g2[g2.index("--lut-a") + 1] == "4")
+    en = perf_args(load("wide_acc"), "fp8_e4m3", 64, 64, 64, "bf16", energy=True)
+    check("--energy carries the recipe's ladder", en[en.index("--acc-rows") + 1] == "16x8,8")
+    try:
+        perf_args(r, "fp8_e4m3", 64, 64, 64, "bf16", tiles=(64, 64, 64))
+        check("production-GEMM options refused as measured", False)
+    except PerfError:
+        check("production-GEMM options refused as measured", True)
+    ideal = perf_args(r, "fp8_e4m3", 64, 64, 64, "bf16", as_measured=False, tiles=(32, 32, 64), dma_bw=16, spad_kb=spad_kb(r))
+    check("--ideal takes tiles, dma-bw and the recipe's scratchpad (4 x 4096 x 16 B = 256 KB)",
+          " ".join(ideal).endswith("--tm 32 --tn 32 --tk 64 --dma-bw 16 --spad-kb 256.0"), " ".join(ideal[-10:]))
     check("--out-fmt f8E4M3FN -> fp8", got["--out-fmt"] == "fp8", got["--out-fmt"])
     check("--as-measured on by default", "--as-measured" in args)
     check("--clock-ns = implementation.clock_ns", got["--clock-ns"] == "2.0", got["--clock-ns"])
@@ -70,6 +91,18 @@ def main() -> int:
               str(s["utilization_pct"]))
         check("compute phase nonzero", s["phases"]["compute"] > 0)
         check("fp8 without LUT loads nothing", s["phases"]["lut"] == 0)
+        import numpy as np
+        from compiler.operands import quantize_operand
+        M, K, N = 64, 128, 32
+        lut = run_perf(r, "fp6_e3m2", [{"stage": 0, "m": M, "k": K, "n": N, "out_dtype": "bf16"}], energy=False)
+        rng = np.random.default_rng(0)
+        _, _, a_books = quantize_operand(rng.standard_normal((M, K)).astype(np.float32), side="a", dtype="fp6_e3m2")
+        _, _, b_books = quantize_operand(rng.standard_normal((K, N)).astype(np.float32), side="b", dtype="fp6_e3m2")
+        want = a_books.shape[0] + b_books.shape[0]
+        got_t = lut["stages"][0].get("lut_tables")
+        check(f"fp6 {M}x{K}x{N}: the model's LUT tables == the compiler's LUT groups ({want})", got_t == want,
+              f"model {got_t}")
+        check("fp6 with the LUT spends cycles loading LUTs", lut["stages"][0]["phases"]["lut"] > 0)
         check("energy parsed (uJ > 0)",
               "energy" in res and res["energy"]["uj_kernel"] > 0,
               str(res.get("energy")))

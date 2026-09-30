@@ -31,7 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from models.ppa.ppa import PpaError, operand_family, ppa_root, _workspace_head
+from models.ppa.ppa import PpaError, acc_rows, format_tokens, ppa_root, uses_lut, _workspace_head
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -52,34 +52,60 @@ def perf_model_path() -> Path:
     return p
 
 
-#: operand family (models.ppa.ppa.operand_family) -> the model's format token. The e5m2/e2m3 variants
-#: price as their family today; map them to the model's fp8e5m2 / fp6e2m3 here once that is checked.
-_OPERAND_TOK = {"fp8": "fp8", "fp6": "fp6", "fp4": "fp4"}
-
 #: stage out_dtype -> --out-fmt ("bf16" means no requant projection).
 _OUT_TOK = {"bf16": "bf16", "f8E4M3FN": "fp8", "f8E5M2": "fp8e5m2"}
 
+#: One LUT per 2**G rows of A / columns of W / rows of C: config.recipe.KERNEL_LUT_GROUP, the compiler's
+#: LUT_GRANULARITY. A run recipe's lut.group overrides it.
+DEFAULT_LUT_GROUP = 1
+
 
 def perf_args(recipe, dtype: str, m: int, n: int, k: int, out_fmt: str, *,
-              as_measured: bool = True, energy: bool = False) -> list[str]:
-    """Map a hardware recipe, the run's operand format and one GEMM stage onto perf_model's CLI."""
+              as_measured: bool = True, energy: bool = False, lut_group: int | None = None,
+              tiles: tuple[int, int, int] | None = None, dma_bw: float | None = None,
+              spad_kb: float | None = None) -> list[str]:
+    """Map a hardware recipe, the run's operand format and one GEMM stage onto perf_model's CLI.
+
+    A LUT format (models.ppa.ppa.uses_lut) runs with --lut and the chip's LUT layout: one LUT per 2**G rows of
+    A, 2**G columns of W and 2**G rows of C, across the whole other dimension (the model's own default is one
+    per 128x128 block). Each load moves only the tables the stage needs, as our emitter issues them
+    (mxgemm_emit._emit_load_luts: N/2**G, M/2**G, M/2**G), not the full 64-table set per port the workspace's
+    own kernels loaded (its --lut-full-set). The emitter also loads a C LUT for a bf16 output, which the model
+    does not count: M/2**G tables, noted in the record.
+    With --energy the power model gets the recipe's accumulator ladder, not the tapeout default.
+    ``tiles``, ``dma_bw`` and ``spad_kb`` describe a production GEMM and need ``as_measured=False``.
+    """
     try:
-        tok = _OPERAND_TOK[operand_family(dtype)]
+        _, _, _, tok = format_tokens(dtype)
     except PpaError as exc:
         raise PerfError(str(exc)) from exc
-    clock_ns = recipe.clock_ns
     out = _OUT_TOK.get(out_fmt, tok)
     args = ["--M", str(m), "--N", str(n), "--K", str(k),
             "--rows", str(recipe.dim), "--cols", str(recipe.dim),
             "--act", tok, "--wei", tok, "--out-fmt", out,
-            "--clock-ns", str(clock_ns)]
-    if recipe.enable_lut:
-        args.append("--lut")   # 16x16 sharing defaults = one codebook per tile, today's kernels
+            "--clock-ns", str(recipe.clock_ns)]
+    if uses_lut(dtype):
+        g = 1 << (DEFAULT_LUT_GROUP if lut_group is None else lut_group)
+        args += ["--lut", "--lut-a", str(g), str(k), "--lut-w", str(k), str(g), "--lut-c", str(g), str(n)]
     if as_measured:
+        if tiles or dma_bw or spad_kb:
+            raise PerfError("tiles / dma_bw / spad_kb describe a production GEMM; use as_measured=False (--ideal)")
         args.append("--as-measured")
+    else:
+        if tiles:
+            args += ["--tm", str(tiles[0]), "--tn", str(tiles[1]), "--tk", str(tiles[2])]
+        if dma_bw:
+            args += ["--dma-bw", str(dma_bw)]
+        if spad_kb:
+            args += ["--spad-kb", str(spad_kb)]
     if energy:
-        args.append("--energy")
+        args += ["--energy", "--acc-rows", acc_rows(recipe)]
     return args
+
+
+def spad_kb(recipe) -> float:
+    """The hardware recipe's scratchpad capacity: banks x rows x dim bytes."""
+    return recipe.banks * recipe.rows * recipe.dim / 1024
 
 
 _PHASES = re.compile(
@@ -89,6 +115,7 @@ _PHASES = re.compile(
 _TOTAL = re.compile(
     r"total (\d+) cycles = ([\d.]+) us;\s+([\d.]+) M ops;.*"
     r"utilization ([\d.]+) %;\s+([\d.]+) Gop/s")
+_TABLES = re.compile(r"LUT \d+ \((\d+) loads, (\d+) tables")
 _ENERGY = re.compile(
     r"energy: .*?([\d.]+) mW at .*?->\s*([\d.]+) uJ for the GEMM = "
     r"([\d.]+) pJ per op")
@@ -110,6 +137,9 @@ def _parse(stdout: str) -> dict:
                       "compute": int(ph.group(4)),
                       "requant_drain": int(ph.group(5)),
                       "lut": int(ph.group(6))}}
+    tb = _TABLES.search(stdout)
+    if tb:
+        out["lut_loads"], out["lut_tables"] = int(tb.group(1)), int(tb.group(2))
     en = _ENERGY.search(stdout)
     if en:
         out["energy"] = {"power_mw_at_util": float(en.group(1)),
@@ -119,9 +149,9 @@ def _parse(stdout: str) -> dict:
 
 
 def _run_one(recipe, dtype: str, m: int, n: int, k: int, out_fmt: str, *,
-             as_measured: bool, energy: bool) -> dict:
+             as_measured: bool, energy: bool, **opts) -> dict:
     script = perf_model_path()
-    args = perf_args(recipe, dtype, m, n, k, out_fmt, as_measured=as_measured, energy=energy)
+    args = perf_args(recipe, dtype, m, n, k, out_fmt, as_measured=as_measured, energy=energy, **opts)
     cmd = [sys.executable, str(script), *args]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
@@ -135,11 +165,12 @@ def _run_one(recipe, dtype: str, m: int, n: int, k: int, out_fmt: str, *,
     return res
 
 
-def run_perf(recipe, dtype: str, stages, *, as_measured: bool = True, energy: bool = True) -> dict:
+def run_perf(recipe, dtype: str, stages, *, as_measured: bool = True, energy: bool = True, **opts) -> dict:
     """Predicted timeline for every mesh stage, plus kernel totals.
 
     ``stages`` is the pipeline's per-stage record: dicts carrying ``m``, ``k``,
-    ``n`` and ``out_dtype`` (exactly what lands in metrics.json). Raises
+    ``n`` and ``out_dtype`` (exactly what lands in metrics.json). ``opts`` go to
+    :func:`perf_args` (lut_group, tiles, dma_bw, spad_kb). Raises
     :class:`PerfError`; callers skip and log.
     """
     script = perf_model_path()   # fail before any work if the model is absent
@@ -148,7 +179,7 @@ def run_perf(recipe, dtype: str, stages, *, as_measured: bool = True, energy: bo
         if s.get("where", "mesh") != "mesh":       # host stages run on Rocket; the model prices the mesh
             continue
         res = _run_one(recipe, dtype, int(s["m"]), int(s["n"]), int(s["k"]),
-                       str(s.get("out_dtype", "bf16")), as_measured=as_measured, energy=energy)
+                       str(s.get("out_dtype", "bf16")), as_measured=as_measured, energy=energy, **opts)
         res["stage"] = s.get("stage", len(per_stage))
         res["gemm"] = f"{s['m']}x{s['k']}x{s['n']}"
         res["out_fmt"] = str(s.get("out_dtype", "bf16"))
@@ -170,9 +201,18 @@ def run_perf(recipe, dtype: str, stages, *, as_measured: bool = True, energy: bo
         "source": "MxGemmini-workspace/ppa/perf/perf_model.py",
         "mode": "as_measured" if as_measured else "ideal",
         "clock_ns": recipe.clock_ns,
+        "lut": uses_lut(dtype),
+        "enable_lut": recipe.enable_lut,
         "validated": "+1.0/-2.2/-2.2 % total vs three kernel FSDBs (workspace README)",
         "workspace_head": _workspace_head(script.parents[1]),
     }
+    if uses_lut(dtype) and any(str(s.get("out_dtype", "bf16")) == "bf16" for s in stages
+                               if s.get("where", "mesh") == "mesh"):
+        out["model"]["lut_note"] = ("a bf16-output stage: the emitter still loads its C LUT (M/2**G tables), "
+                                    "which the model does not count")
+    if energy and (recipe.prod_e, recipe.prod_m) != (4, 3):
+        out["model"]["note"] = (f"perf_model has no --prod: its energy uses the e4m3 product, not the recipe's "
+                                f"e{recipe.prod_e}m{recipe.prod_m} (models/ppa prices the recipe's own)")
     return out
 
 
@@ -200,12 +240,22 @@ def main() -> int:
     ap.add_argument("--ideal", action="store_true",
                     help="drop --as-measured: overlapped setup, hw-issued mvins")
     ap.add_argument("--no-energy", action="store_true")
+    ap.add_argument("--tiles", type=int, nargs=3, metavar=("TM", "TN", "TK"), help="with --ideal: tile sizes")
+    ap.add_argument("--dma-bw", type=float, help="with --ideal: bytes per cycle the DMA delivers into the scratchpad")
+    ap.add_argument("--recipe-spad", action="store_true",
+                    help="with --ideal: the hardware recipe's scratchpad (banks x rows x dim) instead of the model's preset")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
     stage = {"stage": 0, "m": a.m, "k": a.k, "n": a.n, "out_dtype": a.out_fmt}
     try:
-        res = run_perf(load_hardware(a.hw), load_run(a.run).operand_fmt, [stage], as_measured=not a.ideal,
-                       energy=not a.no_energy)
+        hw, run = load_hardware(a.hw), load_run(a.run)
+        opts = {"lut_group": run.lut.group if run.lut else None}
+        if a.ideal:
+            opts.update(tiles=tuple(a.tiles) if a.tiles else None, dma_bw=a.dma_bw,
+                        spad_kb=spad_kb(hw) if a.recipe_spad else None)
+        elif a.tiles or a.dma_bw or a.recipe_spad:
+            raise PerfError("--tiles / --dma-bw / --recipe-spad need --ideal")
+        res = run_perf(hw, run.operand_fmt, [stage], as_measured=not a.ideal, energy=not a.no_energy, **opts)
     except (PerfError, RecipeError) as exc:
         print(f"perf: {exc}", file=sys.stderr)
         return 2

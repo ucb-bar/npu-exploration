@@ -300,7 +300,8 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
         if "perf" in models:
             def _perf():
                 from models.perf.perf import run_perf
-                return run_perf(recipe, dtype, shapes)
+                return run_perf(recipe, dtype, shapes,
+                                lut_group=run_recipe.lut.group if run_recipe.lut else None)
             pending["perf"] = pool.submit(_perf)
 
     if "spike" not in models:

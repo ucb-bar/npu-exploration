@@ -102,3 +102,28 @@ a GPU the path reports why.
 
 The lowering is `compiler/lower.py` and the operand encoder `compiler/operands.py`; the spike run
 still lives in `grade/pipeline.py`.
+
+## How ppa and perf are driven
+
+Both are Amanda Shi's models (MxGemmini-workspace/ppa), called as she calls them. Each operand format gets the
+workspace's own tokens (`models/ppa/ppa.py: FORMATS`, held equal to its `pair_modes.spec` by
+`tests/selftest_ppa.py`); a LUT format is priced on the LUT hardware, whatever `mx.enable_lut` says, because
+the kernels compiled for it carry LUTs (`config.recipe.check` warns about the mismatch; both are recorded).
+
+| operand format | ppa `--stim` | products | perf `--act/--wei` | LUT |
+|---|---|---|---|---|
+| fp8_e4m3 | fp8n | 1 | fp8 | no |
+| fp8_e4m3_quad | fp8qn | 4 | fp8 (+ `--lut`: the quad arm) | yes |
+| fp8_e5m2 | fp8e5m2 | 4 | fp8e5m2 | yes |
+| fp6_e3m2 | fp6 | 4 | fp6 | yes |
+| fp6_e2m3 | fp6e2m3q | 4 | fp6e2m3 | yes |
+| fp4_e2m1 | fp4 | 4 | fp4 | no |
+
+`fp8n` / `fp8qn` are the NaN-safe E4M3 kernels (mxgen reads E4M3 272..448 as NaN). With a LUT, ppa uses the
+workspace's LUT settings (`--fmtset mxgemmini-all --calib all --blocks-variant all --lut fp8`), and perf runs
+`--lut` with the chip's LUT layout: one LUT per 2**G rows of A, columns of W and rows of C (G = `run.lut.group`,
+default 1), each load moving only the tables a stage needs, as our emitter issues them (the model does not
+count the C LUT the emitter also loads for a bf16 output; the record notes it). perf's `--energy` gets the recipe's
+ladder (`--acc-rows`); it has no `--prod`, so a non-e4m3 product is noted in the record, not priced there.
+The kernel pipeline runs perf as measured (today's kernels, the validated configuration);
+`python -m models.perf.perf --ideal [--tiles TM TN TK] [--dma-bw B] [--recipe-spad]` estimates a production GEMM.
