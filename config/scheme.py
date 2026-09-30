@@ -120,6 +120,22 @@ def _bf16_tiles(recipe: Hardware):
                              tile_add=mxgemmini(recipe).tile_add)
 
 
+def mxq_config(hw: Hardware, run: Run, *, compiled: bool = False):
+    """The two recipes as mxq's TorchAO config (``mxq.nn.torchao.MXQConfig``): the same Scheme as ``scheme()``,
+    as plain fields, for tools that only call ``torchao.quantize_`` (Model2MLIR, Hugging Face ``TorchAoConfig``).
+    Needs torchao. ``bf16_tiles`` is this repo's diagnostic reducer, not mxq's, so it is refused here."""
+    from config import recipe as _recipe
+    from mxq.nn.torchao import MXQConfig
+    _recipe.check(hw, run, "perplexity")
+    if run.reduce == "bf16_tiles":
+        raise RecipeError(f"run {run.name}: reduce bf16_tiles is npu-exploration's diagnostic; MXQConfig has "
+                          "hardware and exact")
+    return MXQConfig(fmt=mxq_format(run.operand_fmt), rounding_mode=run.rounding, scale_floor=run.scale_floor,
+                     block_size=hw.block, prod=list(product(hw)), prod_floor=hw.prod_floor,
+                     ladder=[list(e) for e in schedule(hw)], window=hw.dim, reduce=run.reduce, compiled=compiled,
+                     name=hw.name if run.reduce == "hardware" else f"{hw.name}/{run.reduce}")
+
+
 def scheme(recipe: Hardware, run: Run, *, compiled: bool = False):
     """The two recipes as one mxq ``Scheme``: quantizer for both operands, and how the codes are multiplied.
     A codebook format runs on its full element grid, see ``is_codebook``. ``run.reduce`` is one of
