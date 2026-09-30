@@ -48,7 +48,7 @@ import gen_llama_attn_full as GA        # noqa: E402  -- Blob, attention_chain()
 import gen_llama_mlp_full as GM         # noqa: E402  -- mlp_chain()
 from gen_llama_layer_full import _bf16_rne, _bf16_val, residual  # noqa: E402
 from mesh_par import mesh_parallel      # noqa: E402
-from app.capture_llama_layer import rmsnorm  # noqa: E402
+from app.mxhostmath import rmsnorm  # noqa: E402  -- the device's host math, bit-exact
 
 FMT = GL.FMT
 BLOCK = 32
@@ -100,6 +100,7 @@ def build_layer_blob(cap: dict, x_bits: np.ndarray) -> tuple[GA.Blob, np.ndarray
 
 
 def main() -> int:
+    global CAPTURE
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--layers", type=int, default=None,
@@ -108,7 +109,11 @@ def main() -> int:
                     help="stop after the last layer: no final RMSNorm, no lm_head, no logits. "
                          "The kernel then grades the residual stream instead of the logits.")
     ap.add_argument("--tag", default="", help="suffix for the emitted data files")
+    ap.add_argument("--capture", type=Path, default=None,
+                    help=f"capture directory (default {CAPTURE}); e.g. out/model_capture_m64")
     args = ap.parse_args()
+    if args.capture is not None:
+        CAPTURE = args.capture.resolve()
 
     have = sorted(int(p.stem[5:]) for p in CAPTURE.glob("layer*.npz"))
     if not have:

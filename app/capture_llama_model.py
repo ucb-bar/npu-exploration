@@ -77,11 +77,17 @@ def main() -> int:
     import torch
     if str(MXQ_ROOT) not in sys.path:
         sys.path.insert(0, str(MXQ_ROOT))
-    esq = _load("eval_simquant", MXQ_ROOT / "eval_simquant.py")
     cll = _load("capture_llama_layer", Path(__file__).resolve().parent / "capture_llama_layer.py")
 
-    print(f"[load] {args.model_id} via eval_simquant.get_model (bf16, as MXQuant runs it)")
-    model = esq.get_model(args.model_id, args.seq, args.seq, gpu=0)
+    if (MXQ_ROOT / "eval_simquant.py").exists():
+        esq = _load("eval_simquant", MXQ_ROOT / "eval_simquant.py")
+        print(f"[load] {args.model_id} via eval_simquant.get_model (bf16, as MXQuant runs it)")
+        model = esq.get_model(args.model_id, args.seq, args.seq, gpu=0)
+    else:   # same fallback as app/eval_ppl.py: bf16 from_pretrained, equivalent for seq <= 2048
+        from transformers import AutoModelForCausalLM
+        print(f"[load] {args.model_id} via transformers.from_pretrained (bf16; MXQuant not present)")
+        model = AutoModelForCausalLM.from_pretrained(args.model_id, use_safetensors=True,
+                                                     torch_dtype=torch.bfloat16)
     model.eval()
     cfg = model.config
     D = cfg.hidden_size

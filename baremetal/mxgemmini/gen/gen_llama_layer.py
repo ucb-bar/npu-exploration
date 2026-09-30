@@ -66,7 +66,7 @@ DATA.mkdir(parents=True, exist_ok=True)
 
 import torch  # noqa: E402
 import gen_matmul_llama as G  # noqa: E402  -- PROD/ACC precision, quantize(), bf16_bits(), _rows()
-from app.capture_llama_layer import rmsnorm, silu  # noqa: E402  -- ONE definition of the host math
+from app.mxhostmath import rmsnorm, silu  # noqa: E402  -- the device's host math, bit-exact
 from app.mxwire import e8m0_decode  # noqa: E402
 
 CAPTURE = NPU / "out" / "layer_capture"
@@ -309,83 +309,83 @@ def emit_mlp(cap: dict, d: dict, tag: str = "") -> Path:
 
 // ---- host inputs: the residual stream entering the MLP, and the RMSNorm weight ----
 // BF16 bit patterns, LOSSLESS -- the model itself is bfloat16.
-static const uint16_t H_MID_BF16[LLAMA_M][LLAMA_D] = {{
+static const uint16_t H_MID_BF16[LLAMA_M][LLAMA_D] __attribute__((aligned(64))) = {{
 {r(bf16_exact(d['h_mid'], 'h_mid'), 4)}
 }};
 
-static const uint16_t W_POST_LN_BF16[LLAMA_D] = {{
+static const uint16_t W_POST_LN_BF16[LLAMA_D] __attribute__((aligned(64))) = {{
     {", ".join("0x%04x" % int(v) for v in bf16_exact(d['w_ln'], 'w_post_ln'))}
 }};
 
 // ---- mesh operands: gate_proj and up_proj weights, [D][F] fp8 codes ----
-static const uint8_t WG_IN[LLAMA_D][LLAMA_F] = {{
+static const uint8_t WG_IN[LLAMA_D][LLAMA_F] __attribute__((aligned(64))) = {{
 {r(d['Wg_codes'], 2)}
 }};
 
 // B-side scales: per column, per 32-element K group -- b_off = group * N + col
-static const uint8_t WG_SCALES_COL[LLAMA_GD][LLAMA_F] = {{
+static const uint8_t WG_SCALES_COL[LLAMA_GD][LLAMA_F] __attribute__((aligned(64))) = {{
 {r(d['Wg_scales'], 2)}
 }};
 
-static const uint8_t WU_IN[LLAMA_D][LLAMA_F] = {{
+static const uint8_t WU_IN[LLAMA_D][LLAMA_F] __attribute__((aligned(64))) = {{
 {r(d['Wu_codes'], 2)}
 }};
 
-static const uint8_t WU_SCALES_COL[LLAMA_GD][LLAMA_F] = {{
+static const uint8_t WU_SCALES_COL[LLAMA_GD][LLAMA_F] __attribute__((aligned(64))) = {{
 {r(d['Wu_scales'], 2)}
 }};
 
 // ---- mesh operand: down_proj weight, [F][D] ----
-static const uint8_t WD_IN[LLAMA_F][LLAMA_D] = {{
+static const uint8_t WD_IN[LLAMA_F][LLAMA_D] __attribute__((aligned(64))) = {{
 {r(d['Wd_codes'], 2)}
 }};
 
-static const uint8_t WD_SCALES_COL[LLAMA_GF][LLAMA_D] = {{
+static const uint8_t WD_SCALES_COL[LLAMA_GF][LLAMA_D] __attribute__((aligned(64))) = {{
 {r(d['Wd_scales'], 2)}
 }};
 
 // ---- golden for the HOST stages: what the reference fp32 produced, quantized ----
 // Not a pass criterion -- the C computes its own and reports how many bytes differ. Expected 0:
 // e4m3 keeps 3 mantissa bits, which absorbs a last-ulp difference between newlib and numpy.
-static const uint8_t XN_CODES[LLAMA_M][LLAMA_D] = {{
+static const uint8_t XN_CODES[LLAMA_M][LLAMA_D] __attribute__((aligned(64))) = {{
 {r(d['xn_codes'], 2)}
 }};
 
 // A-side scales: per row, per 32-element K group -- a_off = group * M + row (the TRANSPOSE of the
 // [M][GD] layout the quantizer produces).
-static const uint8_t XN_SCALES_ROW[LLAMA_GD][LLAMA_M] = {{
+static const uint8_t XN_SCALES_ROW[LLAMA_GD][LLAMA_M] __attribute__((aligned(64))) = {{
 {r(d['xn_scales'].T, 2)}
 }};
 
-static const uint8_t H_CODES[LLAMA_M][LLAMA_F] = {{
+static const uint8_t H_CODES[LLAMA_M][LLAMA_F] __attribute__((aligned(64))) = {{
 {r(d['h_codes'], 2)}
 }};
 
-static const uint8_t H_SCALES_ROW[LLAMA_GF][LLAMA_M] = {{
+static const uint8_t H_SCALES_ROW[LLAMA_GF][LLAMA_M] __attribute__((aligned(64))) = {{
 {r(d['h_scales'].T, 2)}
 }};
 
 // ---- golden for the MESH stages: bit-exact, given the operand codes above ----
-static const uint16_t G_OUT_BF16[LLAMA_M][LLAMA_F] = {{
+static const uint16_t G_OUT_BF16[LLAMA_M][LLAMA_F] __attribute__((aligned(64))) = {{
 {r(G.bf16_bits(d['G_bf16']), 4)}
 }};
 
-static const uint16_t U_OUT_BF16[LLAMA_M][LLAMA_F] = {{
+static const uint16_t U_OUT_BF16[LLAMA_M][LLAMA_F] __attribute__((aligned(64))) = {{
 {r(G.bf16_bits(d['U_bf16']), 4)}
 }};
 
-static const uint16_t Y_OUT_BF16[LLAMA_M][LLAMA_D] = {{
+static const uint16_t Y_OUT_BF16[LLAMA_M][LLAMA_D] __attribute__((aligned(64))) = {{
 {r(G.bf16_bits(d['Y_bf16']), 4)}
 }};
 
 // ---- fp32 reference (bf16-rounded, ~0.4% -- far finer than the ~5% MX error it grades) ----
 // The SLICED computation in fp32: same neurons, same truncated reduction as the device.
-static const uint16_t REF_MLP_BF16[LLAMA_M][LLAMA_D] = {{
+static const uint16_t REF_MLP_BF16[LLAMA_M][LLAMA_D] __attribute__((aligned(64))) = {{
 {r(G.bf16_bits(d['ref']), 4)}
 }};
 
 // h_mid + REF_MLP: the residual-stream output of this MLP slice.
-static const uint16_t REF_OUT_BF16[LLAMA_M][LLAMA_D] = {{
+static const uint16_t REF_OUT_BF16[LLAMA_M][LLAMA_D] __attribute__((aligned(64))) = {{
 {r(G.bf16_bits(d['h_mid'] + d['ref']), 4)}
 }};
 
@@ -417,12 +417,12 @@ static const uint16_t REF_OUT_BF16[LLAMA_M][LLAMA_D] = {{
 
 def _softmax_causal_bf16(S_bf16: np.ndarray, head_dim: int) -> np.ndarray:
     """1/sqrt(H), causal mask, row softmax -- in fp32 over the values the mesh actually produced."""
-    from app.capture_llama_layer import softmax_causal
+    from app.mxhostmath import softmax_causal
     return softmax_causal(S_bf16.astype(np.float32) / np.sqrt(np.float32(head_dim)))
 
 
 def build_attn(cap: dict) -> dict:
-    from app.capture_llama_layer import rope
+    from app.mxhostmath import rope
     eps = float(cap["meta_rms_eps"])
     h_pre, w_ln = cap["h_pre"], cap["w_in_ln"]
     Wq, Wk, Wv, Wo = cap["Wq"], cap["Wk"], cap["Wv"], cap["Wo"]
@@ -535,144 +535,144 @@ def emit_attn(cap: dict, d: dict, tag: str = "") -> Path:
 #define LLAMA_RMS_EPS {d['eps']:.10g}f
 
 // ---- host inputs ----
-static const uint16_t H_PRE_BF16[LLAMA_M][LLAMA_D] = {{
+static const uint16_t H_PRE_BF16[LLAMA_M][LLAMA_D] __attribute__((aligned(64))) = {{
 {r(bf16_exact(d['h_pre'], 'h_pre'), 4)}
 }};
 
-static const uint16_t W_IN_LN_BF16[LLAMA_D] = {{
+static const uint16_t W_IN_LN_BF16[LLAMA_D] __attribute__((aligned(64))) = {{
     {", ".join("0x%04x" % int(v) for v in bf16_exact(d['w_ln'], 'w_in_ln'))}
 }};
 
 // The model's own rotary tables for these positions, as fp32 bit patterns -- transformers computes
 // them in fp32 and they need not be exactly BF16, so they are not forced through it.
-static const uint32_t ROPE_COS_F32[LLAMA_M][LLAMA_H] = {{
+static const uint32_t ROPE_COS_F32[LLAMA_M][LLAMA_H] __attribute__((aligned(64))) = {{
 {_f32_rows(d['cos'])}
 }};
 
-static const uint32_t ROPE_SIN_F32[LLAMA_M][LLAMA_H] = {{
+static const uint32_t ROPE_SIN_F32[LLAMA_M][LLAMA_H] __attribute__((aligned(64))) = {{
 {_f32_rows(d['sin'])}
 }};
 
 // ---- mesh operands: the four projection weights ----
-static const uint8_t WQ_IN[LLAMA_D][LLAMA_H] = {{
+static const uint8_t WQ_IN[LLAMA_D][LLAMA_H] __attribute__((aligned(64))) = {{
 {r(d['qkv']['Q']['codes'], 2)}
 }};
 
-static const uint8_t WQ_SCALES_COL[LLAMA_GD][LLAMA_H] = {{
+static const uint8_t WQ_SCALES_COL[LLAMA_GD][LLAMA_H] __attribute__((aligned(64))) = {{
 {r(d['qkv']['Q']['scales'], 2)}
 }};
 
-static const uint8_t WK_IN[LLAMA_D][LLAMA_H] = {{
+static const uint8_t WK_IN[LLAMA_D][LLAMA_H] __attribute__((aligned(64))) = {{
 {r(d['qkv']['K']['codes'], 2)}
 }};
 
-static const uint8_t WK_SCALES_COL[LLAMA_GD][LLAMA_H] = {{
+static const uint8_t WK_SCALES_COL[LLAMA_GD][LLAMA_H] __attribute__((aligned(64))) = {{
 {r(d['qkv']['K']['scales'], 2)}
 }};
 
-static const uint8_t WV_IN[LLAMA_D][LLAMA_H] = {{
+static const uint8_t WV_IN[LLAMA_D][LLAMA_H] __attribute__((aligned(64))) = {{
 {r(d['qkv']['V']['codes'], 2)}
 }};
 
-static const uint8_t WV_SCALES_COL[LLAMA_GD][LLAMA_H] = {{
+static const uint8_t WV_SCALES_COL[LLAMA_GD][LLAMA_H] __attribute__((aligned(64))) = {{
 {r(d['qkv']['V']['scales'], 2)}
 }};
 
-static const uint8_t WO_IN[LLAMA_H][LLAMA_D] = {{
+static const uint8_t WO_IN[LLAMA_H][LLAMA_D] __attribute__((aligned(64))) = {{
 {r(d['wo_codes'], 2)}
 }};
 
-static const uint8_t WO_SCALES_COL[LLAMA_GH][LLAMA_D] = {{
+static const uint8_t WO_SCALES_COL[LLAMA_GH][LLAMA_D] __attribute__((aligned(64))) = {{
 {r(d['wo_scales'], 2)}
 }};
 
 // ---- goldens for the HOST stages (reported, not a pass criterion) ----
-static const uint8_t XN_CODES[LLAMA_M][LLAMA_D] = {{
+static const uint8_t XN_CODES[LLAMA_M][LLAMA_D] __attribute__((aligned(64))) = {{
 {r(d['xn_codes'], 2)}
 }};
 
-static const uint8_t XN_SCALES_ROW[LLAMA_GD][LLAMA_M] = {{
+static const uint8_t XN_SCALES_ROW[LLAMA_GD][LLAMA_M] __attribute__((aligned(64))) = {{
 {r(d['xn_scales'].T, 2)}
 }};
 
 // Q after RoPE, as the mesh's A operand.
-static const uint8_t Q_CODES[LLAMA_M][LLAMA_H] = {{
+static const uint8_t Q_CODES[LLAMA_M][LLAMA_H] __attribute__((aligned(64))) = {{
 {r(d['q_codes'], 2)}
 }};
 
-static const uint8_t Q_SCALES_ROW[LLAMA_GH][LLAMA_M] = {{
+static const uint8_t Q_SCALES_ROW[LLAMA_GH][LLAMA_M] __attribute__((aligned(64))) = {{
 {r(d['q_scales'].T, 2)}
 }};
 
 // K after RoPE AND transposed, as the mesh's B operand: [H][M], scales [H/32][M].
-static const uint8_t KT_IN[LLAMA_H][LLAMA_M] = {{
+static const uint8_t KT_IN[LLAMA_H][LLAMA_M] __attribute__((aligned(64))) = {{
 {r(d['kt_codes'], 2)}
 }};
 
-static const uint8_t KT_SCALES_COL[LLAMA_GH][LLAMA_M] = {{
+static const uint8_t KT_SCALES_COL[LLAMA_GH][LLAMA_M] __attribute__((aligned(64))) = {{
 {r(d['kt_scales'], 2)}
 }};
 
 // The softmax output, as the mesh's A operand.
-static const uint8_t P_CODES[LLAMA_M][LLAMA_M] = {{
+static const uint8_t P_CODES[LLAMA_M][LLAMA_M] __attribute__((aligned(64))) = {{
 {r(d['p_codes'], 2)}
 }};
 
-static const uint8_t P_SCALES_ROW[LLAMA_GM][LLAMA_M] = {{
+static const uint8_t P_SCALES_ROW[LLAMA_GM][LLAMA_M] __attribute__((aligned(64))) = {{
 {r(d['p_scales'].T, 2)}
 }};
 
 // V as the mesh's B operand: blocked along the token axis, one scale per (group, head-dim column).
-static const uint8_t V_IN[LLAMA_M][LLAMA_H] = {{
+static const uint8_t V_IN[LLAMA_M][LLAMA_H] __attribute__((aligned(64))) = {{
 {r(d['v_codes'], 2)}
 }};
 
-static const uint8_t V_SCALES_COL[LLAMA_GM][LLAMA_H] = {{
+static const uint8_t V_SCALES_COL[LLAMA_GM][LLAMA_H] __attribute__((aligned(64))) = {{
 {r(d['v_scales'], 2)}
 }};
 
 // ---- goldens for the MESH stages: bit-exact, given the operand codes above ----
-static const uint16_t Q_OUT_BF16[LLAMA_M][LLAMA_H] = {{
+static const uint16_t Q_OUT_BF16[LLAMA_M][LLAMA_H] __attribute__((aligned(64))) = {{
 {r(b(d['qkv']['Q']['out']), 4)}
 }};
 
-static const uint16_t K_OUT_BF16[LLAMA_M][LLAMA_H] = {{
+static const uint16_t K_OUT_BF16[LLAMA_M][LLAMA_H] __attribute__((aligned(64))) = {{
 {r(b(d['qkv']['K']['out']), 4)}
 }};
 
-static const uint16_t V_OUT_BF16[LLAMA_M][LLAMA_H] = {{
+static const uint16_t V_OUT_BF16[LLAMA_M][LLAMA_H] __attribute__((aligned(64))) = {{
 {r(b(d['qkv']['V']['out']), 4)}
 }};
 
-static const uint16_t S_OUT_BF16[LLAMA_M][LLAMA_M] = {{
+static const uint16_t S_OUT_BF16[LLAMA_M][LLAMA_M] __attribute__((aligned(64))) = {{
 {r(b(d['S_bf16']), 4)}
 }};
 
 // O = P @ V as the REQUANTIZER emits it: FP8 codes plus one E8M0 byte per row per 32 output
 // columns. These are what must be resident in the scratchpad and in the act-scale window for
 // o_proj to read them in place -- C1_out / C1_scales_out in matmul_tiled_fp8_64x64_chain.c terms.
-static const uint8_t O_OUT[LLAMA_M][LLAMA_H] = {{
+static const uint8_t O_OUT[LLAMA_M][LLAMA_H] __attribute__((aligned(64))) = {{
 {r(d['o_codes'], 2)}
 }};
 
-static const uint8_t O_SCALES_OUT[LLAMA_M][LLAMA_GH] = {{
+static const uint8_t O_SCALES_OUT[LLAMA_M][LLAMA_GH] __attribute__((aligned(64))) = {{
 {r(d['o_scales'], 2)}
 }};
 
-static const uint16_t O_OUT_BF16[LLAMA_M][LLAMA_H] = {{
+static const uint16_t O_OUT_BF16[LLAMA_M][LLAMA_H] __attribute__((aligned(64))) = {{
 {r(b(d['O_bf16']), 4)}
 }};
 
-static const uint16_t Y_OUT_BF16[LLAMA_M][LLAMA_D] = {{
+static const uint16_t Y_OUT_BF16[LLAMA_M][LLAMA_D] __attribute__((aligned(64))) = {{
 {r(b(d['Y_bf16']), 4)}
 }};
 
 // ---- fp32 reference, truncated to this head exactly as the device is ----
-static const uint16_t REF_ATTN_BF16[LLAMA_M][LLAMA_D] = {{
+static const uint16_t REF_ATTN_BF16[LLAMA_M][LLAMA_D] __attribute__((aligned(64))) = {{
 {r(b(d['ref']), 4)}
 }};
 
-static const uint16_t REF_OUT_BF16[LLAMA_M][LLAMA_D] = {{
+static const uint16_t REF_OUT_BF16[LLAMA_M][LLAMA_D] __attribute__((aligned(64))) = {{
 {r(b(d['h_pre'] + d['ref']), 4)}
 }};
 

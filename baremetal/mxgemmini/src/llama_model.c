@@ -218,6 +218,17 @@ static uint16_t logits_hw[LLAMA_M * LLAMA_V];
 static uint8_t  lmh_scales_chunk[LLAMA_GD * L_CHUNK];
 #endif
 
+// Debug knobs, both off by default: -DLLAMA_START_LAYER=n starts at layer n from the golden h_out of
+// layer n-1; -DLLAMA_STAGE_DETAIL=1 prints every stage whose diff count is nonzero (tag = source line).
+#ifndef LLAMA_START_LAYER
+#define LLAMA_START_LAYER 0
+#endif
+#ifndef LLAMA_STAGE_DETAIL
+#define LLAMA_STAGE_DETAIL 0
+#endif
+#define STAGE(acc, expr) do { int d_ = (expr); (acc) += d_; \
+    if (LLAMA_STAGE_DETAIL && d_) printf("  stage @%d %s: %d differ\n", __LINE__, #acc, d_); } while (0)
+
 uintptr_t handle_trap(uintptr_t cause, uintptr_t epc, uintptr_t regs[32]) {
   printf("TRAP cause=%d epc=%lx\n", (int) cause, (unsigned long) epc);
   tohost_exit(1337);
@@ -307,9 +318,13 @@ int main() {
   uint64_t t_host = 0, t_mesh = 0, t0;
   int total_mesh_diff = 0, total_host_diff = 0, total_seam_diff = 0;
 
+#if LLAMA_START_LAYER > 0   // debug: resume from the golden residual stream of the layer before
+  memcpy(X_hw, LLAMA_LAT(LLAMA_START_LAYER - 1, LOFF_H_OUT_OUT, uint16_t), sizeof(X_hw));
+#else
   memcpy(X_hw, EMBED_OUT, sizeof(X_hw));
+#endif
 
-  for (int n = 0; n < LLAMA_NL; n++) {
+  for (int n = LLAMA_START_LAYER; n < LLAMA_NL; n++) {
     const uint16_t *W_IN_LN   = LLAMA_LAT(n, LOFF_W_IN_LN, uint16_t);
     const uint16_t *W_POST_LN = LLAMA_LAT(n, LOFF_W_POST_LN, uint16_t);
     const uint32_t *ROPE_COS  = LLAMA_LAT(n, LOFF_A_ROPE_COS, uint32_t);
@@ -328,6 +343,8 @@ int main() {
     const uint16_t *K_G  = LLAMA_LAT(n, LOFF_A_K_OUT, uint16_t);
     const uint16_t *V_G  = LLAMA_LAT(n, LOFF_A_V_OUT, uint16_t);
     const uint16_t *S_G  = LLAMA_LAT(n, LOFF_A_S_OUT, uint16_t);
+    const uint8_t  *P_G  = LLAMA_LAT(n, LOFF_A_P_CODES, uint8_t);
+    const uint8_t  *PS_G = LLAMA_LAT(n, LOFF_A_P_SCALES, uint8_t);
     const uint8_t  *O_G  = LLAMA_LAT(n, LOFF_A_O_CODES, uint8_t);
     const uint8_t  *OS_G = LLAMA_LAT(n, LOFF_A_O_SCALES, uint8_t);
     const uint16_t *YA_G = LLAMA_LAT(n, LOFF_A_Y_OUT, uint16_t);
@@ -355,8 +372,8 @@ int main() {
     mx_rmsnorm(X_hw, W_IN_LN, LLAMA_M, LLAMA_D, LLAMA_RMS_EPS, xn_f);
     mx_quantize_rows(xn_f, LLAMA_M, LLAMA_D, xn_codes, xn_scales);
     t_host += read_cycles() - t0;
-    host_d += mx_count_diff_u8(xn_codes, A_XN_C, LLAMA_M * LLAMA_D);
-    host_d += mx_count_diff_u8(xn_scales, A_XN_S, LLAMA_GD * LLAMA_M);
+    STAGE(host_d, mx_count_diff_u8(xn_codes, A_XN_C, LLAMA_M * LLAMA_D));
+    STAGE(host_d, mx_count_diff_u8(xn_scales, A_XN_S, LLAMA_GD * LLAMA_M));
 
     t0 = read_cycles();
     mvin_A(xn_codes, LLAMA_M, LLAMA_D, A_SPAD_XN);
@@ -387,7 +404,7 @@ int main() {
           memcpy(&dstp[s][(size_t) m * wid[s] + c * nc], &chunk16[(size_t) m * nc],
                  nc * sizeof(uint16_t));
       }
-      mesh_d += mx_count_diff_u16(dstp[s], goldp[s], LLAMA_M * wid[s]);
+      STAGE(mesh_d, mx_count_diff_u16(dstp[s], goldp[s], LLAMA_M * wid[s]));
     }
 
     t0 = read_cycles();
@@ -419,12 +436,23 @@ int main() {
                   OUT_BF16, (uint64_t) scale_sink, 0, 0);
       t_mesh += read_cycles() - t0;
       mvout_bf16(S_hw, A_H2_C_S, LLAMA_M, LLAMA_M);
-      mesh_d += mx_count_diff_u16(S_hw, S_G + (size_t) h * LLAMA_M * LLAMA_M, LLAMA_M * LLAMA_M);
+      STAGE(mesh_d, mx_count_diff_u16(S_hw, S_G + (size_t) h * LLAMA_M * LLAMA_M, LLAMA_M * LLAMA_M));
 
       t0 = read_cycles();
       mx_softmax_causal(S_hw, LLAMA_M, 1.0f / sqrtf((float) LLAMA_H), p_f);
       mx_quantize_rows(p_f, LLAMA_M, LLAMA_M, p_codes, p_scales);
       t_host += read_cycles() - t0;
+      STAGE(host_d, mx_count_diff_u8(p_codes, P_G + (size_t) h * LLAMA_M * LLAMA_M, LLAMA_M * LLAMA_M));
+      STAGE(host_d, mx_count_diff_u8(p_scales, PS_G + (size_t) h * LLAMA_GM * LLAMA_M, LLAMA_GM * LLAMA_M));
+#if LLAMA_STAGE_DETAIL
+      for (int i = 0; i < LLAMA_M * LLAMA_M; i++)
+        if (p_codes[i] != P_G[(size_t) h * LLAMA_M * LLAMA_M + i]) {
+          printf("    P layer %d head %d row %d col %d: code 0x%02x golden 0x%02x  p=0x%08x\n", n, h,
+                 i / LLAMA_M, i % LLAMA_M, p_codes[i], P_G[(size_t) h * LLAMA_M * LLAMA_M + i],
+                 *(const uint32_t *) &p_f[i]);
+          break;
+        }
+#endif
 
       t0 = read_cycles();
       mvin_A(p_codes, LLAMA_M, LLAMA_M, A_H2_A_P);
@@ -436,10 +464,10 @@ int main() {
                   OUT_FP8, (uint64_t) o_scales_dram[h], 1, 0);
       t_mesh += read_cycles() - t0;
       mvout_detile(O_hw[h], A_H2_C_O, LLAMA_M, LLAMA_H);
-      mesh_d += mx_count_diff_u8(O_hw[h], O_G + (size_t) h * LLAMA_M * LLAMA_H,
-                                 LLAMA_M * LLAMA_H);
-      mesh_d += mx_count_diff_u8((const uint8_t *) o_scales_dram[h],
-                                 OS_G + (size_t) h * LLAMA_M * LLAMA_GH, LLAMA_M * LLAMA_GH);
+      STAGE(mesh_d, mx_count_diff_u8(O_hw[h], O_G + (size_t) h * LLAMA_M * LLAMA_H,
+                                 LLAMA_M * LLAMA_H));
+      STAGE(mesh_d, mx_count_diff_u8((const uint8_t *) o_scales_dram[h],
+                                 OS_G + (size_t) h * LLAMA_M * LLAMA_GH, LLAMA_M * LLAMA_GH));
     }
 
     for (int c = 0; c < A_YCHUNKS; c++) {
@@ -467,22 +495,22 @@ int main() {
         memcpy(&Y_hw[(size_t) m * LLAMA_D + c * A_YCHUNK], &chunk16[(size_t) m * A_YCHUNK],
                A_YCHUNK * sizeof(uint16_t));
     }
-    mesh_d += mx_count_diff_u16(Y_hw, YA_G, LLAMA_M * LLAMA_D);
+    STAGE(mesh_d, mx_count_diff_u16(Y_hw, YA_G, LLAMA_M * LLAMA_D));
 
     // ---- residual 1 ----
     t0 = read_cycles();
     for (int i = 0; i < LLAMA_M * LLAMA_D; i++)
       Xmid_hw[i] = mx_f32_to_bf16_rne(mx_bf16_to_f32(X_hw[i]) + mx_bf16_to_f32(Y_hw[i]));
     t_host += read_cycles() - t0;
-    seam_d += mx_count_diff_u16(Xmid_hw, HMID_G, LLAMA_M * LLAMA_D);
+    STAGE(seam_d, mx_count_diff_u16(Xmid_hw, HMID_G, LLAMA_M * LLAMA_D));
 
     // ---- MLP ----
     t0 = read_cycles();
     mx_rmsnorm(Xmid_hw, W_POST_LN, LLAMA_M, LLAMA_D, LLAMA_RMS_EPS, xn_f);
     mx_quantize_rows(xn_f, LLAMA_M, LLAMA_D, xn_codes, xn_scales);
     t_host += read_cycles() - t0;
-    host_d += mx_count_diff_u8(xn_codes, M_XN_C, LLAMA_M * LLAMA_D);
-    host_d += mx_count_diff_u8(xn_scales, M_XN_S, LLAMA_GD * LLAMA_M);
+    STAGE(host_d, mx_count_diff_u8(xn_codes, M_XN_C, LLAMA_M * LLAMA_D));
+    STAGE(host_d, mx_count_diff_u8(xn_scales, M_XN_S, LLAMA_GD * LLAMA_M));
 
     t0 = read_cycles();
 #if M_PKTILES == 1
@@ -520,15 +548,15 @@ int main() {
         }
     }
     t_mesh += read_cycles() - t0;
-    mesh_d += mx_count_diff_u16(G_hw, G_G, LLAMA_M * LLAMA_F);
-    mesh_d += mx_count_diff_u16(U_hw, U_G, LLAMA_M * LLAMA_F);
+    STAGE(mesh_d, mx_count_diff_u16(G_hw, G_G, LLAMA_M * LLAMA_F));
+    STAGE(mesh_d, mx_count_diff_u16(U_hw, U_G, LLAMA_M * LLAMA_F));
 
     t0 = read_cycles();
     mx_swiglu(G_hw, U_hw, LLAMA_M * LLAMA_F, h_f);
     mx_quantize_rows(h_f, LLAMA_M, LLAMA_F, h_codes, h_scales);
     t_host += read_cycles() - t0;
-    host_d += mx_count_diff_u8(h_codes, H_G, LLAMA_M * LLAMA_F);
-    host_d += mx_count_diff_u8(h_scales, HS_G, LLAMA_GF * LLAMA_M);
+    STAGE(host_d, mx_count_diff_u8(h_codes, H_G, LLAMA_M * LLAMA_F));
+    STAGE(host_d, mx_count_diff_u8(h_scales, HS_G, LLAMA_GF * LLAMA_M));
 
     for (int c = 0; c < M_NCHUNKS; c++) {
       for (int t = 0; t < M_KTILES; t++) {
@@ -552,14 +580,14 @@ int main() {
         memcpy(&Y_hw[(size_t) m * LLAMA_D + (size_t) c * M_NCHUNK],
                &chunk16[(size_t) m * M_NCHUNK], M_NCHUNK * sizeof(uint16_t));
     }
-    mesh_d += mx_count_diff_u16(Y_hw, YM_G, LLAMA_M * LLAMA_D);
+    STAGE(mesh_d, mx_count_diff_u16(Y_hw, YM_G, LLAMA_M * LLAMA_D));
 
     // ---- residual 2: this layer's output becomes the next layer's input ----
     t0 = read_cycles();
     for (int i = 0; i < LLAMA_M * LLAMA_D; i++)
       X_hw[i] = mx_f32_to_bf16_rne(mx_bf16_to_f32(Xmid_hw[i]) + mx_bf16_to_f32(Y_hw[i]));
     t_host += read_cycles() - t0;
-    seam_d += mx_count_diff_u16(X_hw, HOUT_G, LLAMA_M * LLAMA_D);
+    STAGE(seam_d, mx_count_diff_u16(X_hw, HOUT_G, LLAMA_M * LLAMA_D));
 
     // Drift against the MODEL's own h_out for this layer -- what localizes a divergence.
     printf("layer %2d  mesh %d  host %d  seam %d  |  h_out vs model: rel_fro %d ppm\n",

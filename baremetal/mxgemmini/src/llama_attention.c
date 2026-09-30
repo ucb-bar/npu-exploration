@@ -195,23 +195,57 @@ LLAMA_SPAD_REQUIRE(pv_scale_fits,     SCALE_ROWS(LLAMA_M, LLAMA_H) <= LLAMA_SCAL
 LLAMA_SPAD_REQUIRE(proj_scale_fits,   SCALE_ROWS(KTILE, LLAMA_H) <= LLAMA_SCALE_ROWS_MAX);
 LLAMA_SPAD_REQUIRE(oproj_scale_fits,  SCALE_ROWS(LLAMA_H, NCHUNK) <= LLAMA_SCALE_ROWS_MAX);
 
+#ifdef ATTN_NATIVE
+// ---- native schedule (-DATTN_NATIVE) ----
+// Q/K/V and S are native DRAM loops (gemmini_loop_ws_mx: operands streamed, BF16 C straight to DRAM,
+// loop-managed scales); Q/K/V chain with no fence (K, V pass A = NULL: Xn resident; V's A scales are
+// reused in place by the loop unit). P@V is unchanged -- the RESIDENT producer (FP8 requant -> spad,
+// tiled; E8M0 -> act-scale window). o_proj is a native loop CONSUMING that residency: A = NULL reads
+// O at spad row 0 (= a_spad_id 1's A region) and the act-scale window as written; only Wo's scales
+// are loaded (2-D, weight half 0), under a waiting CONFIG_SCALE_MEM (act half 0) -- no fence.
+// v1 loop limits: full K per loop, each operand in one spad half, scales in one 4 KB half, C in one
+// acc half. Q/K/V: if A + B overflow a half (D = 2048), A takes half 0 and every B half 1 (the RS orders
+// each B's mvins behind the previous loop's reads). o_proj is N-chunked (NAT_NC): chunk c loads its Wo
+// scale slice into weight half c&1 under a waiting config. Chunk c+2 reuses chunk c's half with no HW
+// ordering; it is safe because a chunk issues 2*I*J*K ex commands >> the 16 RS ex slots, so its loads
+// can only enter once chunk c's computes have retired (checked below).
+#define HALF_ROWS (SPAD_TOP / 2)
+#define NAT_ACC_ROWS(m, n) ((m) * (n) / (DIM * 4))   // E4M3-single: 4 acc rows per 16x16 C tile
+#define NAT_QKV_SPLIT (ROWS8(LLAMA_M, LLAMA_D) + ROWS8(LLAMA_D, LLAMA_H) > HALF_ROWS)
+#define NAT_YFITS(nc) (ROWS8(LLAMA_M, LLAMA_H) + ROWS8(LLAMA_H, (nc)) <= HALF_ROWS && \
+                       NAT_ACC_ROWS(LLAMA_M, (nc)) <= ACC_ROWS / 2 && LLAMA_GH * (nc) <= 4096)
+#define NAT_NC (NAT_YFITS(LLAMA_D) ? LLAMA_D : NAT_YFITS(1024) ? 1024 : NAT_YFITS(512) ? 512 : \
+                NAT_YFITS(256) ? 256 : 128)
+#define NAT_NCH (LLAMA_D / NAT_NC)
+LLAMA_SPAD_REQUIRE(nat_qkv_spad,   ROWS8(LLAMA_M, LLAMA_D) <= HALF_ROWS && ROWS8(LLAMA_D, LLAMA_H) <= HALF_ROWS);
+LLAMA_SPAD_REQUIRE(nat_qkv_acc,    NAT_ACC_ROWS(LLAMA_M, LLAMA_H) <= ACC_ROWS / 2);
+LLAMA_SPAD_REQUIRE(nat_qkv_scale,  LLAMA_GD * LLAMA_M <= 4096 && LLAMA_GD * LLAMA_H <= 4096);
+LLAMA_SPAD_REQUIRE(nat_s_spad,     ROWS8(LLAMA_M, LLAMA_H) + ROWS8(LLAMA_H, LLAMA_M) <= HALF_ROWS);
+LLAMA_SPAD_REQUIRE(nat_oproj_fits, NAT_YFITS(NAT_NC) && NAT_NC * NAT_NCH == LLAMA_D);
+LLAMA_SPAD_REQUIRE(nat_oproj_war,  NAT_NCH <= 2 || 2 * (LLAMA_M / DIM) * (NAT_NC / DIM) * (LLAMA_H / DIM) > 16);
+LLAMA_SPAD_REQUIRE(nat_o_at_a_region, SPAD_O == 0);
+static uint32_t nat_sink[512] __attribute__((aligned(32)));
+#define NAT_CONFIG_BF16() gemmini_extended3_config_ex(WEIGHT_STATIONARY, 0, 0, ACC_SCALE_IDENTITY, 1, 1, \
+                                                      0, 0, false, 0, 0, OUT_BF16, 0)
+#endif
+
 static float    xn_f[LLAMA_M * LLAMA_D];
-static uint8_t  xn_codes[LLAMA_M * LLAMA_D];
-static uint8_t  xn_scales[LLAMA_GD * LLAMA_M];
-static uint16_t Q_hw[LLAMA_M * LLAMA_H], K_hw[LLAMA_M * LLAMA_H], V_hw[LLAMA_M * LLAMA_H];
+static uint8_t  xn_codes[LLAMA_M * LLAMA_D] __attribute__((aligned(64)));
+static uint8_t  xn_scales[LLAMA_GD * LLAMA_M] __attribute__((aligned(64)));
+static uint16_t Q_hw[LLAMA_M * LLAMA_H] __attribute__((aligned(64))), K_hw[LLAMA_M * LLAMA_H] __attribute__((aligned(64))), V_hw[LLAMA_M * LLAMA_H] __attribute__((aligned(64)));
 static float    q_f[LLAMA_M * LLAMA_H], k_f[LLAMA_M * LLAMA_H], kt_f[LLAMA_H * LLAMA_M];
 static float    v_f[LLAMA_M * LLAMA_H];
-static uint8_t  q_codes[LLAMA_M * LLAMA_H], q_scales[LLAMA_GH * LLAMA_M];
-static uint8_t  kt_codes[LLAMA_H * LLAMA_M], kt_scales[LLAMA_GH * LLAMA_M];
-static uint8_t  v_codes[LLAMA_M * LLAMA_H], v_scales[LLAMA_GM * LLAMA_H];
-static uint16_t S_hw[LLAMA_M * LLAMA_M];
+static uint8_t  q_codes[LLAMA_M * LLAMA_H] __attribute__((aligned(64))), q_scales[LLAMA_GH * LLAMA_M] __attribute__((aligned(64)));
+static uint8_t  kt_codes[LLAMA_H * LLAMA_M] __attribute__((aligned(64))), kt_scales[LLAMA_GH * LLAMA_M] __attribute__((aligned(64)));
+static uint8_t  v_codes[LLAMA_M * LLAMA_H] __attribute__((aligned(64))), v_scales[LLAMA_GM * LLAMA_H] __attribute__((aligned(64)));
+static uint16_t S_hw[LLAMA_M * LLAMA_M] __attribute__((aligned(64)));
 static float    p_f[LLAMA_M * LLAMA_M];
-static uint8_t  p_codes[LLAMA_M * LLAMA_M], p_scales[LLAMA_GM * LLAMA_M];
-static uint8_t  O_hw[LLAMA_M * LLAMA_H];
+static uint8_t  p_codes[LLAMA_M * LLAMA_M] __attribute__((aligned(64))), p_scales[LLAMA_GM * LLAMA_M] __attribute__((aligned(64)));
+static uint8_t  O_hw[LLAMA_M * LLAMA_H] __attribute__((aligned(64)));
 static uint32_t o_scales_dram[512] __attribute__((aligned(32)));
 static uint8_t  wo_scales_chunk[LLAMA_GH * NCHUNK];
 static uint16_t Ychunk[LLAMA_M * NCHUNK];
-static uint16_t Y_hw[LLAMA_M * LLAMA_D];
+static uint16_t Y_hw[LLAMA_M * LLAMA_D] __attribute__((aligned(64)));
 static uint16_t OUT_hw[LLAMA_M * LLAMA_D];
 
 // riscv-tests' handle_trap is weak and exits 1337 with no cause, which is indistinguishable from a
@@ -372,7 +406,33 @@ int main() {
     printf("xnprobe %s-%s @%p diff=%d/%d row0:", stage, name, (void *) xn_codes, \
            mx_count_diff_u8(xn_codes, (const uint8_t *) XN_CODES, LLAMA_M * LLAMA_D), LLAMA_M * LLAMA_D); \
     for (int c_ = 0; c_ < 16; c_++) printf(" %02x", xn_codes[c_]); printf("\n"); } while (0)
-#ifdef LLAMA_ONLY_PROJ
+#ifdef ATTN_NATIVE
+  if (((uintptr_t) WQ_SCALES_COL | (uintptr_t) WK_SCALES_COL | (uintptr_t) WV_SCALES_COL |
+       (uintptr_t) WO_SCALES_COL | (uintptr_t) xn_scales | (uintptr_t) q_scales | (uintptr_t) kt_scales) & 7) {
+    printf("native: a scale array is not 8B-aligned\n");
+    return 1;
+  }
+  t0 = read_cycles();
+  NAT_CONFIG_BF16();
+  gemmini_extended3_config_ld(LLAMA_D * sizeof(uint8_t), MVIN_SCALE_IDENTITY, false, 0);
+  gemmini_extended3_config_ld(LLAMA_H * sizeof(uint8_t), MVIN_SCALE_IDENTITY, false, 1);
+  gemmini_config_st(LLAMA_H * sizeof(uint16_t));
+  for (int s = 0; s < 3; s++) {
+    gemmini_loop_ws_mx(LLAMA_M / DIM, LLAMA_H / DIM, LLAMA_D / DIM,
+                       s == 0 ? xn_codes : NULL, wcodes[s], qkv_hw[s], LLAMA_D, LLAMA_H, LLAMA_H,
+                       xn_scales, wscales[s], LLAMA_M, LLAMA_H, false, 1, NAT_QKV_SPLIT ? 2 : 1 + (s & 1));
+  }
+  gemmini_fence();
+  uint64_t t_qkv = read_cycles() - t0;
+  t_mesh += t_qkv;
+  for (int s = 0; s < 3; s++) {
+    int d = mx_count_diff_u16(qkv_hw[s], qkv_gold[s], LLAMA_M * LLAMA_H);
+    qkv_diff += d;
+    printf("mesh  %s = Xn @ W%s : %d/%d differ from golden\n", qkv_name[s], qkv_name[s], d, LLAMA_M * LLAMA_H);
+  }
+  (void) cap_row0; (void) cap_qlast;
+  for (int s = 0; s < 0; s++) {
+#elif defined(LLAMA_ONLY_PROJ)
   for (int s = LLAMA_ONLY_PROJ; s < LLAMA_ONLY_PROJ + 1; s++) {
 #else
   for (int s = 0; s < LLAMA_NPROJ; s++) {
@@ -471,6 +531,18 @@ int main() {
 
   // ================= mesh: S = Q @ K^T =================
   t0 = read_cycles();
+#ifdef ATTN_NATIVE
+  NAT_CONFIG_BF16();
+  gemmini_extended3_config_ld(LLAMA_H * sizeof(uint8_t), MVIN_SCALE_IDENTITY, false, 0);
+  gemmini_extended3_config_ld(LLAMA_M * sizeof(uint8_t), MVIN_SCALE_IDENTITY, false, 1);
+  gemmini_config_st(LLAMA_M * sizeof(uint16_t));
+  gemmini_loop_ws_mx(LLAMA_M / DIM, LLAMA_M / DIM, LLAMA_H / DIM,
+                     q_codes, kt_codes, S_hw, LLAMA_H, LLAMA_M, LLAMA_M,
+                     q_scales, kt_scales, LLAMA_M, LLAMA_M, false, 1, 1);
+  gemmini_fence();
+  uint64_t t_s = read_cycles() - t0;
+  t_mesh += t_s;
+#else
   mvin_A(q_codes, LLAMA_M, LLAMA_H, SPAD_QA);
   mvin_B(kt_codes, LLAMA_H, LLAMA_M, 0, LLAMA_M, SPAD_KT);
   gemmini_mx_load_scales((uint64_t) q_scales, sizeof(q_scales), 0);
@@ -480,6 +552,7 @@ int main() {
               OUT_BF16, (uint64_t) scale_sink, 0, 0);
   t_mesh += read_cycles() - t0;
   mvout_bf16(S_hw, SPAD_S, LLAMA_M, LLAMA_M);
+#endif
   int s_d = mx_count_diff_u16(S_hw, (const uint16_t *) S_OUT_BF16, LLAMA_M * LLAMA_M);
   printf("mesh  S = Q @ K^T : %d/%d differ from golden\n", s_d, LLAMA_M * LLAMA_M);
 
@@ -503,7 +576,8 @@ int main() {
   gemmini_fence();
   mesh_matmul(LLAMA_M, LLAMA_M, LLAMA_H, SPAD_PA, SPAD_VB_ARG, SPAD_O,
               OUT_FP8, (uint64_t) o_scales_dram, 1, 0);
-  t_mesh += read_cycles() - t0;
+  uint64_t t_o = read_cycles() - t0;
+  t_mesh += t_o;
 
   // Residency check: read O back WITHOUT disturbing it, and check the scales the requantizer wrote.
   mvout_detile(O_hw, SPAD_O, LLAMA_M, LLAMA_H);
@@ -517,7 +591,28 @@ int main() {
   // No A mvin and no A-scale load: the codes are already resident at SPAD_O in the operand-A tiled
   // layout, and the requantizer wrote their E8M0 bytes into the act-scale window transposed
   // ([H/32][M], a_off = group * M + row), which is exactly what this matmul indexes.
+#ifdef ATTN_NATIVE
+  t0 = read_cycles();
+  NAT_CONFIG_BF16();
+  gemmini_extended3_config_ld(LLAMA_D * sizeof(uint8_t), MVIN_SCALE_IDENTITY, false, 1);
+  gemmini_config_st(LLAMA_D * sizeof(uint16_t));
+  for (int c = 0; c < NAT_NCH; c++) {
+    gemmini_mx_load_scales_2d(&WO_SCALES_COL[0][c * NAT_NC], NAT_NC, LLAMA_GH, LLAMA_D, (c & 1) << 12, 1);
+    gemmini_mxquant_config_mvout_wait((uint64_t) nat_sink, LLAMA_M / DIM, NAT_NC / DIM, LLAMA_H / DIM,
+                                      0, c & 1, 1);
+    gemmini_loop_ws(LLAMA_M / DIM, NAT_NC / DIM, LLAMA_H / DIM, 0, 0, 0,
+                    NULL, (const uint8_t *) WO_IN + c * NAT_NC, NULL, Y_hw + c * NAT_NC, LLAMA_H, LLAMA_D, 0, LLAMA_D,
+                    false, false, false, false, false, NO_ACTIVATION, 1, 1 + (c & 1), false);
+  }
+  gemmini_fence();
+  uint64_t t_y = read_cycles() - t0;
+  t_mesh += t_y;
+  printf("phase QKV %d | S %d | O (resident) %d | o_proj x%d (resident A + scales) %d\n",
+         (int) t_qkv, (int) t_s, (int) t_o, NAT_NCH, (int) t_y);
+  for (int c = 0; c < 0; c++) {
+#else
   for (int c = 0; c < NCHUNKS; c++) {
+#endif
     for (int g = 0; g < LLAMA_GH; g++)
       memcpy(wo_scales_chunk + (size_t) g * NCHUNK, &WO_SCALES_COL[g][c * NCHUNK], NCHUNK);
     t0 = read_cycles();

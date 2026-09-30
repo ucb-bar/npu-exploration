@@ -62,6 +62,16 @@ Correct if that header is set for another bitstream; -DLLAMA_BANK_ROWS=N to reta
 #undef BANK_ROWS
 #define BANK_ROWS LLAMA_BANK_ROWS
 
+// -DLAYER_NATIVE: every weight matmul (Q/K/V, per-head S, o_proj over all heads, G/U, down) is one
+// mxn_matmul (include/mx_native.h): native DRAM loops, K-tiles x N-chunks, each loop in its own spad half,
+// loop-managed scales, C straight to DRAM. P@V keeps the resident scratchpad-requant loop per head.
+// -DLLAMA_GOLDEN_HOST: the host stages (RMSNorm, RoPE, softmax, SwiGLU, residual 1) take their GOLDEN
+// outputs from the blob instead of computing them, so an RTL run is mostly mesh time; every mesh stage is
+// still checked bit-exact.
+#ifdef LAYER_NATIVE
+#include "mx_native.h"
+#endif
+
 #define GEMMINI_CTRL 0x40084000
 #define GEMMINI_RS1_ADDR (GEMMINI_CTRL + 0x10)
 #define GEMMINI_RS2_ADDR (GEMMINI_CTRL + 0x18)
@@ -204,39 +214,45 @@ LLAMA_REQUIRE(m_down_ascale_fits, SCALE_ROWS(M_KTILE, LLAMA_M) <= LLAMA_SCALE_RO
 // xn_* serve BOTH halves: attention finishes with its Xn1 before the MLP needs Xn2, and the
 // operand lives in the scratchpad meanwhile.
 static float    xn_f[LLAMA_M * LLAMA_D];
-static uint8_t  xn_codes[LLAMA_M * LLAMA_D];
-static uint8_t  xn_scales[LLAMA_GD * LLAMA_M];
+static uint8_t  xn_codes[LLAMA_M * LLAMA_D] __attribute__((aligned(64)));
+static uint8_t  xn_scales[LLAMA_GD * LLAMA_M] __attribute__((aligned(64)));
 // attention
-static uint16_t Q_hw[LLAMA_M * LLAMA_QD], K_hw[LLAMA_M * LLAMA_KVD], V_hw[LLAMA_M * LLAMA_KVD];
+static uint16_t Q_hw[LLAMA_M * LLAMA_QD] __attribute__((aligned(64))), K_hw[LLAMA_M * LLAMA_KVD] __attribute__((aligned(64))), V_hw[LLAMA_M * LLAMA_KVD] __attribute__((aligned(64)));
 static float    tmp_f[LLAMA_M * LLAMA_H], tmp_t[LLAMA_H * LLAMA_M];
-static uint8_t  q_codes[LLAMA_NH][LLAMA_M * LLAMA_H], q_scales[LLAMA_NH][LLAMA_GH * LLAMA_M];
-static uint8_t  kt_codes[LLAMA_NKV][LLAMA_H * LLAMA_M], kt_scales[LLAMA_NKV][LLAMA_GH * LLAMA_M];
-static uint8_t  v_codes[LLAMA_NKV][LLAMA_M * LLAMA_H], v_scales[LLAMA_NKV][LLAMA_GM * LLAMA_H];
-static uint16_t S_hw[LLAMA_NH][LLAMA_M * LLAMA_M];
+static uint8_t  q_codes[LLAMA_NH][LLAMA_M * LLAMA_H] __attribute__((aligned(64))), q_scales[LLAMA_NH][LLAMA_GH * LLAMA_M] __attribute__((aligned(64)));
+static uint8_t  kt_codes[LLAMA_NKV][LLAMA_H * LLAMA_M] __attribute__((aligned(64))), kt_scales[LLAMA_NKV][LLAMA_GH * LLAMA_M] __attribute__((aligned(64)));
+static uint8_t  v_codes[LLAMA_NKV][LLAMA_M * LLAMA_H] __attribute__((aligned(64))), v_scales[LLAMA_NKV][LLAMA_GM * LLAMA_H] __attribute__((aligned(64)));
+static uint16_t S_hw[LLAMA_NH][LLAMA_M * LLAMA_M] __attribute__((aligned(64)));
 static float    p_f[LLAMA_M * LLAMA_M];
-static uint8_t  p_codes[LLAMA_NH][LLAMA_M * LLAMA_M], p_scales[LLAMA_NH][LLAMA_GM * LLAMA_M];
-static uint8_t  O_hw[LLAMA_NH][LLAMA_M * LLAMA_H];
+static uint8_t  p_codes[LLAMA_NH][LLAMA_M * LLAMA_M] __attribute__((aligned(64))), p_scales[LLAMA_NH][LLAMA_GM * LLAMA_M] __attribute__((aligned(64)));
+static uint8_t  O_hw[LLAMA_NH][LLAMA_M * LLAMA_H] __attribute__((aligned(64)));
 static uint32_t o_scales_dram[LLAMA_NH][64] __attribute__((aligned(32)));
-static uint8_t  wo_scales_chunk[LLAMA_GH * A_YCHUNK];
-static uint8_t  o_scales_a[LLAMA_GH * LLAMA_M];
-static uint8_t  a_proj_scales_chunk[LLAMA_GD * A_PROJ_N];
+static uint8_t  wo_scales_chunk[LLAMA_GH * A_YCHUNK] __attribute__((aligned(64)));
+static uint8_t  o_scales_a[LLAMA_GH * LLAMA_M] __attribute__((aligned(64)));
+static uint8_t  a_proj_scales_chunk[LLAMA_GD * A_PROJ_N] __attribute__((aligned(64)));
 // mlp
 static float    h_f[LLAMA_M * LLAMA_F];
-static uint8_t  h_codes[LLAMA_M * LLAMA_F];
-static uint8_t  h_scales[LLAMA_GF * LLAMA_M];
-static uint16_t G_hw[LLAMA_M * LLAMA_F], U_hw[LLAMA_M * LLAMA_F];
-static uint8_t  m_proj_scales_chunk[M_PKGRP * M_FCHUNK];
-static uint8_t  wd_scales_chunk[M_KGRP * M_NCHUNK];
+static uint8_t  h_codes[LLAMA_M * LLAMA_F] __attribute__((aligned(64)));
+static uint8_t  h_scales[LLAMA_GF * LLAMA_M] __attribute__((aligned(64)));
+static uint16_t G_hw[LLAMA_M * LLAMA_F] __attribute__((aligned(64))), U_hw[LLAMA_M * LLAMA_F] __attribute__((aligned(64)));
+static uint8_t  m_proj_scales_chunk[M_PKGRP * M_FCHUNK] __attribute__((aligned(64)));
+static uint8_t  wd_scales_chunk[M_KGRP * M_NCHUNK] __attribute__((aligned(64)));
 // shared scratch + the residual stream
 #define CHUNK_MAX (A_PROJ_N > A_YCHUNK ? A_PROJ_N : \
                    (A_YCHUNK > M_FCHUNK ? A_YCHUNK : \
                     (M_FCHUNK > M_NCHUNK ? M_FCHUNK : M_NCHUNK)))
-static uint16_t chunk16[LLAMA_M * CHUNK_MAX];
-static uint16_t Yattn_hw[LLAMA_M * LLAMA_D];
-static uint16_t Ymlp_hw[LLAMA_M * LLAMA_D];
-static uint16_t H_MID_hw[LLAMA_M * LLAMA_D];
-static uint16_t H_OUT_hw[LLAMA_M * LLAMA_D];
+static uint16_t chunk16[LLAMA_M * CHUNK_MAX] __attribute__((aligned(64)));
+static uint16_t Yattn_hw[LLAMA_M * LLAMA_D] __attribute__((aligned(64)));
+static uint16_t Ymlp_hw[LLAMA_M * LLAMA_D] __attribute__((aligned(64)));
+static uint16_t H_MID_hw[LLAMA_M * LLAMA_D] __attribute__((aligned(64)));
+static uint16_t H_OUT_hw[LLAMA_M * LLAMA_D] __attribute__((aligned(64)));
 static uint32_t scale_sink[512] __attribute__((aligned(32)));
+#ifdef LAYER_NATIVE
+static uint8_t  O_cat[LLAMA_M * LLAMA_QD] __attribute__((aligned(64)));      // [M][QD]: heads along K
+static uint8_t  oa_scales[(LLAMA_QD / 32) * LLAMA_M] __attribute__((aligned(64)));   // [QD/32][M]
+enum { NP_QKV, NP_S, NP_O, NP_OPROJ, NP_GU, NP_DOWN, NP_N };
+static uint64_t nat_ph[NP_N];
+#endif
 
 uintptr_t handle_trap(uintptr_t cause, uintptr_t epc, uintptr_t regs[32]) {
   printf("TRAP cause=%d epc=%lx\n", (int) cause, (unsigned long) epc);
@@ -373,8 +389,13 @@ int main() {
 
   // ==================== ATTENTION HALF ====================
   t0 = read_cycles();
+#ifdef LLAMA_GOLDEN_HOST
+  memcpy(xn_codes, A_XN_CODES, sizeof(xn_codes)); memcpy(xn_scales, A_XN_SCALES, sizeof(xn_scales));
+  (void) W_IN_LN;
+#else
   mx_rmsnorm(H_PRE, W_IN_LN, LLAMA_M, LLAMA_D, LLAMA_RMS_EPS, xn_f);
   mx_quantize_rows(xn_f, LLAMA_M, LLAMA_D, xn_codes, xn_scales);
+#endif
   t_host += read_cycles() - t0;
   int a_xn_cd = mx_count_diff_u8(xn_codes, A_XN_CODES, LLAMA_M * LLAMA_D);
   int a_xn_sd = mx_count_diff_u8(xn_scales, A_XN_SCALES, LLAMA_GD * LLAMA_M);
@@ -388,6 +409,22 @@ int main() {
   const int wid[3]        = { LLAMA_QD, LLAMA_KVD, LLAMA_KVD };
   const char *pn[3]       = { "Q", "K", "V" };
 
+#ifdef LAYER_NATIVE
+  t0 = read_cycles();
+  for (int s = 0; s < 3; s++)
+    if (mxn_matmul(xn_codes, LLAMA_D, wc[s], wid[s], dst[s], wid[s], xn_scales, LLAMA_M, ws[s], wid[s],
+                   LLAMA_M, LLAMA_D, wid[s])) return 1;
+  gemmini_fence();
+  nat_ph[NP_QKV] = read_cycles() - t0;
+  t_mesh += nat_ph[NP_QKV];
+  int proj_diff = 0;
+  for (int s = 0; s < 3; s++) {
+    int d = mx_count_diff_u16(dst[s], gold[s], LLAMA_M * wid[s]);
+    proj_diff += d;
+    printf("mesh  %s = Xn1 @ W%s : %d/%d differ (native)\n", pn[s], pn[s], d, LLAMA_M * wid[s]);
+  }
+  for (int s = 0; s < 0; s++) {
+#else
   t0 = read_cycles();
   mvin_A(xn_codes, LLAMA_M, LLAMA_D, A_SPAD_XN);
   gemmini_mx_load_scales((uint64_t) xn_scales, sizeof(xn_scales), 0);
@@ -396,6 +433,7 @@ int main() {
 
   int proj_diff = 0;
   for (int s = 0; s < 3; s++) {
+#endif
     const int nc = wid[s] < A_PROJ_N ? wid[s] : A_PROJ_N;
     for (int c = 0; c < wid[s] / nc; c++) {
       for (int g = 0; g < LLAMA_GD; g++)
@@ -420,11 +458,26 @@ int main() {
   }
 
   t0 = read_cycles();
+#ifdef LLAMA_GOLDEN_HOST
+  memcpy(q_codes, G_Q_CODES, sizeof(q_codes));
+  memcpy(q_scales, LLAMA_AT(LLAMA_OFF_A_Q_SCALES, uint8_t), sizeof(q_scales));
+  memcpy(kt_codes, G_KT_CODES, sizeof(kt_codes));
+  memcpy(kt_scales, LLAMA_AT(LLAMA_OFF_A_KT_SCALES, uint8_t), sizeof(kt_scales));
+  memcpy(v_codes, G_V_CODES, sizeof(v_codes));
+  memcpy(v_scales, LLAMA_AT(LLAMA_OFF_A_V_SCALES, uint8_t), sizeof(v_scales));
+  (void) ROPE_COS; (void) ROPE_SIN;
+  for (int h = 0; h < 0; h++) {
+#else
   for (int h = 0; h < LLAMA_NH; h++) {
+#endif
     mx_rope_at(Q_hw, LLAMA_QD, h * LLAMA_H, ROPE_COS, ROPE_SIN, LLAMA_M, LLAMA_H, tmp_f);
     mx_quantize_rows(tmp_f, LLAMA_M, LLAMA_H, q_codes[h], q_scales[h]);
   }
+#ifdef LLAMA_GOLDEN_HOST
+  for (int kv = 0; kv < 0; kv++) {
+#else
   for (int kv = 0; kv < LLAMA_NKV; kv++) {
+#endif
     mx_rope_at(K_hw, LLAMA_KVD, kv * LLAMA_H, ROPE_COS, ROPE_SIN, LLAMA_M, LLAMA_H, tmp_f);
     mx_transpose_f32(tmp_f, LLAMA_M, LLAMA_H, tmp_t);
     mx_quantize_cols(tmp_t, LLAMA_H, LLAMA_M, kt_codes[kv], kt_scales[kv]);
@@ -451,8 +504,55 @@ int main() {
   }
 
   int s_diff = 0, o_diff = 0, os_diff = 0;
+#ifdef LAYER_NATIVE
+  // S for all heads as chained native matmuls, one fence; then softmax; then P@V per head (resident
+  // requant loop, unchanged) with O read back and concatenated along K for one o_proj.
+  t0 = read_cycles();
   for (int h = 0; h < LLAMA_NH; h++) {
     const int kv = h / LLAMA_PER;
+    if (mxn_matmul(q_codes[h], LLAMA_H, kt_codes[kv], LLAMA_M, S_hw[h], LLAMA_M,
+                   q_scales[h], LLAMA_M, kt_scales[kv], LLAMA_M, LLAMA_M, LLAMA_H, LLAMA_M)) return 1;
+  }
+  gemmini_fence();
+  nat_ph[NP_S] = read_cycles() - t0;
+  t_mesh += nat_ph[NP_S];
+  for (int h = 0; h < LLAMA_NH; h++)
+    s_diff += mx_count_diff_u16(S_hw[h], S_OUT + (size_t) h * LLAMA_M * LLAMA_M, LLAMA_M * LLAMA_M);
+  t0 = read_cycles();
+#ifdef LLAMA_GOLDEN_HOST
+  memcpy(p_codes, G_P_CODES, sizeof(p_codes));
+  memcpy(p_scales, LLAMA_AT(LLAMA_OFF_A_P_SCALES, uint8_t), sizeof(p_scales));
+#else
+  for (int h = 0; h < LLAMA_NH; h++) {
+    mx_softmax_causal(S_hw[h], LLAMA_M, 1.0f / sqrtf((float) LLAMA_H), p_f);
+    mx_quantize_rows(p_f, LLAMA_M, LLAMA_M, p_codes[h], p_scales[h]);
+  }
+#endif
+  t_host += read_cycles() - t0;
+  for (int h = 0; h < LLAMA_NH; h++) {
+    const int kv = h / LLAMA_PER;
+    t0 = read_cycles();
+    mvin_A(p_codes[h], LLAMA_M, LLAMA_M, A_H2_A_P);
+    mvin_B(v_codes[kv], LLAMA_M, LLAMA_H, 0, LLAMA_H, A_H2_B_V);
+    gemmini_mx_load_scales((uint64_t) p_scales[h], LLAMA_GM * LLAMA_M, 0);
+    gemmini_mx_load_scales((uint64_t) v_scales[kv], LLAMA_GM * LLAMA_H, 1);
+    gemmini_fence();
+    mesh_matmul(LLAMA_M, LLAMA_M, LLAMA_H, A_H2_A_P, A_H2_B_V_ARG, A_H2_C_O,
+                OUT_FP8, (uint64_t) o_scales_dram[h], 1, 0);
+    uint64_t dt = read_cycles() - t0;
+    nat_ph[NP_O] += dt;
+    t_mesh += dt;
+    mvout_detile(O_hw[h], A_H2_C_O, LLAMA_M, LLAMA_H);
+    o_diff += mx_count_diff_u8(O_hw[h], O_OUT + (size_t) h * LLAMA_M * LLAMA_H, LLAMA_M * LLAMA_H);
+    os_diff += mx_count_diff_u8((const uint8_t *) o_scales_dram[h],
+                                O_SCALES + (size_t) h * LLAMA_M * LLAMA_GH, LLAMA_M * LLAMA_GH);
+  }
+  for (int h = 0; h < 0; h++) {
+    const int kv = h / LLAMA_PER;
+#else
+  for (int h = 0; h < LLAMA_NH; h++) {
+    const int kv = h / LLAMA_PER;
+#endif
     t0 = read_cycles();
     mvin_A(q_codes[h], LLAMA_M, LLAMA_H, A_H2_A_Q);
     mvin_B(kt_codes[kv], LLAMA_H, LLAMA_M, 0, LLAMA_M, A_H2_B_KT);
@@ -498,7 +598,28 @@ int main() {
   printf("mesh  O = P @ V   : %d/%d codes, %d/%d scales differ (requant -> spad)\n",
          o_diff, LLAMA_NH * LLAMA_M * LLAMA_H, os_diff, LLAMA_NH * LLAMA_M * LLAMA_GH);
 
+#ifdef LAYER_NATIVE
+  // o_proj = O_cat[M][QD] @ Wo[QD][D]: all heads along K, one native matmul (16 K-tiles x 4 chunks).
+  t0 = read_cycles();
+  for (int h = 0; h < LLAMA_NH; h++) {
+    const uint8_t *osrc = (const uint8_t *) o_scales_dram[h];   // [M][GH] as the requantizer wrote it
+    for (int m = 0; m < LLAMA_M; m++) {
+      memcpy(&O_cat[(size_t) m * LLAMA_QD + h * LLAMA_H], &O_hw[h][(size_t) m * LLAMA_H], LLAMA_H);
+      for (int g = 0; g < LLAMA_GH; g++)
+        oa_scales[(size_t) (h * LLAMA_GH + g) * LLAMA_M + m] = osrc[(size_t) m * LLAMA_GH + g];
+    }
+  }
+  t_host += read_cycles() - t0;
+  t0 = read_cycles();
+  if (mxn_matmul(O_cat, LLAMA_QD, WO_CODES, LLAMA_D, Yattn_hw, LLAMA_D, oa_scales, LLAMA_M,
+                 WO_SCALES, LLAMA_D, LLAMA_M, LLAMA_QD, LLAMA_D)) return 1;
+  gemmini_fence();
+  nat_ph[NP_OPROJ] = read_cycles() - t0;
+  t_mesh += nat_ph[NP_OPROJ];
+  for (int c = 0; c < 0; c++) {
+#else
   for (int c = 0; c < A_YCHUNKS; c++) {
+#endif
     for (int h = 0; h < LLAMA_NH; h++) {
       for (int g = 0; g < LLAMA_GH; g++)
         memcpy(wo_scales_chunk + (size_t) g * A_YCHUNK,
@@ -531,8 +652,12 @@ int main() {
   // h_mid feeds the MLP's RMSNorm and is re-quantized straight afterwards, so this is the one
   // host stage whose result must match the golden to the BIT -- an ulp here flips an E4M3 code.
   t0 = read_cycles();
+#ifdef LLAMA_GOLDEN_HOST
+  memcpy(H_MID_hw, H_MID_OUT, sizeof(H_MID_hw));
+#else
   for (int i = 0; i < LLAMA_M * LLAMA_D; i++)
     H_MID_hw[i] = mx_f32_to_bf16_rne(mx_bf16_to_f32(H_PRE[i]) + mx_bf16_to_f32(Yattn_hw[i]));
+#endif
   t_host += read_cycles() - t0;
   int hm_d = mx_count_diff_u16(H_MID_hw, H_MID_OUT, LLAMA_M * LLAMA_D);
   printf("host  h_mid = h_pre + Yattn : %d/%d differ from golden  <-- THE SEAM\n",
@@ -540,8 +665,13 @@ int main() {
 
   // ==================== MLP HALF, on the device's own h_mid ====================
   t0 = read_cycles();
+#ifdef LLAMA_GOLDEN_HOST
+  memcpy(xn_codes, M_XN_CODES, sizeof(xn_codes)); memcpy(xn_scales, M_XN_SCALES, sizeof(xn_scales));
+  (void) W_POST_LN;
+#else
   mx_rmsnorm(H_MID_hw, W_POST_LN, LLAMA_M, LLAMA_D, LLAMA_RMS_EPS, xn_f);
   mx_quantize_rows(xn_f, LLAMA_M, LLAMA_D, xn_codes, xn_scales);
+#endif
   t_host += read_cycles() - t0;
   int m_xn_cd = mx_count_diff_u8(xn_codes, M_XN_CODES, LLAMA_M * LLAMA_D);
   int m_xn_sd = mx_count_diff_u8(xn_scales, M_XN_SCALES, LLAMA_GD * LLAMA_M);
@@ -549,7 +679,15 @@ int main() {
          m_xn_cd, LLAMA_M * LLAMA_D, m_xn_sd, LLAMA_GD * LLAMA_M);
 
   t0 = read_cycles();
-#if M_PKTILES == 1
+#ifdef LAYER_NATIVE
+  if (mxn_matmul(xn_codes, LLAMA_D, WG_CODES, LLAMA_F, G_hw, LLAMA_F, xn_scales, LLAMA_M, WG_SCALES, LLAMA_F,
+                 LLAMA_M, LLAMA_D, LLAMA_F) ||
+      mxn_matmul(xn_codes, LLAMA_D, WU_CODES, LLAMA_F, U_hw, LLAMA_F, xn_scales, LLAMA_M, WU_SCALES, LLAMA_F,
+                 LLAMA_M, LLAMA_D, LLAMA_F)) return 1;
+  gemmini_fence();
+  nat_ph[NP_GU] = read_cycles() - t0;
+  if (0)
+#elif M_PKTILES == 1
   mvin_A_strided(xn_codes, LLAMA_M, LLAMA_D, LLAMA_D, M_SPAD_XN);
   gemmini_fence();
 #endif
@@ -590,15 +728,29 @@ int main() {
          g_d, LLAMA_M * LLAMA_F, u_d, LLAMA_M * LLAMA_F, M_FCHUNKS, M_FCHUNK);
 
   t0 = read_cycles();
+#ifdef LLAMA_GOLDEN_HOST
+  memcpy(h_codes, H_CODES_G, sizeof(h_codes)); memcpy(h_scales, H_SCALES_G, sizeof(h_scales));
+#else
   mx_swiglu(G_hw, U_hw, LLAMA_M * LLAMA_F, h_f);
   mx_quantize_rows(h_f, LLAMA_M, LLAMA_F, h_codes, h_scales);
+#endif
   t_host += read_cycles() - t0;
   int h_cd = mx_count_diff_u8(h_codes, H_CODES_G, LLAMA_M * LLAMA_F);
   int h_sd = mx_count_diff_u8(h_scales, H_SCALES_G, LLAMA_GF * LLAMA_M);
   printf("host  silu(G)*U + quant: codes differ %d/%d, scales differ %d/%d\n",
          h_cd, LLAMA_M * LLAMA_F, h_sd, LLAMA_GF * LLAMA_M);
 
+#ifdef LAYER_NATIVE
+  t0 = read_cycles();
+  if (mxn_matmul(h_codes, LLAMA_F, WD_CODES, LLAMA_D, Ymlp_hw, LLAMA_D, h_scales, LLAMA_M, WD_SCALES, LLAMA_D,
+                 LLAMA_M, LLAMA_F, LLAMA_D)) return 1;
+  gemmini_fence();
+  nat_ph[NP_DOWN] = read_cycles() - t0;
+  t_mesh += nat_ph[NP_DOWN];
+  for (int c = 0; c < 0; c++) {
+#else
   for (int c = 0; c < M_NCHUNKS; c++) {
+#endif
     for (int t = 0; t < M_KTILES; t++) {
       for (int g = 0; g < M_KGRP; g++)
         memcpy(wd_scales_chunk + (size_t) g * M_NCHUNK,
@@ -640,6 +792,23 @@ int main() {
   printf("grade LAYER OUT h_out vs THE MODEL's h_out : rel_fro %d ppm\n",
          MX_PPM(mx_rel_fro_bf16(H_OUT_hw, H_OUT_TORCH, LLAMA_M * LLAMA_D)));
   printf("cycles mesh %d, host %d\n", (int) t_mesh, (int) t_host);
+#ifdef LAYER_NATIVE
+  {
+    const uint64_t ideal[NP_N] = {
+      MXN_IDEAL(LLAMA_M, LLAMA_D, LLAMA_QD + 2 * LLAMA_KVD), LLAMA_NH * MXN_IDEAL(LLAMA_M, LLAMA_H, LLAMA_M),
+      LLAMA_NH * MXN_IDEAL(LLAMA_M, LLAMA_M, LLAMA_H), MXN_IDEAL(LLAMA_M, LLAMA_QD, LLAMA_D),
+      2 * MXN_IDEAL(LLAMA_M, LLAMA_D, LLAMA_F), MXN_IDEAL(LLAMA_M, LLAMA_F, LLAMA_D) };
+    const char *nm[NP_N] = { "QKV", "S x32", "O x32 (spad requant)", "o_proj", "G,U", "down" };
+    uint64_t tot = 0, itot = 0;
+    for (int p = 0; p < NP_N; p++) {
+      printf("phase %-22s %9d cyc  ideal %9d  util %3d%%\n", nm[p], (int) nat_ph[p], (int) ideal[p],
+             nat_ph[p] ? (int) (100 * ideal[p] / nat_ph[p]) : 0);
+      tot += nat_ph[p]; itot += ideal[p];
+    }
+    printf("phase %-22s %9d cyc  ideal %9d  util %3d%%\n", "LAYER MESH", (int) tot, (int) itot,
+           (int) (100 * itot / tot));
+  }
+#endif
 
   int exact = proj_diff + s_diff + o_diff + os_diff + ya_d + g_d + u_d + ym_d;
   int seam = hm_d + ho_d;

@@ -46,7 +46,7 @@ DATA.mkdir(parents=True, exist_ok=True)
 import gen_matmul_llama as G      # noqa: E402  -- quantize(), _requant(), _run_mesh(), bf16_bits()
 import gen_llama_layer as GL      # noqa: E402  -- load_capture(), FMT
 from mesh_par import mesh_parallel  # noqa: E402
-from app.capture_llama_layer import rmsnorm, rope, softmax_causal  # noqa: E402
+from app.mxhostmath import rmsnorm, rope, softmax_causal  # noqa: E402  -- the device's host math, bit-exact
 
 FMT = GL.FMT
 BLOCK = 32

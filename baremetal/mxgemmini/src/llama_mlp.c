@@ -170,16 +170,16 @@ LLAMA_REQUIRE(down_scale_fits,  SCALE_ROWS(LLAMA_F, NCHUNK) <= LLAMA_SCALE_ROWS_
 
 // ---- host buffers ----
 static float    xn_f[LLAMA_M * LLAMA_D];
-static uint8_t  xn_codes[LLAMA_M * LLAMA_D];
-static uint8_t  xn_scales[LLAMA_GD * LLAMA_M];
+static uint8_t  xn_codes[LLAMA_M * LLAMA_D] __attribute__((aligned(64)));   // DMA buffer: whole 64B lines
+static uint8_t  xn_scales[LLAMA_GD * LLAMA_M] __attribute__((aligned(64)));
 static float    h_f[LLAMA_M * LLAMA_F];
-static uint8_t  h_codes[LLAMA_M * LLAMA_F];
-static uint8_t  h_scales[LLAMA_GF * LLAMA_M];
-static uint8_t  wd_scales_chunk[LLAMA_GF * NCHUNK];
-static uint16_t G_hw[LLAMA_M * LLAMA_F];
-static uint16_t U_hw[LLAMA_M * LLAMA_F];
-static uint16_t Ychunk[LLAMA_M * NCHUNK];
-static uint16_t Y_hw[LLAMA_M * LLAMA_D];
+static uint8_t  h_codes[LLAMA_M * LLAMA_F] __attribute__((aligned(64)));
+static uint8_t  h_scales[LLAMA_GF * LLAMA_M] __attribute__((aligned(64)));
+static uint8_t  wd_scales_chunk[LLAMA_GF * NCHUNK] __attribute__((aligned(64)));
+static uint16_t G_hw[LLAMA_M * LLAMA_F] __attribute__((aligned(64)));
+static uint16_t U_hw[LLAMA_M * LLAMA_F] __attribute__((aligned(64)));
+static uint16_t Ychunk[LLAMA_M * NCHUNK] __attribute__((aligned(64)));
+static uint16_t Y_hw[LLAMA_M * LLAMA_D] __attribute__((aligned(64)));
 static uint16_t OUT_hw[LLAMA_M * LLAMA_D];
 
 // k-/j-tiles per mvin: rows of DIM*w bytes (64B at w=4 = one full DMA read), block stride DIM keeps the
@@ -255,6 +255,90 @@ static void mesh_matmul(int M, int K, int N, uint32_t a_spad, uint32_t b_arg, ui
   gemmini_fence();
 }
 
+#ifdef MLP_DB
+// ---- double-buffered schedule (-DMLP_DB; one K-tile, one down_proj chunk) ----
+// G and U run as two back-to-back loops under ONE scale config: loop_bound_k = 2*Kt, so the scale
+// k counter runs on and U reads the k-blocks after G's (A scales stored twice, B scales [Wg | Wu]).
+// Wu moves in under G's compute; Wd moves in with the G/U drains (reader and writer run together) --
+// issued after the loops so at most 5 loads queue ahead of them (8 RS ld slots, allocated in order).
+// Wd's scales load with H's in phase 3. inc_acc_addr alternates the two acc banks so G's store
+// overlaps U's compute. Fences: scales + G's operands, G/U done, drains + Wd, H in, Y done.
+LLAMA_REQUIRE(db_one_ktile, KTILES == 1);
+LLAMA_REQUIRE(db_one_chunk, NCHUNKS == 1);
+LLAMA_REQUIRE(db_scales_fit, 2 * LLAMA_GD * LLAMA_F <= 4096);   // [Wg | Wu] in one weight half
+#define DB_XN     0
+#define DB_WG     (DB_XN + ROWS8(LLAMA_M, LLAMA_D))
+#define DB_WG_ARG (DB_WG + ROWS8(LLAMA_D, LLAMA_F))       // loop_ws takes the END of each B region
+#define DB_WU_ARG (DB_WG_ARG + ROWS8(LLAMA_D, LLAMA_F))
+#define DB_WD_ARG (DB_WU_ARG + ROWS8(LLAMA_F, LLAMA_D))
+#define DB_G      DB_WD_ARG
+#define DB_U      (DB_G + ROWS16(LLAMA_M, LLAMA_F))
+#define DB_H      DB_XN                                   // Xn's region, free once G/U are done
+#define DB_Y      DB_G                                    // G's region, drained before down_proj
+LLAMA_REQUIRE(db_fits, DB_U + ROWS16(LLAMA_M, LLAMA_F) <= SPAD_TOP);
+#define INC_ACC_ADDR 0x100   // loop_ws rs2 bit8: next loop uses the other acc half (= bank)
+
+static uint8_t  db_a_scales[2 * LLAMA_GD * LLAMA_M] __attribute__((aligned(64)));
+static uint8_t  db_w_scales[2 * LLAMA_GD * LLAMA_F] __attribute__((aligned(64)));
+static uint32_t db_scale_sink[512] __attribute__((aligned(32)));
+
+// Phase breakdown: each DB_MARK fences (so the phase is really done) and stamps rdcycle.
+enum { DBP_START, DBP_LD1, DBP_LOOPS, DBP_MVOUT, DBP_P3START, DBP_HIN, DBP_Y, DBP_N };
+static uint64_t db_t[DBP_N];
+#define DB_MARK(p) do { gemmini_fence(); db_t[p] = read_cycles(); } while (0)
+
+static void db_loop(int M, int K, int N, uint32_t a_spad, uint32_t b_arg, uint32_t c_spad,
+                    uint32_t skips) {
+  gemmini_loop_ws_spad(M / DIM, N / DIM, K / DIM, 0, 0, 0, a_spad, b_arg, 0, c_spad,
+                       false, false, false, false, 0, NO_ACTIVATION, 0, 0, false, skips);
+}
+
+// mvout_bf16 without its trailing fence, so several drains share one.
+static void db_mvout_bf16(uint16_t *dst, uint32_t spad, int M, int N) {
+  gemmini_config_st(DIM * sizeof(uint8_t));
+  uint8_t *b = (uint8_t *) dst;
+  for (int r = 0; r < M * N * 2 / DIM; r += DIM)
+    gemmini_extended_mvout(b + (size_t) r * DIM, spad + r, DIM, DIM);
+}
+#endif
+
+#ifdef MLP_NATIVE
+// ---- native schedule (-DMLP_NATIVE): every matmul is ONE native DRAM loop (gemmini_loop_ws_mx) ----
+// A/B stream from DRAM, C (BF16) goes straight back to DRAM, and each loop loads its own E8M0 slices
+// ([K/32][M] / [K/32][N], pitch M / N) into its scale half -- no mvin/mvout/scale-load commands, no
+// packing. G and U are chained with no fence: U passes A = NULL (Xn stays resident, its scales too) and
+// B in the other spad half, so Wu streams in under G's compute. One fence per stage.
+// v1 loop limits: full K per loop (no accumulate), each operand in one spad half, scales in one 4 KB
+// half, C in one acc half. G/U: if A + B overflow a half (D = 2048), A takes half 0 and both B's half 1
+// (b_spad_id 2; the RS orders U's B mvins behind G's reads), else B alternates halves. down_proj is
+// N-chunked (NAT_NC) with loop-managed per-chunk B-scale slices; chunks after the first pass A = NULL.
+#define HALF_ROWS (SPAD_TOP / 2)
+#define NAT_ACC_ROWS(m, n) ((m) * (n) / (DIM * 4))   // E4M3-single: 4 acc rows per 16x16 C tile
+#define NAT_GU_SPLIT (ROWS8(LLAMA_M, LLAMA_D) + ROWS8(LLAMA_D, LLAMA_F) > HALF_ROWS)
+#define NAT_YFITS(nc) (ROWS8(LLAMA_M, LLAMA_F) + ROWS8(LLAMA_F, (nc)) <= HALF_ROWS && \
+                       NAT_ACC_ROWS(LLAMA_M, (nc)) <= ACC_ROWS / 2 && LLAMA_GF * (nc) <= 4096)
+#define NAT_NC (NAT_YFITS(LLAMA_D) ? LLAMA_D : NAT_YFITS(1024) ? 1024 : NAT_YFITS(512) ? 512 : \
+                NAT_YFITS(256) ? 256 : 128)
+#define NAT_NCH (LLAMA_D / NAT_NC)
+LLAMA_REQUIRE(nat_proj_spad,  ROWS8(LLAMA_M, LLAMA_D) <= HALF_ROWS && ROWS8(LLAMA_D, LLAMA_F) <= HALF_ROWS);
+LLAMA_REQUIRE(nat_proj_acc,   NAT_ACC_ROWS(LLAMA_M, LLAMA_F) <= ACC_ROWS / 2);
+LLAMA_REQUIRE(nat_proj_scale, LLAMA_GD * LLAMA_M <= 4096 && LLAMA_GD * LLAMA_F <= 4096);
+LLAMA_REQUIRE(nat_down_fits,  NAT_YFITS(NAT_NC) && NAT_NC * NAT_NCH == LLAMA_D);
+LLAMA_REQUIRE(nat_down_scale, LLAMA_GF * LLAMA_M <= 4096);
+enum { NP_START, NP_GU, NP_YSTART, NP_Y, NP_N };
+static uint64_t nat_t[NP_N];
+#define NAT_MARK(p) do { gemmini_fence(); nat_t[p] = read_cycles(); } while (0)
+// The scale loader needs 8B-aligned slice bases (it asserts on RTL); the generated headers carry no
+// alignment attribute, so check the arrays it reads rather than trust the link order.
+static int nat_misaligned(void) {
+  const void *p[] = { xn_scales, WG_SCALES_COL, WU_SCALES_COL, h_scales, WD_SCALES_COL };
+  int bad = 0;
+  for (unsigned i = 0; i < sizeof(p) / sizeof(p[0]); i++)
+    if ((uintptr_t) p[i] & 7) { printf("native: scale array %u at %p not 8B-aligned\n", i, p[i]); bad = 1; }
+  return bad;
+}
+#endif
+
 // One [M,D] x [D,F] projection, K-tiled. Tile t contributes Xn[:, t*KTILE ..] @ W[t*KTILE .., :]
 // into SPAD_GU: the first overwrites, the rest accumulate, so after the loop the region holds the
 // full D-deep reduction. Both scale windows take a CONTIGUOUS slice -- the A window is [GD][M] and
@@ -311,10 +395,52 @@ int main() {
          xn_cd, LLAMA_M * LLAMA_D, xn_sd, LLAMA_GD * LLAMA_M);
 
   // ================= mesh stages 1 and 2: gate_proj and up_proj =================
+#ifdef MLP_DB
+  memcpy(db_a_scales, xn_scales, sizeof(xn_scales));
+  memcpy(db_a_scales + sizeof(xn_scales), xn_scales, sizeof(xn_scales));
+  memcpy(db_w_scales, WG_SCALES_COL, LLAMA_GD * LLAMA_F);
+  memcpy(db_w_scales + LLAMA_GD * LLAMA_F, WU_SCALES_COL, LLAMA_GD * LLAMA_F);
+
+  t0 = read_cycles();
+  db_t[DBP_START] = t0;
+  gemmini_mx_load_scales((uint64_t) db_a_scales, sizeof(db_a_scales), 0);
+  gemmini_mx_load_scales((uint64_t) db_w_scales, sizeof(db_w_scales), 1);
+  mvin_A(xn_codes, LLAMA_M, LLAMA_D, DB_XN);
+  mvin_B((const uint8_t *) WG_IN, LLAMA_D, LLAMA_F, 0, LLAMA_F, DB_WG);
+  DB_MARK(DBP_LD1);                                       // fence: scales are not RS-ordered
+  mvin_B((const uint8_t *) WU_IN, LLAMA_D, LLAMA_F, 0, LLAMA_F, DB_WG_ARG);   // under G's compute
+  gemmini_config_st(LLAMA_F * sizeof(uint16_t));
+  gemmini_mxquant_config_mvout((uint64_t) db_scale_sink, LLAMA_M / DIM, LLAMA_F / DIM,
+                               2 * LLAMA_D / DIM, 0, 0, 1);
+  db_loop(LLAMA_M, LLAMA_D, LLAMA_F, DB_XN, DB_WG_ARG, DB_G, SPAD_STORE | INC_ACC_ADDR);
+  db_loop(LLAMA_M, LLAMA_D, LLAMA_F, DB_XN, DB_WU_ARG, DB_U, SPAD_STORE | INC_ACC_ADDR);
+  DB_MARK(DBP_LOOPS);
+  mvin_B((const uint8_t *) WD_IN, LLAMA_F, LLAMA_D, 0, LLAMA_D, DB_WU_ARG);     // with the drains
+  db_mvout_bf16(G_hw, DB_G, LLAMA_M, LLAMA_F);
+  db_mvout_bf16(U_hw, DB_U, LLAMA_M, LLAMA_F);
+  DB_MARK(DBP_MVOUT);
+  t_mesh += read_cycles() - t0;
+#elif defined(MLP_NATIVE)
+  if (nat_misaligned()) return 1;
+  t0 = read_cycles();
+  nat_t[NP_START] = t0;
+  gemmini_extended3_config_ld(LLAMA_D * sizeof(uint8_t), MVIN_SCALE_IDENTITY, false, 0);
+  gemmini_extended3_config_ld(LLAMA_F * sizeof(uint8_t), MVIN_SCALE_IDENTITY, false, 1);
+  gemmini_config_st(LLAMA_F * sizeof(uint16_t));
+  gemmini_loop_ws_mx(LLAMA_M / DIM, LLAMA_F / DIM, LLAMA_D / DIM,
+                     xn_codes, WG_IN, G_hw, LLAMA_D, LLAMA_F, LLAMA_F,
+                     xn_scales, WG_SCALES_COL, LLAMA_M, LLAMA_F, false, 1, NAT_GU_SPLIT ? 2 : 1);
+  gemmini_loop_ws_mx(LLAMA_M / DIM, LLAMA_F / DIM, LLAMA_D / DIM,
+                     NULL, WU_IN, U_hw, LLAMA_D, LLAMA_F, LLAMA_F,
+                     xn_scales, WU_SCALES_COL, LLAMA_M, LLAMA_F, false, 1, 2);
+  NAT_MARK(NP_GU);
+  t_mesh += read_cycles() - t0;
+#else
   t0 = read_cycles();
   projection((const uint8_t *) WG_IN, (const uint8_t *) WG_SCALES_COL, G_hw);
   projection((const uint8_t *) WU_IN, (const uint8_t *) WU_SCALES_COL, U_hw);
   t_mesh += read_cycles() - t0;
+#endif
 
   int g_d = mx_count_diff_u16(G_hw, (const uint16_t *) G_OUT_BF16, LLAMA_M * LLAMA_F);
   int u_d = mx_count_diff_u16(U_hw, (const uint16_t *) U_OUT_BF16, LLAMA_M * LLAMA_F);
@@ -333,6 +459,41 @@ int main() {
          h_cd, LLAMA_M * LLAMA_F, h_sd, LLAMA_GF * LLAMA_M);
 
   // ================= mesh stage 4: down_proj, in N-chunks =================
+#ifdef MLP_DB
+  t0 = read_cycles();
+  db_t[DBP_P3START] = t0;
+  mvin_A(h_codes, LLAMA_M, LLAMA_F, DB_H);
+  gemmini_mx_load_scales((uint64_t) h_scales, sizeof(h_scales), 0);
+  gemmini_mx_load_scales((uint64_t) WD_SCALES_COL, LLAMA_GF * LLAMA_D, 1);
+  DB_MARK(DBP_HIN);
+  gemmini_config_st(LLAMA_D * sizeof(uint16_t));
+  gemmini_mxquant_config_mvout((uint64_t) db_scale_sink, LLAMA_M / DIM, LLAMA_D / DIM,
+                               LLAMA_F / DIM, 0, 0, 1);
+  db_loop(LLAMA_M, LLAMA_F, LLAMA_D, DB_H, DB_WD_ARG, DB_Y, SPAD_STORE);
+  DB_MARK(DBP_Y);
+  t_mesh += read_cycles() - t0;
+  mvout_bf16(Y_hw, DB_Y, LLAMA_M, LLAMA_D);
+  printf("phase ld_scales+Xn+Wg %d | Wu+loops G,U %d | mvout G,U+mvin Wd %d | ld H+scales %d | loop Y %d\n",
+         (int) (db_t[DBP_LD1] - db_t[DBP_START]), (int) (db_t[DBP_LOOPS] - db_t[DBP_LD1]),
+         (int) (db_t[DBP_MVOUT] - db_t[DBP_LOOPS]), (int) (db_t[DBP_HIN] - db_t[DBP_P3START]),
+         (int) (db_t[DBP_Y] - db_t[DBP_HIN]));
+#elif defined(MLP_NATIVE)
+  t0 = read_cycles();
+  nat_t[NP_YSTART] = t0;
+  gemmini_extended3_config_ld(LLAMA_F * sizeof(uint8_t), MVIN_SCALE_IDENTITY, false, 0);
+  gemmini_extended3_config_ld(LLAMA_D * sizeof(uint8_t), MVIN_SCALE_IDENTITY, false, 1);
+  gemmini_config_st(LLAMA_D * sizeof(uint16_t));
+  for (int c = 0; c < NAT_NCH; c++) {
+    gemmini_loop_ws_mx(LLAMA_M / DIM, NAT_NC / DIM, LLAMA_F / DIM,
+                       c == 0 ? h_codes : NULL, (const uint8_t *) WD_IN + c * NAT_NC, Y_hw + c * NAT_NC,
+                       LLAMA_F, LLAMA_D, LLAMA_D,
+                       h_scales, &WD_SCALES_COL[0][c * NAT_NC], LLAMA_M, LLAMA_D, false, 1, 1 + (c & 1));
+  }
+  NAT_MARK(NP_Y);
+  t_mesh += read_cycles() - t0;
+  printf("phase loops G,U (C->DRAM) %d | loops Y x%d (C->DRAM) %d\n",
+         (int) (nat_t[NP_GU] - nat_t[NP_START]), NAT_NCH, (int) (nat_t[NP_Y] - nat_t[NP_YSTART]));
+#else
   t0 = read_cycles();
   mvin_A(h_codes, LLAMA_M, LLAMA_F, SPAD_H);
   gemmini_mx_load_scales((uint64_t) h_scales, sizeof(h_scales), 0);
@@ -357,6 +518,7 @@ int main() {
       memcpy(&Y_hw[(size_t) m * LLAMA_D + c * NCHUNK], &Ychunk[(size_t) m * NCHUNK],
              NCHUNK * sizeof(uint16_t));
   }
+#endif
 
   int y_d = mx_count_diff_u16(Y_hw, (const uint16_t *) Y_OUT_BF16, LLAMA_M * LLAMA_D);
   printf("mesh  Y = H @ Wd  : %d/%d differ from golden (%d chunks of %d)\n",

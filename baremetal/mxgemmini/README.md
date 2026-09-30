@@ -1,5 +1,10 @@
 # baremetal/mxgemmini — TinyLlama on MxGemmini, by hand
 
+> **Looking for the fast kernels?** The high-performance native-loop kernels (`*_native`, the full-layer
+> `llama_layer_full_native_gh`, and the `mx_bench_matmul` utilization benchmarks) are listed with their
+> measured RTL utilization in [`README_PERFORMANCE.md`](README_PERFORMANCE.md). The kernels below are the
+> original scratchpad-flow versions, kept as baselines.
+
 Seven kernels, each one ELF, each carrying real captured TinyLlama weights and activations. The mesh
 does the matmuls in MX fp8 (e4m3 + E8M0); everything else — RMSNorm, RoPE, softmax, SwiGLU, the
 residual — runs in fp32 on the Rocket scalar core, because the target contract declares one compute
