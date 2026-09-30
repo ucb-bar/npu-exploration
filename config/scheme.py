@@ -132,7 +132,7 @@ def mxq_config(hw: Hardware, run: Run, *, compiled: bool = False):
                           "hardware and exact")
     return MXQConfig(fmt=mxq_format(run.operand_fmt), rounding_mode=run.rounding, scale_floor=run.scale_floor,
                      block_size=hw.block, prod=list(product(hw)), prod_floor=hw.prod_floor,
-                     ladder=[list(e) for e in schedule(hw)], window=hw.dim, reduce=run.reduce, compiled=compiled,
+                     ladder=[list(e) for e in schedule(hw)], size=hw.dim, reduce=run.reduce, compiled=compiled,
                      name=hw.name if run.reduce == "hardware" else f"{hw.name}/{run.reduce}")
 
 
@@ -150,14 +150,14 @@ def scheme(recipe: Hardware, run: Run, *, compiled: bool = False):
         arith, sched, window = datapath(recipe)
         if compiled:
             arith = matmul.compiled(arith)
-        r = partial(matmul.systolic, arith=arith, schedule=sched, window=window, block_size=recipe.block)
+        r = partial(matmul.systolic, arith=arith, schedule=sched, size=window, block_size=recipe.block)
     elif reduce == "exact":
         r = partial(fp64_accum, block_size=recipe.block)
     elif reduce == "bf16_tiles":
         arith = _bf16_tiles(recipe)
         if compiled:                        # gated bit-identical to eager on the GPU (0/984576 differ, 2026-09-28)
             arith = matmul.compiled(arith)
-        r = partial(matmul.systolic, arith=arith, schedule=[(8, 7)] * recipe.block, window=recipe.block,
+        r = partial(matmul.systolic, arith=arith, schedule=[(8, 7)] * recipe.block, size=recipe.block,
                     block_size=recipe.block)
     else:
         raise RecipeError(f"reduce {reduce!r}; choose from {', '.join(REDUCERS)}")

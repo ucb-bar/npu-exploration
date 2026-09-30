@@ -96,7 +96,7 @@ def main() -> int:
     from mxq import matmul
     PA, XA = scheme.quantizer(base, dflt)(A)
     PB, XB = scheme.quantizer(base, dflt)(B)
-    y_direct = matmul.systolic(PA, XA, PB, XB, arith, sched, window=window, block_size=base.block)
+    y_direct = matmul.systolic(PA, XA, PB, XB, arith, sched, size=window, block_size=base.block)
     check("Scheme.matmul == quantizer + datapath from the same recipe", torch.equal(y_scheme, y_direct))
     check("wide_acc gives different bits from baseline", not torch.equal(y_scheme, scheme.scheme(wide, dflt).matmul(A, B)))
 
