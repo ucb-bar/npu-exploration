@@ -106,6 +106,43 @@ def main() -> int:
               < res["blocks"]["MeshWithDelays"]["area_um2"],
               f"{na['blocks']['MeshWithDelays']['area_um2']/1e3:.1f}k")
 
+    if root is not None:
+        print("B: PE facts and the memory inventory (beside the totals, never in them)")
+        from models.ppa.ppa import pe_spec
+        for fmt, (tok, _, prods, _) in FORMATS.items():
+            p = pe_spec(fmt)
+            check(f"{fmt}: pe = pair_modes.spec (mode {p.get('mode')}, {p.get('ops_per_pe_cycle')} ops/PE/cycle, "
+                  f"rtl_ok {p.get('rtl_ok')})", p.get("ops_per_pe_cycle") == prods and p["mode"] == pm.spec(tok, tok, uses_lut(fmt))["mode"])
+        real = run_ppa(r)
+        check("real workspace: memory unavailable, and says why", real["memory"]["available"] is False
+              and "SRAM compiler tables" in real["memory"]["why"], real["memory"].get("why", "")[:90])
+        import shutil
+        sys.path.insert(0, str(REPO / "tests"))
+        from ppa_memfixture import synthetic_workspace
+        fx = synthetic_workspace(root)
+        old_root = os.environ.get("MX_PPA_ROOT")
+        os.environ["MX_PPA_ROOT"] = str(fx)
+        try:
+            syn = run_ppa(r)
+        finally:
+            if old_root is None:
+                os.environ.pop("MX_PPA_ROOT", None)
+            else:
+                os.environ["MX_PPA_ROOT"] = old_root
+            shutil.rmtree(fx.parent, ignore_errors=True)
+        mem = syn["memory"]
+        check("synthetic SRAM table: the inventory runs (plumbing only; numbers invented)", mem.get("available") is True,
+              str(mem.get("why", ""))[:120])
+        if mem.get("available"):
+            check("inventory has scratchpad, accumulator, scale memory", {"smem", "acc", "scale"} <= set(mem["memories"]))
+            check("scratchpad is the recipe's: 4 banks x 4096 rows x 16 B",
+                  mem["memories"]["smem"]["count"] >= 4 and mem["from_recipe"] == ["smem"])
+            check("gemmini memory area = sum of smem + acc + scale",
+                  abs(mem["gemmini_area_um2"] - sum(mem["memories"][n]["area_um2"] for n in ("smem", "acc", "scale"))) < 1)
+            check("timing checked against the recipe clock (synthetic tcyc 0.8 ns < 2 ns)", mem["slower_than_clock"] == [])
+            check("the totals do not move with the memory model",
+                  (syn["area_um2"], syn["power_mw"], syn["pj_per_op"]) == (real["area_um2"], real["power_mw"], real["pj_per_op"]))
+
     print("fail-soft: bad MX_PPA_ROOT raises PpaError, nothing else")
     old = os.environ.get("MX_PPA_ROOT")
     os.environ["MX_PPA_ROOT"] = "/nonexistent-ppa"

@@ -31,7 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from models.ppa.ppa import PpaError, acc_rows, format_tokens, ppa_root, uses_lut, _workspace_head
+from models.ppa.ppa import QRT_TABLE, PpaError, acc_rows, format_tokens, ppa_root, uses_lut, _workspace_head
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -63,7 +63,7 @@ DEFAULT_LUT_GROUP = 1
 def perf_args(recipe, dtype: str, m: int, n: int, k: int, out_fmt: str, *,
               as_measured: bool = True, energy: bool = False, lut_group: int | None = None,
               tiles: tuple[int, int, int] | None = None, dma_bw: float | None = None,
-              spad_kb: float | None = None) -> list[str]:
+              spad_kb: float | None = None, memory: bool = False) -> list[str]:
     """Map a hardware recipe, the run's operand format and one GEMM stage onto perf_model's CLI.
 
     A LUT format (models.ppa.ppa.uses_lut) runs with --lut and the chip's LUT layout: one LUT per 2**G rows of
@@ -100,7 +100,18 @@ def perf_args(recipe, dtype: str, m: int, n: int, k: int, out_fmt: str, *,
             args += ["--spad-kb", str(spad_kb)]
     if energy:
         args += ["--energy", "--acc-rows", acc_rows(recipe)]
+    if memory:
+        args.append("--mem")
     return args
+
+
+def memory_available() -> str | None:
+    """None when perf_model --mem can run; else why not (the SRAM compiler tables are PDK data, not in the repo)."""
+    try:
+        root = ppa_root()
+    except PpaError as exc:
+        return str(exc)
+    return None if (root / QRT_TABLE).exists() else f"no SRAM compiler tables at {root / QRT_TABLE}"
 
 
 def spad_kb(recipe) -> float:
@@ -116,6 +127,37 @@ _TOTAL = re.compile(
     r"total (\d+) cycles = ([\d.]+) us;\s+([\d.]+) M ops;.*"
     r"utilization ([\d.]+) %;\s+([\d.]+) Gop/s")
 _TABLES = re.compile(r"LUT \d+ \((\d+) loads, (\d+) tables")
+_MODE = re.compile(r"mode m(\d+) (\d+) ops/PE/cycle")
+# --mem (memory_model.report with access counts): one row per memory, then the bandwidth and energy lines.
+_MEM_ROW = re.compile(r"^(\S+)\s+(.+?)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)"
+                      r"(?:\s+~\S*)?\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)%")
+_MEM_TIMING = re.compile(r"timing: clock [\d.]+ ns -> (.*)")
+_MEM_BW = re.compile(r"scratchpad bandwidth: demand ([\d.]+) B/cycle during compute vs supply (\d+) B/cycle \((ok|STALL x[\d.]+)")
+_MEM_TOTAL = re.compile(r"memory energy ([\d.]+) uJ macros \+ ([\d.]+) uJ accumulate logic = ([\d.]+) pJ per op "
+                        r"\(([\d.]+) mW over the GEMM\)")
+
+
+def _parse_memory(stdout: str) -> dict:
+    start = stdout.find("memory (QRT model")
+    tot = _MEM_TOTAL.search(stdout)
+    if start < 0 or tot is None:
+        raise PerfError(f"could not parse perf_model --mem output\n--- stdout ---\n{stdout[-1500:]}")
+    per = {}
+    for ln in stdout[start:].splitlines()[2:]:
+        m = _MEM_ROW.match(ln.strip())
+        if not m:
+            break
+        per[m.group(1)] = {"macro": m.group(2).strip(), "count": int(m.group(3)), "reads": int(m.group(11)),
+                           "writes": int(m.group(12)), "dyn_uj": float(m.group(13)), "mw": float(m.group(14)),
+                           "util_pct": float(m.group(15))}
+    if not per:
+        raise PerfError(f"perf_model --mem printed no memory rows\n--- stdout ---\n{stdout[start:start + 1500]}")
+    bw, tm = _MEM_BW.search(stdout), _MEM_TIMING.search(stdout)
+    return {"memories": per, "uj_macros": float(tot.group(1)), "uj_acc_logic": float(tot.group(2)),
+            "pj_per_op": float(tot.group(3)), "mw": float(tot.group(4)),
+            "timing": tm.group(1).strip() if tm else None,
+            "spad_bandwidth": None if bw is None else {"demand_b_per_cycle": float(bw.group(1)),
+                                                      "supply_b_per_cycle": int(bw.group(2)), "verdict": bw.group(3)}}
 _ENERGY = re.compile(
     r"energy: .*?([\d.]+) mW at .*?->\s*([\d.]+) uJ for the GEMM = "
     r"([\d.]+) pJ per op")
@@ -140,11 +182,16 @@ def _parse(stdout: str) -> dict:
     tb = _TABLES.search(stdout)
     if tb:
         out["lut_loads"], out["lut_tables"] = int(tb.group(1)), int(tb.group(2))
+    md = _MODE.search(stdout)
+    if md:
+        out["pe_mode"], out["ops_per_pe_cycle"] = int(md.group(1)), int(md.group(2))
     en = _ENERGY.search(stdout)
     if en:
         out["energy"] = {"power_mw_at_util": float(en.group(1)),
                          "uj": float(en.group(2)),
                          "pj_per_op_achieved": float(en.group(3))}
+    if "memory (QRT model" in stdout:
+        out["memory"] = _parse_memory(stdout)
     return out
 
 
@@ -174,12 +221,14 @@ def run_perf(recipe, dtype: str, stages, *, as_measured: bool = True, energy: bo
     :class:`PerfError`; callers skip and log.
     """
     script = perf_model_path()   # fail before any work if the model is absent
+    no_memory = memory_available()
     per_stage = []
     for s in stages:
         if s.get("where", "mesh") != "mesh":       # host stages run on Rocket; the model prices the mesh
             continue
         res = _run_one(recipe, dtype, int(s["m"]), int(s["n"]), int(s["k"]),
-                       str(s.get("out_dtype", "bf16")), as_measured=as_measured, energy=energy, **opts)
+                       str(s.get("out_dtype", "bf16")), as_measured=as_measured, energy=energy,
+                       memory=no_memory is None, **opts)
         res["stage"] = s.get("stage", len(per_stage))
         res["gemm"] = f"{s['m']}x{s['k']}x{s['n']}"
         res["out_fmt"] = str(s.get("out_dtype", "bf16"))
@@ -197,6 +246,17 @@ def run_perf(recipe, dtype: str, stages, *, as_measured: bool = True, energy: bo
         ops = sum(p["m_ops"] for p in per_stage) * 1e6
         out["energy"] = {"uj_kernel": round(uj, 3),
                          "pj_per_op_achieved": round(uj * 1e6 / ops, 3) if ops else None}
+    # Reported beside energy, never added to it: --energy already carries the measured Scratchpad block power
+    # (memory_model / perf_model: "use one or the other for the memory part").
+    if no_memory is not None:
+        out["memory"] = {"available": False, "why": no_memory}
+    else:
+        out["memory"] = {"available": True,
+                         "system": "radiance (as measured: the validated kernels ran there)" if as_measured else "rocket",
+                         "uj_macros": round(sum(p["memory"]["uj_macros"] for p in per_stage), 3),
+                         "uj_acc_logic": round(sum(p["memory"]["uj_acc_logic"] for p in per_stage), 3),
+                         "timing": sorted({p["memory"]["timing"] for p in per_stage if p["memory"]["timing"]}),
+                         "note": "separate from energy: that already contains the measured Scratchpad block"}
     out["model"] = {
         "source": "MxGemmini-workspace/ppa/perf/perf_model.py",
         "mode": "as_measured" if as_measured else "ideal",
