@@ -55,7 +55,7 @@ All of these are in `build_id` except the labels (`name`, `description`, `proven
 | `types.prodFloor` | a product below 2^prodFloor is flushed to zero (MxFPMul: -16); `null` for no flush | mxquant |
 | `mx.scaleSize` | elements per E8M0 scale on the operands | mxquant, spike (`GROUP`) |
 | `mx.scaleSizeOut` | the requantizer's output group | spike (`GROUP_OUT`) |
-| `mx.enable_lut` | codebook decode hardware present | perf (`--lut`); the perplexity path refuses it |
+| `mx.enable_lut` | the LUT unit is present (LUT formats send 4-bit indices into 16-entry LUTs) | perf (`--lut`); `check` warns on a LUT format when false |
 | `accumulator.acc_read_full_width`, `acc_read_small_width` | accumulator read widths | nothing in Python |
 | `scratchpad.banks`, `scratchpad.rows` | scratchpad geometry | emitters (`bank_num`, `bank_rows`) |
 | `implementation.clock_ns` | target clock period | ppa (`--clock-ns`), perf (`--clock-ns`) |
@@ -72,8 +72,11 @@ All of these are in `build_id` except the labels (`name`, `description`, `proven
 | `reduce` | how codes are multiplied: `hardware` (the recipe's array), `exact`, `bf16_tiles` | `hardware` |
 | `allow_lossy_chain` | run a chain whose codebook cannot be chosen exactly | `false` |
 | `fp32_tol` | kernel pass threshold on relative Frobenius error against fp32 | 0.15 |
+| `lut` (optional) | a LUT format's LUTs: `{"source": "data" or a .json of LUTs, "group": G, "pick": "host" or "hardware"}`; all three written. Absent: the kernel path's LUTs are the compiler's (from the data, G = 1), the perplexity path runs the full element grid, and `run_id` is unchanged. Read by no model yet | absent |
 
-`name` and `description` are labels and stay out of `run_id`. The perplexity cache key does not
+`name` and `description` are labels and stay out of `run_id`. The hardware recipe says whether the LUT
+unit exists (`mx.enable_lut`); the run recipe says how it is used (`lut`). `lut` on a direct format
+(fp8_e4m3, fp4_e2m1) is refused; the kernel path also refuses `lut.group` other than 1. The perplexity cache key does not
 include `allow_lossy_chain` or `fp32_tol`, because the perplexity path never reads them.
 
 ## Which path runs what
@@ -106,8 +109,8 @@ holds these constants and `baseline.json` equal to libgemmini, the Chisel source
 | `scheme(hw, run)` | an mxq `Scheme`: the quantizer for A and B, and the reducer `run.reduce` names | all of the above |
 
 Refused with `RecipeError`, never approximated: a non-uniform product list, an accumulator list
-whose length is not the mesh dimension, and at model level (`scheme()`) an `enable_lut` recipe.
-The codebook formats run on their full element grid on the perplexity path, and its record says so.
+whose length is not the mesh dimension. The LUT formats run on their full element grid on the
+perplexity path, and its record says so.
 `tests/selftest_scheme.py` holds `scheme(hw, run).matmul` bit-identical to the extracted hardware
 model (`rtl_exact/mxmesh/fp8`) on every recipe.
 

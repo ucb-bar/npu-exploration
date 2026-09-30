@@ -4,8 +4,9 @@
 flush, block size, scratchpad, clock and utilization. Every field except ``name``, ``description``
 and ``provenance`` is hashed into ``build_id``, which keys the spike build, the perplexity cache and
 every record. ``config/run/<name>.json`` is how that machine is driven: operand format, rounding,
-scale floor, reducer and the grading tolerance; ``run_id`` hashes it the same way. A run recipe
-never triggers a build.
+scale floor, reducer and the grading tolerance, and, for a LUT format, how its LUTs are made
+(``lut``: source, group, pick); ``run_id`` hashes it the same way. A run recipe never triggers a build.
+The hardware recipe says whether the LUT unit exists (``mx.enable_lut``); the run recipe says how it is used.
 
 Every key is read by something; an unknown key is refused by name. ``check(hw, run, path)`` refuses
 the combinations a path cannot follow (the kernel path runs on spike and the chip's requantizer, the
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -38,7 +40,11 @@ _HW_SECTIONS = {
 }
 _MXFLOAT = {"expWidth", "sigWidth", "count", "isRecoded", "pad"}
 _RUN_KEYS = {"name", "description", "operand_fmt", "rounding", "scale_floor", "reduce",
-             "allow_lossy_chain", "fp32_tol"}
+             "allow_lossy_chain", "fp32_tol", "lut"}
+#: Optional run keys: absent means today's behaviour, and leaves run_id unchanged.
+_RUN_OPTIONAL = {"description", "lut"}
+_LUT_KEYS = {"source", "group", "pick"}
+LUT_PICKS = ("host", "hardware")
 
 #: What the kernel path can follow. Each is a fact of spike, the emitters or the chip's own
 #: requantizer, not a preference: a recipe asking for anything else is refused by check().
@@ -47,6 +53,7 @@ KERNEL_BLOCK = 32           # mx_host.h MX_BLOCK, compiler/formats.BLOCK, spike'
 KERNEL_SCRATCHPAD = (4, 4096)   # libgemmini gemmini_params.h BANK_NUM, BANK_ROWS at DIM 16
 KERNEL_ROUNDING = "rne"     # the requantizer (gemmini.cc) and mx_host.h round to nearest even
 KERNEL_SCALE_FLOOR = 2.0 ** -23     # the fp8 requantizer floors the block max at FLT_EPSILON
+KERNEL_LUT_GROUP = 1        # one LUT per 2**G rows of A / columns of B: compiler/formats.LUT_GRANULARITY, every shipped test
 
 
 class RecipeError(ValueError):
@@ -161,6 +168,24 @@ class Hardware:
 
 
 @dataclass(frozen=True)
+class Lut:
+    """How a LUT format's LUTs (16 entries, one per 2**group columns, 4-bit indices) are made.
+
+    source  "data": built from each operand's own values (the compiler's k-means rule), or a path to a
+            .json of given LUTs (e.g. reviewed ones), resolved next to the run recipe
+    group   G: one LUT per 2**G rows of A / columns of B, the argument gemmini_mxquant_config_mvout carries
+    pick    who picks an activation's index in the perplexity path: "host" (nearest by value) or
+            "hardware" (the device's fixed-point finder). The kernel path does not read it: the host picks
+            what it sends and spike's finder picks every chained output.
+
+    Read by nothing yet: the LUT work (compiler, models/mxquant, mxq.nn.torchao) consumes it.
+    """
+    source: str = "data"
+    group: int = KERNEL_LUT_GROUP
+    pick: str = "host"
+
+
+@dataclass(frozen=True)
 class Run:
     """A validated run recipe. The defaults are ``config/run/default.json``: what the chip does."""
     name: str = "default"
@@ -170,19 +195,22 @@ class Run:
     reduce: str = "hardware"
     allow_lossy_chain: bool = False
     fp32_tol: float = 0.15
+    lut: Lut | None = None      # None: no lut block (the kernel path's LUTs are the compiler's; perplexity is full grid)
     description: str = ""
     path: Path | None = None
 
     def fields(self) -> dict:
-        """Every field that changes a number."""
-        return {k: v for k, v in asdict(self).items() if k not in _LABELS and k != "path"}
+        """Every field that changes a number. ``lut`` only when set, so a recipe without it keeps its run_id."""
+        return {k: v for k, v in asdict(self).items()
+                if k not in _LABELS and k != "path" and not (k == "lut" and v is None)}
 
     def run_id(self) -> str:
         return _digest(self.fields())
 
     def describe(self) -> str:
+        lut = "" if self.lut is None else f"  lut {self.lut.source} G={self.lut.group} pick {self.lut.pick}"
         return (f"{self.name}  {self.operand_fmt}  {self.rounding}  floor {self.scale_floor:g}  "
-                f"reduce {self.reduce}")
+                f"reduce {self.reduce}{lut}")
 
 
 def _digest(obj) -> str:
@@ -281,14 +309,41 @@ def load_run(path: str | Path) -> Run:
 
 def parse_run(raw: dict, *, path: Path | None = None) -> Run:
     _check_keys(raw, _RUN_KEYS, "run recipe")
-    missing = sorted(_RUN_KEYS - {"description"} - set(raw))
+    missing = sorted(_RUN_KEYS - _RUN_OPTIONAL - set(raw))
     if missing:
         raise RecipeError(f"run recipe: {', '.join(missing)} required (write every field; "
                           "config/run/default.json is the template)")
     return Run(name=raw["name"], operand_fmt=str(raw["operand_fmt"]), rounding=str(raw["rounding"]),
                scale_floor=float(raw["scale_floor"]), reduce=str(raw["reduce"]),
                allow_lossy_chain=bool(raw["allow_lossy_chain"]), fp32_tol=float(raw["fp32_tol"]),
-               description=raw.get("description", ""), path=path)
+               lut=_parse_lut(raw.get("lut"), path), description=raw.get("description", ""), path=path)
+
+
+def _parse_lut(obj, path: Path | None) -> Lut | None:
+    """The run recipe's ``lut`` block: all three keys written, each checked. A file source must exist; its
+    entries are checked when the LUT work loads it."""
+    if obj is None:
+        return None
+    if not isinstance(obj, dict):
+        raise RecipeError(f"lut: expected an object with {', '.join(sorted(_LUT_KEYS))}")
+    _check_keys(obj, _LUT_KEYS, "lut")
+    missing = sorted(_LUT_KEYS - set(obj))
+    if missing:
+        raise RecipeError(f"lut: {', '.join(missing)} required")
+    source, group, pick = obj["source"], obj["group"], obj["pick"]
+    if not isinstance(source, str) or not source:
+        raise RecipeError(f"lut.source {source!r}: \"data\" or a path to a .json of LUTs")
+    if source != "data":
+        f = Path(source)
+        if not f.is_absolute() and path is not None:
+            f = path.parent / f
+        if f.suffix != ".json" or not f.exists():
+            raise RecipeError(f"lut.source {source!r}: no such .json (looked at {f}); or \"data\"")
+    if not isinstance(group, int) or isinstance(group, bool) or group < 0:
+        raise RecipeError(f"lut.group {group!r}: a non-negative integer G (one LUT per 2**G columns)")
+    if pick not in LUT_PICKS:
+        raise RecipeError(f"lut.pick {pick!r}; choose from {', '.join(LUT_PICKS)}")
+    return Lut(source=source, group=group, pick=pick)
 
 
 def check(hw: Hardware, run: Run, path: str) -> None:
@@ -298,6 +353,10 @@ def check(hw: Hardware, run: Run, path: str) -> None:
     scheme.mxq_format(run.operand_fmt)
     if run.reduce not in scheme.REDUCERS:
         raise RecipeError(f"run {run.name}: reduce {run.reduce!r}; choose from {', '.join(scheme.REDUCERS)}")
+    is_lut = scheme.is_codebook(run.operand_fmt)
+    if run.lut is not None and not is_lut:
+        raise RecipeError(f"run {run.name}: a lut block for {run.operand_fmt}, which is not a LUT format "
+                          "(the LUT formats are fp8_e4m3_quad, fp8_e5m2, fp6_e3m2, fp6_e2m3)")
     if path == "perplexity":
         return
     if path != "kernel":
@@ -316,6 +375,13 @@ def check(hw: Hardware, run: Run, path: str) -> None:
         refusals.append(f"scale_floor {run.scale_floor:g}: the chip's requantizer floors the block max at 2^-23")
     if run.reduce != "hardware":
         refusals.append(f"reduce {run.reduce}: the kernel path grades the chip, whose reducer is the recipe's ladder")
+    if run.lut is not None and run.lut.group != KERNEL_LUT_GROUP:
+        refusals.append(f"lut.group {run.lut.group}: the compiler and every shipped LUT test use G = {KERNEL_LUT_GROUP}")
+    if is_lut and not hw.enable_lut:
+        # A warning, not a refusal, until it is settled whether the stock chip has the LUT unit: every
+        # shipped hardware recipe says enable_lut false, and the four LUT formats have always been graded on it.
+        warnings.warn(f"{hw.name}: mx.enable_lut is false, but {run.operand_fmt} is a LUT format; graded "
+                      "anyway (open: is this flag stale, or does this chip have no LUT unit?)", stacklevel=2)
     if refusals:
         raise RecipeError(f"{hw.name} + run {run.name} on the kernel path: " + "; ".join(refusals)
                           + " (the perplexity path, python -m models.mxquant, runs these)")

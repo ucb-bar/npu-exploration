@@ -182,6 +182,46 @@ def main() -> int:
     check("kernel path accepts baseline + default and baseline + fp4_e2m1", True)
     check_recipes(base, load_run("fp4_e2m1"), "kernel")
     refused_load("an unknown operand format is refused", lambda: check_recipes(base, Run(operand_fmt="fp9"), "perplexity"), "fp9")
+
+    print("\n[5b] the run recipe's lut block ----------------------------------------")
+    import warnings
+    from config.recipe import KERNEL_LUT_GROUP, Lut
+    from compiler import formats as cformats
+    check("recorded run_ids unchanged by the lut field (a recipe without it hashes as before)",
+          {r: load_run(r).run_id() for r in ("default", "exact", "bf16_tiles", "fp4_e2m1")}
+          == {"default": "611f047101d540f2", "exact": "f4c02e1652fe39ec",
+              "bf16_tiles": "e28620394769c9a0", "fp4_e2m1": "19527a31314dcfa5"})
+    check("no lut block: Run.lut is None and fields() has no lut key", dflt.lut is None and "lut" not in dflt.fields())
+    lraw = {**rraw, "operand_fmt": "fp6_e3m2"}
+    good = {"source": "data", "group": 1, "pick": "host"}
+    lrun = parse_run({**lraw, "lut": good})
+    check("a lut block parses", lrun.lut == Lut("data", 1, "host"), lrun.describe())
+    check("run_id moves with the lut block", lrun.run_id() != parse_run(lraw).run_id()
+          and lrun.run_id() != parse_run({**lraw, "lut": {**good, "pick": "hardware"}}).run_id())
+    check("fields() round-trips through parse_run", parse_run({"name": "x", **lrun.fields()}) == parse_run({**lraw, "lut": good}))
+    refused_load("unknown lut key refused by name", lambda: parse_run({**lraw, "lut": {**good, "size": 16}}), "size")
+    refused_load("every lut key is written", lambda: parse_run({**lraw, "lut": {"source": "data"}}), "required")
+    refused_load("lut.pick is host or hardware", lambda: parse_run({**lraw, "lut": {**good, "pick": "both"}}), "pick")
+    refused_load("lut.group is a non-negative integer", lambda: parse_run({**lraw, "lut": {**good, "group": -1}}), "group")
+    refused_load("lut.source file must exist", lambda: parse_run({**lraw, "lut": {**good, "source": "no_such.json"}}), "no such")
+    refused_load("a lut block on a direct format is refused",
+                 lambda: check_recipes(base, parse_run({**rraw, "lut": good}), "perplexity"), "not a LUT format")
+    check("KERNEL_LUT_GROUP is the compiler's LUT_GRANULARITY", KERNEL_LUT_GROUP == cformats.LUT_GRANULARITY)
+    g2 = parse_run({**lraw, "lut": {**good, "group": 2}})
+    refused_load("kernel path refuses lut.group 2", lambda: check_recipes(base, g2, "kernel"), "lut.group")
+    try:
+        check_recipes(base, g2, "perplexity")
+        check("perplexity path accepts lut.group 2", True)
+    except RecipeError as exc:
+        check("perplexity path accepts lut.group 2", False, str(exc)[:90])
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        check_recipes(base, lrun, "kernel")
+        check_recipes(base, parse_run(lraw), "kernel")
+        check_recipes(base, dflt, "kernel")
+    msgs = [str(x.message) for x in w]
+    check("a LUT format with enable_lut false warns (not refused) on the kernel path, a direct one does not",
+          len(msgs) == 2 and all("enable_lut is false" in m for m in msgs), f"{len(msgs)} warnings")
     from config.recipe import removed_flag
     check("a removed flag names its run field", "operand_fmt" in (removed_flag(["--kernel", "x", "--dtype", "fp4_e2m1"]) or ""))
     check("--flag=value spelling is caught too", "rounding" in (removed_flag(["--rounding-mode=ties_away"]) or ""))

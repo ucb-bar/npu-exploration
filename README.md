@@ -219,7 +219,7 @@ of the run recipe are written `run.*` below. Every field and its meaning is in
 | accumulator ladder | yes | yes | yes | | |
 | `types.prodFloor` | flush | | | | |
 | `mx.scaleSize`, `scaleSizeOut` | block | GROUP, GROUP_OUT | | | |
-| `mx.enable_lut` | refused | | | lut | |
+| `mx.enable_lut` | | | | lut | |
 | `scratchpad` | | | | | bank_num, bank_rows |
 | `implementation` | | | clock, util | clock | |
 | `run.operand_fmt` | format | | stim | act, wei | wire format |
@@ -227,12 +227,16 @@ of the run recipe are written `run.*` below. Every field and its meaning is in
 | `run.reduce` | reducer | | | | |
 | `run.fp32_tol` | | | | | |
 | `run.allow_lossy_chain` | | | | | lowering |
+| `run.lut` (optional) | | | | | |
 
 `run.fp32_tol` is read by the grading step, not by a model: it is the pass threshold on the error
 against fp32. `array.tileRows/tileColumns` and the `accumulator` widths are in `build_id` but no
 Python code reads them. The kernel path accepts only a 16x16 mesh, 32-element blocks, a 4x4096
-scratchpad, `rne`, the 2^-23 floor and `reduce: hardware`; `config.recipe.check` refuses anything
-else before any work, and the perplexity path runs it.
+scratchpad, `rne`, the 2^-23 floor, `reduce: hardware` and LUT group 1; `config.recipe.check` refuses
+anything else before any work, and the perplexity path runs it. `run.lut` is parsed and checked but
+not read by any model yet. A LUT format on a recipe with `mx.enable_lut: false` warns rather than
+refuses, because every shipped hardware recipe says false while the four LUT formats have always been
+graded on it (open: stale flag, or a chip without the LUT unit).
 
 ## Where things are
 
