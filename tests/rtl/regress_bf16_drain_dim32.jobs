@@ -1,0 +1,9 @@
+# BF16 flat-drain regression for the Scratchpad writer-len revert (9eb04f3 guard removed), MxDim32GemminiRocketConfig only.
+# Every test reads its BF16 result back via the flat spad->DRAM drain whose per-row length the revert
+# changes. Requant and llama tests excluded. Build ELFs: ../../software/gemmini-rocc-tests/build_mx_rocket.sh bareMetalC
+#
+#   tools/simq run CONFIG=MxDim32GemminiRocketConfig BINARY=tests/rtl/regress_bf16_drain_dim32.jobs JOBS=8
+#
+# A FAIL: rerun that test on the pre-revert RTL before blaming the revert.
+matmul_tiled_fp4_64x64_nonrequant_dim32
+matmul_tiled_fp4_128x128_nonrequant_dim32

@@ -13,8 +13,8 @@
 # What each phase provides (and which code requires it):
 #   python     .venv + requirements.txt        (every documented .venv/bin/python command)
 #   mxq        <repo>/microscaling-quant        git submodule, pinned: the quantization library the
-#                                                mxquant and accuracy models run on (models/, config/scheme.py)
-#   mxquant    <repo>/MXQuant checkout          OPTIONAL (--with-mxquant): app/capture_llama_*.py load the
+#                                                mxquant model runs on (models/, config/scheme.py)
+#   mxquant    <repo>/MXQuant checkout          OPTIONAL (--with-mxquant): kernels/captures/*.py load the
 #                                                model through it; grade/mxquant_ref.py (legacy) reads
 #                                                origin/chloe-branch-all. Nothing graded needs it.
 #   toolchain  <root>/.conda-env with riscv64-unknown-elf-gcc, dtc, and a host g++
@@ -96,7 +96,7 @@ MERLIN_CHIPYARD) at a full chipyard checkout built with its build-setup.sh."
 # ---- postconditions (shared by the phases and the doctor) ----------------------------
 
 have_python()     { "$REPO/.venv/bin/python" -c 'import torch, numpy' >/dev/null 2>&1; }
-# MXQuant is OPTIONAL (--with-mxquant) since 2026-09-24: app/mxq_golden.py takes the block quantizer
+# MXQuant is OPTIONAL (--with-mxquant) since 2026-09-24: compiler/operands.py takes the block quantizer
 # from models/mxquant/block.py (mxq). The clone serves the capture scripts and
 # tests/selftest_block.py --update, which import end_to_end_linear/mx_block_quant.py from the
 # WORKING TREE (present on MXQuant main, NOT on every branch), and grade/mxquant_ref.py
@@ -277,13 +277,13 @@ doctor() {
     row 1 "$(have_mxq && echo 1)"                                         "mxq submodule"         "$REPO/microscaling-quant"
     row 1 "$(have_python && echo 1)"                                      ".venv (torch, numpy)"  "$REPO/.venv"
     row 0 "$(have_ppa && echo 1)"                                         "PPA workspace (optional)" "${MX_PPA_ROOT:-$PPA_DIR/ppa}"
-    row 0 "$(command -v nvidia-smi >/dev/null 2>&1 && echo 1)"            "GPU (optional: accuracy model)" "nvidia-smi"
+    row 0 "$(command -v nvidia-smi >/dev/null 2>&1 && echo 1)"            "GPU (optional: perplexity)" "nvidia-smi"
     row 0 "$(have_mxquant && have_mxq_branch && echo 1)"                  "MXQuant (optional: capture, legacy)" "$REPO/MXQuant  (--with-mxquant)"
     echo
     if [ "$bad" = 0 ]; then
         echo "All required checks pass. Next:"
         echo "    source scripts/env.sh${ROOT:+ $ROOT}"
-        echo "    .venv/bin/python run_kernel.py --kernel linear --config baseline"
+        echo "    .venv/bin/python run_kernel.py --kernel linear --hw baseline"
     else
         echo "FAIL above. Re-run 'bash scripts/setup.sh' (idempotent) or the named phase:"
         echo "    bash scripts/setup.sh --phase <merlin|mxq|python|toolchain|spike|gemmini|libgemmini|ppa|mxquant>"

@@ -23,7 +23,7 @@ in any location, including a real chipyard checkout.
 | phase | provides | required by |
 |---|---|---|
 | `python` | `.venv` + `requirements.txt` installed | every `.venv/bin/python` command |
-| `mxq` | `<repo>/microscaling-quant` submodule checked out at the pinned SHA | every model (`models/`), `app/mxq_golden.py` through `models/mxquant/block.py` |
+| `mxq` | `<repo>/microscaling-quant` submodule checked out at the pinned SHA | every model (`models/`), `compiler/operands.py` through `models/mxquant/block.py` |
 | `mxquant` | **optional** (`--with-mxquant`): `<repo>/MXQuant` clone (or symlink via `--mxquant <dir>`), `origin/chloe-branch-all` fetched | the capture scripts, `grade/mxquant_ref.py` (`--legacy-mxquant`), `tests/selftest_block.py --update` |
 | `toolchain` | conda env with `riscv64-unknown-elf-gcc`, `dtc` and a host g++ (binaries from the `ucb-bar` channel — no chipyard build) | the runner gate; spike shells out to `dtc` |
 | `spike` | `riscv-isa-sim` built from source into `$RISCV` (spike is not packaged anywhere — chipyard builds it from source too; override: `--spike-ref`) | the execution substrate |
@@ -54,7 +54,7 @@ Rebuild and install it from gemmini (`make clean` first — its Makefile misses 
 force a per-recipe rebuild:
 
 ```bash
-.venv/bin/python -m models.spike.build_spike --config <recipe> --force
+.venv/bin/python -m models.spike.build_spike --hw <recipe> --force
 ```
 
 The same code is also what a baremetal test prints when it was built without `-DSPIKE_SIM` and took

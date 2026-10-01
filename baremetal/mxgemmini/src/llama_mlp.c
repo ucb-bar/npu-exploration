@@ -2,7 +2,7 @@
 //
 // Three matmuls on the mesh with the host's fp32 glue between them, exactly as the layer runs in
 // the model. Operands are a real decoder layer captured from a real forward pass
-// (npu-exploration/app/capture_llama_layer.py -> gen_llama_layer.py -> include/llama_mlp.h):
+// (npu-exploration/kernels/captures/llama_layer.py -> gen_llama_layer.py -> include/llama_mlp.h):
 // hidden size D = 2048 kept FULL, F of the 5632 FFN neurons, M real tokens of wikitext2.
 //
 //   host   xn  = rmsnorm(h_mid, w_post_ln)      fp32, then MX-quantized to fp8 codes + E8M0

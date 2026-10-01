@@ -1,6 +1,6 @@
 """models/mxquant/block.py must equal MXQuant's quantize_mx_block32(round_mode="even"), bit for bit.
 
-The operand encoder (app/mxq_golden.py) used to call MXQuant; it now calls this module. The claim
+The operand encoder (compiler/operands.py) used to call MXQuant; it now calls this module. The claim
 that nothing changed is settled here, on a frozen fixture generated FROM MXQuant, so the test runs on
 a machine without the MXQuant clone. When the clone is present the live comparison runs as well.
 
@@ -133,10 +133,10 @@ def main() -> int:
         check(f"{n_all} live cases bit-identical (P and X)", n_bad == 0, f"{n_bad} differ")
 
     print("\n[3] the encoder round-trips without MXQuant -----------------------")
-    from app import mxq_golden
+    from compiler import operands
     g = torch.Generator().manual_seed(1)
     V = (torch.randn(64, 64, generator=g) * 3).numpy()
-    codes, scales, books = mxq_golden.quantize_operand(V, side="a", dtype="fp8_e4m3")
+    codes, scales, books = operands.quantize_operand(V, side="a", dtype="fp8_e4m3")
     check("quantize_operand runs on the mxq-backed quantizer", codes.shape == (64, 64) and scales.shape == (2, 64))
     check("a rejected round_mode raises", _raises(lambda: block.quantize_mx_block32(torch.ones(32, 32), "MXFP8_E4M3", round_mode="floor")))
 

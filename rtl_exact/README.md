@@ -6,7 +6,7 @@ max abs diff 0.0, on a real TinyLlama MLP. Verified 2026-09-06, and re-checkable
 
 ```bash
 cd generators/gemmini/npu-exploration
-.venv/bin/python3 rtl_exact/verify_rtl_exact.py
+.venv/bin/python3 tests/verify_rtl_exact.py
 ```
 ```
   as shipped         :  10.63% vs fp32    17.90% vs hardware
@@ -74,17 +74,17 @@ hardware *worse*. Do not quote the effect of one of them measured with the other
 | `mxgemmini_rtl.json` | **the config** — formats, mesh geometry, the per-lane accumulator schedule, the three semantic rules, provenance (RTL and spike file:line) and the verified numbers |
 | `acc_schedule.csv` | the schedule alone, in the format MXQuant's `--acc-schedule` reads |
 | `rtl_datapath.py` | the three behaviours, and `install()` to put them into MXQuant's `MXLinearSim` |
-| `fixture_llama_mlp.npz` | one real llama MLP's inputs plus the **hardware's** output (1.2 MB) |
-| `verify_rtl_exact.py` | the gate above |
-| `make_fixture.py` | regenerates the fixture from a fresh capture |
+| `../tests/verify_rtl_exact.py` | the gate above |
+| `../tests/oracle/fixture_llama_mlp.npz` | one real llama MLP's inputs plus the **hardware's** output (1.2 MB) |
+| `../tests/oracle/make_fixture.py` | regenerates the fixture from a fresh capture |
 
 ## Two things to know
 
 **The arithmetic primitives are imported, not transcribed.** `rtl_datapath` pulls
 `mx_product_quantize_trunc`, `fp_quantize_rne`, `fp_add_exact`, `q_bf16_rne` and `bf16_accum_add`
-from `fp8_matmul_model` in the gemmini tree, so there is one implementation of each and it cannot
-drift. Set `MXGEMMINI_ROOT` if that tree is not at `../../software/gemmini-rocc-tests`; the module
-raises rather than falling back to a lookalike.
+from `rtl_exact/mxmesh/fp8.py`, the hardware team's model extracted verbatim from the gemmini tree's
+`fp8_matmul_model.py` and pinned to it by `tests/selftest_extracted.py`, so there is one
+implementation of each and it cannot drift.
 
 **It is slow.** The golden's `fp_quantize_rne` (exp<8) and `fp_add_exact` are exact-dyadic *scalar
 Python loops* — fine for a layer, painful for a full perplexity sweep. Vectorizing them, with an

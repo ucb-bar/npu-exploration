@@ -5,11 +5,19 @@
      models.mxquant.run(...).y and every intermediate equal grade/mxquant_ref.simulate(rtl_exact=True)
      element for element. Skipped, and said so, when the MXQuant clone is absent.
   2. Recipe-aware. For each of the four recipes, the model equals the extracted hardware model
-     (app/mxmesh/fp8.tiled_matmul_hwlike) driven with that recipe's product and accumulator lists on the
+     (rtl_exact/mxmesh/fp8.tiled_matmul_hwlike) driven with that recipe's product and accumulator lists on the
      same wire operands. The legacy tier could not do this: it hardcoded the tapeout ladder.
   3. Degrade. An edge the requantizer cannot reproduce raises Unavailable, so the pipeline grades on the
      fp32 tier instead of inventing a reference.
   4. As-shipped self-consistency: the informational number is mxq's MXQuant mode.
+  5. Recorded bits. Every kernel x format x recipe (120 records, y and every stage) equals
+     tests/oracle/mxquant_bits.json, captured from the model BEFORE its operand path moved from
+     compiler/operands's wire round trip to mxq's block quantizer (2026-09-28). This is what proves the
+     direct formats run on mxq alone without a single bit moving.
+  6. The requant rule. For an fp8_e4m3 chain, mxq's quantizer on the bf16 accumulator IS the device
+     requantizer transcribed in compiler/operands.py: 0 differing on 10^6 values incl. ties, subnormals,
+     zero and sub-2^-23 blocks. For fp4_e2m1 it is NOT (two-step rounding), which is why that chain
+     edge stays on the device model -- measured here so the exception is a number, not a belief.
 
     .venv/bin/python tests/selftest_mxquant.py
 """
@@ -40,12 +48,9 @@ def same(a, b) -> bool:
 
 
 def edges_for(pipeline, spec, dtype):
-    """Exactly what grade/pipeline.run hands the model, built by the same lowering functions."""
-    if spec.is_chain:
-        return pipeline._fused_command_buffer(spec, dtype, allow_lossy_chain=True)[3]
-    if all(st.on_mesh or st.emittable for st in spec.stages):
-        return pipeline._graph_command_buffer(spec, dtype)[2]
-    return {st.name: {"via": "host"} for st in spec.stages if st.on_mesh}
+    """Exactly what grade/pipeline.run hands the model, built by the same lowering."""
+    from compiler.lower import lower
+    return lower(spec, dtype, allow_lossy_chain=True).edges
 
 
 def main() -> int:
@@ -55,14 +60,14 @@ def main() -> int:
         return 0
     from grade import pipeline
     pipeline._wire_paths(REPO)
-    from config.recipe import load
+    from config.recipe import load_hardware
     from kernels.registry import build
     from models import mxquant
-    from app.mxmesh import fp8 as M8
-    from app.mxq_golden import quantize_operand, wire_to_px
+    from rtl_exact.mxmesh import fp8 as M8
+    from compiler.operands import quantize_operand, wire_to_px
     from config import scheme
 
-    recipes = {n: load(REPO / "config" / "recipes" / f"{n}.json") for n in
+    recipes = {n: load_hardware(n) for n in
                ("baseline", "flat_acc4", "wide_acc", "narrow_prod")}
     base = recipes["baseline"]
 
@@ -150,6 +155,65 @@ def main() -> int:
     check("model record names mxq, the arithmetic and the build_id",
           res["model"]["source"] == "mxq" and res["model"]["arith"].startswith("mxgemmini")
           and res["model"]["build_id"] == base.build_id())
+
+    print("\n[5] recorded bits: every kernel x format x recipe == tests/oracle/mxquant_bits.json ----")
+    import hashlib, json
+    from compiler.lower import lower
+    rec = json.loads((REPO / "tests" / "oracle" / "mxquant_bits.json").read_text())
+
+    def h(a):
+        return hashlib.sha256(np.ascontiguousarray(np.asarray(a, np.float32)).tobytes()).hexdigest()[:24]
+    n_ok, n_all, bad = 0, 0, []
+    for key, want in rec["records"].items():
+        kname, dtype, rname = key.split("/")
+        sp = build(kname)
+        out = mxquant.run(sp, recipes[rname], dtype=dtype, edges=lower(sp, dtype, allow_lossy_chain=True).edges,
+                          shipped=False)
+        n_all += 1
+        if h(out["y"]) == want["y"] and all(h(out["stages"][s]) == hh for s, hh in want["stages"].items()):
+            n_ok += 1
+        else:
+            bad.append(key)
+    check(f"{n_ok}/{n_all} records identical (y and every stage)", not bad, ", ".join(bad[:6]))
+
+    print("\n[6] the requant rule: mxq quantize(bf16(C)) vs the device requantizer (compiler/operands) ----")
+    from compiler.operands import requantize_chained
+    from models.mxquant import kernel as K
+    rng = np.random.default_rng(0)
+
+    def cases():
+        M, N = 64, 64
+        yield "normal", rng.standard_normal((M, N)).astype(np.float32) * 3
+        yield "wide range", (rng.standard_normal((M, N)) * np.exp2(rng.integers(-20, 20, (M, N)))).astype(np.float32)
+        z = rng.standard_normal((M, N)).astype(np.float32); z[:, :32] = 0; yield "zero blocks", z
+        t = rng.standard_normal((M, N)).astype(np.float32); t[:, :32] *= 2.0 ** -30; yield "sub-2^-23 blocks", t
+        sn = np.ones((M, N), np.float32); sn[:, 1:] = 2.0 ** -12; yield "subnormal after scaling", sn
+        ties = np.full((M, N), 1.0625, np.float32); ties[:, 0] = 1.0; ties[:, 1] = -1.0625; yield "exact e4m3 ties", ties
+        yield "1e6 random", (rng.standard_normal((1024, 1024)) * np.exp2(rng.integers(-10, 10, (1024, 1024)))).astype(np.float32)
+
+    def diff(dtype, C):
+        P0, X0 = requantize_chained(C, dtype=dtype, books=None)
+        P1, X1 = K._requant(C, dtype, None)
+        return int((P0.numpy() != P1.numpy()).sum()), int((X0.numpy() != X1.numpy()).sum()), P0.numel()
+    for name, C in cases():
+        dp, dx, n = diff("fp8_e4m3", C)
+        check(f"fp8_e4m3 {name}: mxq == device requantizer", dp == 0 and dx == 0, f"P {dp}/{n} X {dx}")
+    # fp4: the device rounds bf16 -> E3M1 -> E2M1; mxq's via=(3, 1) is that. Its scale floor is E8M0's 2^-126,
+    # so the sub-2^-23 case is a real check here and the zero-block case is excluded (the device's scale
+    # underflows to 0 there, mxq keeps 2^-126; the codes are 0 either way).
+    from rtl_exact.mxmesh import fp4 as M4
+    for name, C in cases():
+        if name == "zero blocks":
+            continue
+        C = torch.from_numpy(C).to(torch.bfloat16).float().numpy()
+        Pd, Xd = M4.matrix_mx_requantize(torch.from_numpy(C.copy()), "fp4:e2m1")
+        P1, X1 = K._requant(C, "fp4_e2m1", None)
+        dp, dx = int((Pd.t() != P1).sum()), int((Xd.t() != X1).sum())
+        check(f"fp4_e2m1 {name}: mxq via E3M1 == device requantizer", dp == 0 and dx == 0, f"P {dp}/{P1.numel()} X {dx}")
+    one = torch.from_numpy(rng.standard_normal((64, 64)).astype(np.float32) * 3).to(torch.bfloat16).float().numpy()
+    Pd, _ = M4.matrix_mx_requantize(torch.from_numpy(one.copy()), "fp4:e2m1")
+    P1, _ = K._quantize(one, "MXFP4", axis=1)
+    print(f"  info  fp4_e2m1 with a single rounding would differ on {int((Pd != P1).sum())}/{P1.numel()}: the via step is load-bearing")
 
     print("\n" + "=" * 70)
     if FAILURES:

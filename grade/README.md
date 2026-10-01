@@ -2,8 +2,9 @@
 
 Takes a `KernelSpec` (from [`kernels/`](../kernels/README.md)), runs the models selected with
 `--models` on the recipe's machine ([`models/`](../models/README.md)), and compares spike's result
-against the mxquant model. Everything hardware-facing is a call into [`app/`](../app/README.md) and
+against the mxquant model. Everything hardware-facing is a call into
 [`compiler/`](../compiler/README.md); nothing here reimplements quantization, lowering, or codegen.
+The lowering itself is `compiler/lower.py`; the pipeline calls it and then runs what it produced.
 
 | file | role |
 |---|---|
@@ -32,8 +33,8 @@ those three could only fail.
 
 ## What is recorded
 
-Every run lands in `results/<timestamp>_<kernel>_<shape>/`: `config.json` (shapes, seed, recipe +
-ladder, the models that ran, toolchain paths, git heads incl. `mxq_head`, the quantizer that made the
+Every run lands in `results/<timestamp>_<kernel>_<shape>/`: `config.json` (shapes, seed, hardware recipe +
+ladder, the run recipe and its `run_id`, the emitter geometry, the models that ran, toolchain paths, git heads incl. `mxq_head`, the quantizer that made the
 operands, and a hash of the functional model that actually ran), `metrics.json` (with
 `metrics["mxquant"]`: arithmetic, schedule, window, mxq commit), `log.jsonl`, plus
 `hardware_output.npy` (when spike ran), `fp32_reference.npy` and `mxquant_output.npy` (when the

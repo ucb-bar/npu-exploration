@@ -1,18 +1,28 @@
-# compiler — the out-of-tree merlin target
+# compiler — lowering and backend
 
-`targets/mx_gemmini_rocket/` is an out-of-tree merlin target package, resolved via
-`MERLIN_TARGET_PATH`. It consumes a **command buffer** and emits + builds + runs a bare-metal ELF.
+`lower.py` turns a KernelSpec and an operand format into ONE **command buffer** (a chain of
+matmuls: leaf tensors plus four commands per matmul and the wire operands; anything else: the graph
+on a side channel). It builds the buffer directly, with no merlin: `tests/selftest_lower.py` holds
+it to the dicts merlin's parser used to produce (`tests/oracle/command_buffers.json`). Both
+`run_kernel.py` and `compile_kernel.py` call it. `targets/mx_gemmini_rocket/` is the backend: it
+consumes a command buffer and emits + builds + runs a bare-metal ELF.
 
 | file | role |
 |---|---|
-| `contracts/target_contract.yaml` | the capability manifest merlin reads |
+| `formats.py` | the format table: bits, ranges, wire layout per operand format |
+| `wire.py` | float ↔ wire bytes, E8M0 scale rows, requant encode |
+| `codebook.py` | the 4-bit-index + 16-entry-table encoding of the four LUT formats |
+| `operands.py` | the operand encoder: `quantize_operand`, `wire_to_px`, `requantize_chained`, `encode` |
+| `graph.py` | the step list the graph emitter consumes |
+| `lower.py` | KernelSpec + format → command buffer (fused chain, graph, or per-stage records) and edges |
 | `backend/mxgemm_emit.py` | command buffer → C driver |
 | `backend/runner.py` | toolchain, compile, run on spike, parse OUT/METRIC/DONE |
-| `backend/__init__.py` | self-registers the backend with merlin |
+| `backend/mxgraph_emit.py` | graph command buffer → C driver (one ELF with host ops) |
+| `backend/__init__.py` | the package; registers with merlin only if merlin is importable (compile_kernel.py never loads it) |
 
-Nothing here knows about a model, a tensor, or a file — that is
-[`app/`](../app/README.md). It receives a command buffer and knows nothing about
-tensors, models, or files.
+The backend receives a command buffer and knows nothing about tensors, models, or files;
+the front half of this package (`formats.py`, `wire.py`, `codebook.py`, `operands.py`,
+`graph.py`, `lower.py`) is where tensors become the wire.
 
 See [`targets/mx_gemmini_rocket/README.md`](targets/mx_gemmini_rocket/README.md).
 

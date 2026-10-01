@@ -122,7 +122,7 @@ def _matmul(env, A: np.ndarray, W: np.ndarray, dtype: str = "fp8_e4m3",
     import torch
     from torch import nn
 
-    from app.mxq_golden import quantize_operand, wire_to_px
+    from compiler.operands import quantize_operand, wire_to_px
 
     EC, cfg = env["EC"], env["cfg"]
     f = _fmt().get(dtype, where="mxquant reference")
@@ -148,8 +148,8 @@ def _matmul(env, A: np.ndarray, W: np.ndarray, dtype: str = "fp8_e4m3",
 
 
 def _fmt():
-    from app import mxformats
-    return mxformats
+    from compiler import formats
+    return formats
 
 
 #: How a value reached the mesh as an operand. THE LOWERING DECIDES THIS, not the graph shape —
@@ -222,7 +222,7 @@ def simulate(spec, *, rtl_exact: bool = True, dtype: str = "fp8_e4m3",
                 edge = edge_map.get(lhs_name, {})
                 a_px = None
                 if edge.get("via") == VIA_REQUANT:
-                    from app.mxq_golden import NotModelled, requantize_chained
+                    from compiler.operands import NotModelled, requantize_chained
                     try:
                         a_px = requantize_chained(vals[lhs_name], dtype=dtype,
                                                   books=edge.get("books"))

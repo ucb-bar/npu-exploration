@@ -7,8 +7,8 @@ why the siblings use relative imports (``from .mxgemm_emit import ...``). Import
 the ``register(...)`` below, so ``get_backend("mx_gemmini_rocket")`` resolves here with no name ->
 module map in the core.
 
-Registration is BEST-EFFORT: this package is also used standalone (an ``app/`` script driving spike
-directly, with no merlin on the path). A missing merlin makes the backend unregistered, not broken.
+Registration is BEST-EFFORT: this package is also used standalone (compile_kernel.py and the pipeline
+drive spike directly, with no merlin on the path). A missing merlin makes the backend unregistered, not broken.
 """
 from __future__ import annotations
 

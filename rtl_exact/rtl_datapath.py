@@ -30,10 +30,9 @@ Usage
     sim = eval_complete.MXLinearSim(layer, "MXFP8_E4M3", False,
                                     *cfg.product, cfg.acc_schedule, 0, 0, window=cfg.window)
 
-The arithmetic primitives are IMPORTED from the hardware golden model (`fp8_matmul_model` in the
-gemmini tree) rather than transcribed, so there is exactly one implementation of each and it cannot
-drift. Point `MXGEMMINI_ROOT` at that tree if it is not at the default relative path; this module
-raises rather than falling back to a lookalike.
+The arithmetic primitives are IMPORTED from the hardware team's model, extracted verbatim into
+`rtl_exact/mxmesh/fp8.py` (pinned to the gemmini tree's `fp8_matmul_model.py` by
+`tests/selftest_extracted.py`), so there is one implementation of each and it cannot drift.
 
 Known cost: the golden's `fp_quantize_rne` (exp<8) and `fp_add_exact` are exact-dyadic SCALAR Python
 loops, so an RTL-exact run is far slower than the shipped path -- fine for a layer, painful for a
@@ -89,6 +88,8 @@ def load_config(path: Path | None = None) -> RtlConfig:
 #: Peak device memory the batched window loop may use for its [W, M, N] working set. Lower it if a
 #: run OOMs on a small GPU; it only changes the batch size, never the result.
 RTL_BATCH_BYTES = 2 << 30
+#: The MX block along K. MXQuant's eval_complete says the same (install() checks) and so does mxq.block.BLOCK.
+BLOCK = 32
 
 
 def _simulate_atw_rtl_serial(self, A, B, P_A, X_A, P_B, X_B, C, window, FM):
@@ -115,12 +116,12 @@ def _simulate_atw_rtl_serial(self, A, B, P_A, X_A, P_B, X_B, C, window, FM):
 def _golden(cfg: RtlConfig | None = None):
     """The datapath's arithmetic primitives.
 
-    These now live IN THIS REPO (``app/mxarith.py``), mechanically EXTRACTED from
+    These now live IN THIS REPO (``rtl_exact/mxmesh/fp8.py``), mechanically EXTRACTED from
     ``gemmini-rocc-tests/fp8_matmul_model.py`` rather than transcribed. That removes the last
     runtime dependency the graded path had on the reference tree.
 
     The "one implementation, cannot drift" property that the previous cross-tree import provided is
-    preserved as a TEST instead: ``tests/selftest_mxarith.py`` re-runs the extraction, diffs it
+    preserved as a TEST instead: ``tests/selftest_extracted.py`` re-runs the extraction, diffs it
     against the upstream source, and checks the two agree elementwise. A silent divergence fails
     there rather than in a kernel's numbers.
     """
@@ -128,8 +129,8 @@ def _golden(cfg: RtlConfig | None = None):
     repo = HERE.parent
     if str(repo) not in sys.path:
         sys.path.insert(0, str(repo))
-    from app import mxarith
-    return mxarith
+    from rtl_exact.mxmesh import fp8
+    return fp8
 
 
 # --- the three hardware behaviours ---------------------------------------------------------------
@@ -157,7 +158,7 @@ def cross_tile_accumulate(C: torch.Tensor, tile: torch.Tensor, FM) -> torch.Tens
 #: Fuse the elementwise chains with torch.compile. OFF by default, and **UNVERIFIED**: it is
 #: wired up but has NOT been gated by verify_rtl_exact.py, because compiling these functions
 #: on CPU did not finish in 40 minutes on the box it was written on. Before trusting any
-#: number produced with it ON, run `MXG_RTL_COMPILE=1 python3 rtl_exact/verify_rtl_exact.py`
+#: number produced with it ON, run `MXG_RTL_COMPILE=1 python3 tests/verify_rtl_exact.py`
 #: on the target machine and require the usual 65536/65536.
 #:
 #: WHY IT MATTERS. MEASURED on an sm_120 GPU at seqlen 2048, the datapath runs at a flat
@@ -202,7 +203,8 @@ def install(eval_complete_module, cfg: RtlConfig | None = None) -> None:
     cfg = cfg or load_config()
     FM = _golden(cfg)
     EC = eval_complete_module
-    BLOCK = EC.BLOCK
+    if EC.BLOCK != BLOCK:
+        raise RuntimeError(f"eval_complete.BLOCK is {EC.BLOCK}, this datapath assumes {BLOCK}")
     _prod_op, _acc_op, _cross_op = (_compiled_ops(FM) if RTL_COMPILE else (None, None, None))
 
     @torch.no_grad()

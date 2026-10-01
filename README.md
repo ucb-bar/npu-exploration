@@ -8,14 +8,14 @@ it bit for bit against the mxquant model of the same machine. **One ELF per kern
 Prerequisites: Linux x86_64, `conda` (miniconda is fine), git SSH access to
 `ucb-bar/npu-exploration`, `ucb-bar/merlin`, `ucb-bar/gemmini` and `chloe-wong/microscaling-quant`
 (optionally `Rakanic/MxGemmini-workspace` for silicon-cost numbers, `chooper1/MXQuant` for the
-capture scripts and the legacy reference, and a CUDA GPU for the accuracy model), and ~10 GB of disk.
+capture scripts and the legacy reference, and a CUDA GPU for the perplexity path), and ~10 GB of disk.
 
 ```bash
 git clone --recurse-submodules git@github.com:ucb-bar/npu-exploration.git
 cd npu-exploration
 bash scripts/setup.sh                       # provisions EVERYTHING (idempotent; see below)
 source scripts/env.sh                       # sets MERLIN_CHIPYARD, RISCV, PATH
-.venv/bin/python run_kernel.py --kernel linear --config baseline
+.venv/bin/python run_kernel.py --kernel linear --hw baseline
 ```
 
 `setup.sh` provisions, inside the clone: the python env (`.venv` + `requirements.txt`), the
@@ -50,13 +50,19 @@ If something fails to start, it is almost always the environment — see
 ```bash
 .venv/bin/python run_kernel.py --list
 .venv/bin/python run_kernel.py --kernel llama_mlp
-.venv/bin/python run_kernel.py --kernel linear --dtype fp4_e2m1 --config wide_acc
-.venv/bin/python run_kernel.py --kernel linear --config wide_acc --models mxquant       # the model alone, no spike
-.venv/bin/python run_kernel.py --kernel linear --config wide_acc --models all --gpus 0,1,2,3   # + perplexity
+.venv/bin/python run_kernel.py --kernel linear --hw wide_acc --run fp4_e2m1
+.venv/bin/python run_kernel.py --kernel linear --hw wide_acc --models mxquant           # the model alone, no spike
+.venv/bin/python -m models.mxquant --workload tinyllama --hw wide_acc --gpus 0,1,2,3    # perplexity
+.venv/bin/python compile_kernel.py --kernel mlp3 --target mx_rocket                       # compile only: ELF + expected bits
+.venv/bin/python compile_kernel.py --module tests/fixtures/modules.py:Attn                # a plain PyTorch module
 ```
 
-`run_kernel.py` is the single entry point: PyTorch → quantize → merlin → ELF → run → graded, with
-every model of the recipe's machine ([`models/`](models/README.md)) run from the same command.
+`run_kernel.py` is the exploration entry point: PyTorch → quantize → lower → ELF → run → graded,
+with every model of the recipe's machine ([`models/`](models/README.md)) run from the same
+command. `compile_kernel.py` is the compile entry point: the same lowering and the same C, for the
+spike or the RTL build, plus the bits the ELF must print (`expected.npy`) and a manifest, with no
+spike run and no grade. Both take a registry kernel; `compile_kernel.py --module FILE.py:Name`
+also takes a plain PyTorch module through the tracer in `kernels/trace.py`.
 
 ```
 [recipe  ] baseline  dim=16  operand=fp8->bf16  prod=e4m3  acc[e4..8 m4..7]  build_id=854265d5…
@@ -68,20 +74,6 @@ The final `VERDICT` line states whether the hardware matched the mxquant model b
 by one line per model (`PPA`, `PERF`, `PPL`). Without spike there is no verdict, only the model's
 numbers (`MXQUANT … NO VERDICT`). Exit `0` on PASS or NO VERDICT, `1` on FAIL, `2` on error. Every run
 is recorded under `results/<timestamp>_<kernel>_<shape>/`.
-
-| flag | default | meaning |
-|---|---|---|
-| `--kernel` | `linear` | which kernel (`--list`) |
-| `--config` | `baseline` | which hardware recipe (`--list`) |
-| `--models` | `default` | which models run: `default` = reference, mxquant, spike, ppa, perf; `all` adds accuracy; or a comma list |
-| `--dtype` | `fp8_e4m3` | MX operand format |
-| `--m --k --h --n` | 64 | batch rows, in_features, hidden, out_features |
-| `--tol` | 0.15 | pass threshold on relative Frobenius error vs fp32 |
-| `--artifacts` | off | also write an RTL-replay bundle (MLIR + C + `operands.npz`) |
-| `--build-only` | off | stop at the ELF |
-| `--per-stage-elf` | off | one ELF per matmul, intermediates carried by the host; the default fuses a chain or emits a graph as one ELF |
-| `--legacy-mxquant` | off | grade with the previous reference (`grade/mxquant_ref.py`, MXQuant bundle extracted from the clone on first use); for the equivalence test, removed in the next PR |
-| `--gpus --nsamples --model-id` | | accuracy model: GPUs to split the samples over, sample count, HF model |
 
 ### Running RTL simulations: `simq`
 
@@ -121,6 +113,18 @@ running*. A simulator older than its Scala is re-elaborated by default, so you c
 measure stale RTL — the mistake that cost two days in
 [`planning/rtl_mx_faults_handoff.md`](planning/rtl_mx_faults_handoff.md).
 
+| flag | default | meaning |
+|---|---|---|
+| `--kernel` | `linear` | which kernel (`--list`) |
+| `--hw` | `baseline` | which hardware recipe (`--list`); `--config` is the same flag |
+| `--run` | `default` | which run recipe: operand format, rounding, scale floor, pass threshold (`--list`) |
+| `--models` | `default` | which models run: reference, mxquant, spike, ppa, perf, or a comma list of them |
+| `--m --k --h --n` | 64 | batch rows, in_features, hidden, out_features |
+| `--artifacts` | off | also write an RTL-replay bundle (C + `operands.npz`) |
+| `--build-only` | off | stop at the ELF |
+| `--per-stage-elf` | off | one ELF per matmul, intermediates carried by the host; the default fuses a chain or emits a graph as one ELF |
+| `--legacy-mxquant` | off | grade with the previous reference (`grade/mxquant_ref.py`, MXQuant bundle extracted from the clone on first use); for the equivalence test, removed in the next PR |
+
 ### Tests
 
 ```bash
@@ -130,11 +134,11 @@ measure stale RTL — the mistake that cost two days in
 ## How it fits together
 
 ```
-                       run_kernel.py   (one command, every model of one machine)
-                              │
-       ┌──────────────────────┼──────────────────────────┐
-       ▼                      ▼                          ▼
- kernels/registry       config/recipe.py              --models
+    run_kernel.py  (every model of one machine)      compile_kernel.py  (ELF + expected bits, no run)
+                              │                                   │
+       ┌──────────────────────┼──────────────────────────┐        │
+       ▼                      ▼                          ▼        ▼
+ kernels/registry       config/recipe.py              --models   kernels/trace.py  (--module: a PyTorch module)
  KernelSpec (x, stages) Recipe = one machine       which models run
        │                      │
        │            ┌─────────┴──────────┐
@@ -144,81 +148,110 @@ measure stale RTL — the mistake that cost two days in
        ▼            ▼                    ▼
  ┌───────────── grade/pipeline.run ────────────────────────────────────────┐
  │ reference  fp32                                                         │
- │ spike      LOWER: app/mxiface, mxgraph, mxhost → command buffer          │
+ │ spike      LOWER: compiler/lower.py (compiler/graph, host_ops) → command buffer│
  │            (fused chain | graph | per-stage)   → compiler/targets backend│
  │            mxgemm_emit / mxgraph_emit → main.c → ELF → spike             │
  │ mxquant    models/mxquant on mxq, fed the same wire operands             │
  │ ppa, perf  models/ppa, models/perf                                       │
- │ accuracy   models/accuracy: TinyLlama perplexity on the recipe's Scheme  │
  └──────────────────────────┬──────────────────────────────────────────────┘
                             ▼
               grade/metrics + report → results/<run>/  → VERDICT · PPA · PERF · PPL
 ```
 
 The recipe is the only source of the machine: `config/scheme.py` turns it into mxq's quantizer and
-arithmetic for the mxquant and accuracy models, and `build_spike.py` turns the same JSON into the
+arithmetic for the mxquant model (bits per kernel, perplexity per workload), and `build_spike.py` turns the same JSON into the
 functional model spike loads. The kernel is data (`kernels/registry.py`); the pipeline lowers it,
 runs it, and grades the bits that came back against the mxquant model of the same recipe.
 
 Inside `pipeline.run` the spike run and the three models that do not need its output run **at the
 same time**: the mxquant model needs only the lowering's edges, ppa only the recipe, perf only the
 stage shapes, so they start the moment the lowering has decided the edges and the grade joins them
-after spike returns. The accuracy model runs after the grade and splits its samples over the GPUs
-named in `--gpus`, one worker process per GPU. To run many kernel × recipe combinations at once,
+after spike returns. Perplexity is its own command (`python -m models.mxquant --workload …`), one
+worker process per GPU named in `--gpus`. To run many kernel × recipe combinations at once,
 launch several `run_kernel.py` processes; each run writes its own `results/<timestamp>_…/` directory.
 
 ## Entry points
 
 | what you want | command |
 |---|---|
-| grade a kernel on a machine, every model at once | `run_kernel.py --kernel attention --config wide_acc` |
-| the same, with TinyLlama perplexity for that machine | `run_kernel.py --kernel linear --config wide_acc --models all --gpus 0,1,2,3` |
-| just the bits a machine must produce, no spike, seconds | `run_kernel.py --kernel mlp3 --config narrow_prod --models mxquant` |
-| compile a kernel to an ELF for spike or the RTL build | `compile_kernel.py --kernel mlp3 --target mx_rocket` (branch `compiler`) |
-| compile a plain PyTorch module, no registry entry | `compile_kernel.py --module my.py:Block --input x.npy` (branch `compiler`) |
-| perplexity of one machine on its own | `python -m models.accuracy --config baseline --gpus 0,1,2,3` |
-| silicon cost of one machine | `python -m models.ppa.ppa --config baseline` |
-| predicted timeline of one matmul on it | `python -m models.perf.perf --config baseline --m 64 --k 64 --n 64` |
-| build or list the per-recipe functional models | `python -m models.spike.build_spike --config R --force` |
-| the claims, one test each | `tests/selftest_*.py` and `tests/test_recipe_drift.py` |
+| grade a kernel on a machine, every model at once | `run_kernel.py --kernel attention --hw wide_acc` |
+| just the bits a machine must produce, no spike, seconds | `run_kernel.py --kernel mlp3 --hw narrow_prod --models mxquant` |
+| compile a kernel to an ELF for spike or the RTL build | `compile_kernel.py --kernel mlp3 --target mx_rocket` |
+| compile a plain PyTorch module, no registry entry | `compile_kernel.py --module my.py:Block --input x.npy` |
+| perplexity of a workload on one machine, same arithmetic | `python -m models.mxquant --workload tinyllama --hw baseline --run default --gpus 0,1,2,3` |
+| silicon cost of one machine | `python -m models.ppa.ppa --hw baseline` |
+| predicted timeline of one matmul on it | `python -m models.perf.perf --hw baseline --m 64 --k 64 --n 64` |
+| build or list the per-recipe functional models | `python -m models.spike.build_spike --hw R --force` |
+| the claims, one test each | `tests/selftest_*.py` (17 of them) and `tests/test_recipe_drift.py` |
 | environment | `bash scripts/setup.sh --check`, `source scripts/env.sh` |
 
 Kernels by name: `linear`, `mlp2` … `mlp8`, `attention`, and `llama_attention` / `llama_mlp` once a
-capture exists. Machines: `baseline`, `flat_acc4`, `wide_acc`, `narrow_prod`, or any recipe JSON.
-Formats: every entry of `app/mxformats.py` on chains; `fp8_e4m3` only on graph kernels.
-
-Compile mode is on branch `compiler`: `compile_kernel.py` takes a registry kernel or a plain PyTorch
-module (`kernels/trace.py`) and writes the ELF for the spike or RTL build, its C, the operands, the
-bits the ELF must print (`expected.npy`) and a manifest, with no spike run and no grade. The
-lowering it shares with `run_kernel.py` is `compiler/lower.py`, built without merlin. Running the
-`mx_rocket` ELF on VCS or FPGA is the hardware team's step.
+capture exists. Machines: `baseline`, `flat_acc4`, `wide_acc`, `narrow_prod`, or any hardware recipe
+JSON. Run recipes: `default`, `exact`, `bf16_tiles`, `fp4_e2m1`, or any run recipe JSON. Formats
+(the run recipe's `operand_fmt`): every entry of `compiler/formats.py` on chains; `fp8_e4m3` only on
+graph kernels. The old `--dtype`, `--tol` and `--allow-lossy-chain` flags are refused with the run
+field that replaced each.
+`compile_kernel.py` builds and writes `expected.npy` but runs nothing; running the `mx_rocket` ELF
+on VCS or FPGA is the hardware team's step.
 
 Less common:
 
 | command | what it does |
 |---|---|
-| `python -m models.accuracy --config R --dry-run` | which layers the accuracy model would patch |
-| `app/capture_llama_layer.py`, `app/capture_llama_tiles.py` | capture real TinyLlama tensors for the llama kernels (needs the MXQuant clone) |
+| `python -m models.mxquant --workload tinyllama --hw R --dry-run` | which layers get the recipe's Scheme |
+| `kernels/captures/llama_layer.py`, `tests/fixtures/llama_tiles.py` | capture real TinyLlama tensors for the llama kernels (needs the MXQuant clone) |
 | `baremetal/mxgemmini/gen/gen_*.py` | generators for the hand-written TinyLlama kernels |
-| `rtl_exact/verify_rtl_exact.py`, `rtl_exact/make_fixture.py` | the frozen fixture and its verifier |
+| `tests/verify_rtl_exact.py`, `tests/oracle/make_fixture.py` | the frozen llama-MLP fixture and its verifier (MXQuant under `rtl_exact/` equals the hardware) |
 | `tools/extract_model.py` | one-off extraction from the gemmini tree |
 
 Run everything with `.venv/bin/python` from the repo root after `source scripts/env.sh`.
 
+## Which model reads which recipe field
+
+`--hw` picks a hardware recipe (`config/hardware/`) and `--run` a run recipe (`config/run/`); fields
+of the run recipe are written `run.*` below. Every field and its meaning is in
+[`config/README.md`](config/README.md).
+
+| field | mxquant | spike | ppa | perf | emitters |
+|---|---|---|---|---|---|
+| mesh size | window | DIM | cols | rows, cols | tile plan |
+| product precision | yes | yes | yes | | |
+| accumulator ladder | yes | yes | yes | | |
+| `types.prodFloor` | flush | | | | |
+| `mx.scaleSize`, `scaleSizeOut` | block | GROUP, GROUP_OUT | | | |
+| `mx.enable_lut` | | | | lut | |
+| `scratchpad` | | | | | bank_num, bank_rows |
+| `implementation` | | | clock, util | clock | |
+| `run.operand_fmt` | format | | stim | act, wei | wire format |
+| `run.rounding`, `scale_floor` | quantizer | | | | |
+| `run.reduce` | reducer | | | | |
+| `run.fp32_tol` | | | | | |
+| `run.allow_lossy_chain` | | | | | lowering |
+| `run.lut` (optional) | | | | | |
+
+`run.fp32_tol` is read by the grading step, not by a model: it is the pass threshold on the error
+against fp32. `array.tileRows/tileColumns` and the `accumulator` widths are in `build_id` but no
+Python code reads them. The kernel path accepts only a 16x16 mesh, 32-element blocks, a 4x4096
+scratchpad, `rne`, the 2^-23 floor, `reduce: hardware` and LUT group 1; `config.recipe.check` refuses
+anything else before any work, and the perplexity path runs it. `run.lut` is parsed and checked but
+not read by any model yet. A LUT format on a recipe with `mx.enable_lut: false` warns rather than
+refuses, because every shipped hardware recipe says false while the four LUT formats have always been
+graded on it (open: stale flag, or a chip without the LUT unit).
+
 ## Where things are
 
 ```
-run_kernel.py                 the entry point
-kernels/     registry.py spec.py                     the kernel IR; --list shows what is registered
-config/      recipe.py recipes/*.json scheme.py     one JSON = one machine; recipe → mxq
-models/      reference/ mxquant/ spike/ ppa/ perf/ accuracy/   one folder per model of the machine
+run_kernel.py                 the exploration entry point (graded)
+compile_kernel.py             the compile entry point (ELF + expected bits)
+kernels/     registry.py spec.py trace.py host_ops.py captures/    the kernel IR; --list shows what is registered; trace.py = PyTorch module -> KernelSpec; host_ops = the host op vocabulary; captures/ = real TinyLlama tensors
+config/      recipe.py hardware/*.json run/*.json scheme.py     the machine, how it is driven; both → mxq
+models/      reference/ mxquant/ (bits + perplexity) spike/ ppa/ perf/   one folder per model of the machine
 grade/       pipeline.py metrics.py report.py telemetry.py     run, compare, record
-app/         mxiface mxgraph mxhost (lowering front half); mxformats mxwire mxlut (the wire);
-             mxq_golden.py (operand quantizer, renamed in the next PR); mxmesh/; capture_*
-compiler/targets/mx_gemmini_rocket/   contracts/ backend/{mxgemm_emit,mxgraph_emit,runner} runtime/
+compiler/    formats.py wire.py codebook.py operands.py graph.py (tensors -> the wire); lower.py (KernelSpec -> command buffer); targets/mx_gemmini_rocket/ backend/{mxgemm_emit,mxgraph_emit,runner} runtime/
 baremetal/   hand-written TinyLlama kernels and their generators
-rtl_exact/   the frozen fixture and verifier
-tests/       the self-tests        tools/ extraction        scripts/ setup.sh env.sh
+rtl_exact/   the MXQuant config that is the hardware (rtl_datapath.py, mxgemmini_rtl.json); mxmesh/ = the hardware team's extracted mesh model
+tests/       every test: selftest_*.py, verify_rtl_exact.py, oracle/ fixtures, fixtures/ (modules, llama tiles), rtl/ simq regression lists
+tools/       simq (RTL job queue), extraction        scripts/ setup.sh env.sh
 merlin/  microscaling-quant/       submodules             MXQuant/   optional clone
 out/  results/  .venv/  toolchain/ generated, gitignored
 ```
@@ -227,12 +260,11 @@ Each directory has its own README covering what it holds and what to do there.
 
 | Dir | Contents |
 |---|---|
-| [`app/`](app/README.md) | MX quantization, host ops, the format table, codebooks, interface MLIR |
 | [`kernels/`](kernels/README.md) | the kernel registry — a kernel is data, not code. **Add kernels here.** |
 | [`baremetal/`](baremetal/README.md) | hand-written application kernels per target (TinyLlama on MxGemmini) |
-| [`config/`](config/README.md) | hardware recipes: one JSON = one machine (`--config`); `scheme.py` maps a recipe onto mxq |
-| [`models/`](models/README.md) | one folder per model of that machine: reference, mxquant, spike, ppa, perf, accuracy |
-| [`compiler/`](compiler/README.md) | the out-of-tree merlin target: contract + backend |
+| [`config/`](config/README.md) | the two recipes: `hardware/` = one machine (`--hw`), `run/` = how software drives it (`--run`); `scheme.py` maps the pair onto mxq |
+| [`models/`](models/README.md) | one folder per model of that machine: reference, mxquant (bits and perplexity), spike, ppa, perf |
+| [`compiler/`](compiler/README.md) | the lowering (`lower.py`) and the backend that emits, builds and runs the ELF |
 | [`grade/`](grade/README.md) | run, compare, record — and what the verdict means |
 | [`rtl_exact/`](rtl_exact/README.md) | the reference configuration that matches the hardware bit for bit |
 | [`sim/`](sim/README.md) | RTL simulation and FPGA emulation substrates |
@@ -251,5 +283,6 @@ datapath, nearly the same programming model — but nothing here may include, li
 into it. Reimplement; take ideas, not code. Every *fact* the compiler needs is grounded in
 `generators/gemmini/` instead: the headers, the spike model, the RTL Scala.
 
-**One config artifact, two consumers.** `config/recipes/*.json` drives *both* compilation and
-hardware generation — see [`config/README.md`](config/README.md).
+**The machine is one file.** `config/hardware/*.json` is the only description of the machine that
+every model reads: mxquant, spike, ppa and perf. How software drives it is a separate file,
+`config/run/*.json`. See [`config/README.md`](config/README.md).

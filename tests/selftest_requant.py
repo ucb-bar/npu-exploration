@@ -13,7 +13,7 @@ intermediate results the Python cannot otherwise see:
 
 A disagreement therefore names the STEP, not just the kernel. That is the whole value: the same
 three-step comparison is what a new format's encoder will be checked with, and
-``app.mxwire.encode_requant`` refuses a format it has no entry for rather than rounding it by a
+``compiler.wire.encode_requant`` refuses a format it has no entry for rather than rounding it by a
 generic rule, so a format cannot silently arrive here unmodelled.
 
 The oracle is compiled on demand with the host ``g++``; if there is none, the test SKIPS rather
@@ -34,8 +34,9 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from app import mxformats, mxlut, mxwire            # noqa: E402
-from app.mxq_golden import requantize_chained       # noqa: E402
+from compiler import formats, wire                  # noqa: E402
+from compiler import codebook                       # noqa: E402
+from compiler.operands import requantize_chained    # noqa: E402
 
 # The chipyard tree ($MERLIN_CHIPYARD) is the canonical source of the header; the old
 # sibling software/ layout stays as a fallback for checkouts that used it.
@@ -80,7 +81,7 @@ def oracle(binary: Path, C: np.ndarray, book_codes: np.ndarray, dtype: str, g: i
     buf += np.ascontiguousarray(C, np.float32).tobytes()
     buf += np.ascontiguousarray(book_codes, np.uint8).tobytes()
     out = subprocess.run([str(binary)], input=buf, capture_output=True, check=True).stdout
-    nb = N // mxwire.BLOCK
+    nb = N // wire.BLOCK
     return (np.frombuffer(out[:M * nb], np.uint8).reshape(M, nb),
             np.frombuffer(out[M * nb:M * nb + M * N], np.uint8).reshape(M, N),
             np.frombuffer(out[M * nb + M * N:], np.uint8).reshape(M, N))
@@ -88,36 +89,36 @@ def oracle(binary: Path, C: np.ndarray, book_codes: np.ndarray, dtype: str, g: i
 
 def python_steps(C: np.ndarray, book_vals: np.ndarray, dtype: str, g: int):
     """The same three steps, from the modules the grader actually uses."""
-    f = mxformats.get(dtype, where="selftest_requant")
-    C = mxwire.bf16_bits_to_float(mxwire.float_to_bf16_bits(C))
+    f = formats.get(dtype, where="selftest_requant")
+    C = wire.bf16_bits_to_float(wire.float_to_bf16_bits(C))
     M, N = C.shape
-    blocks = C.reshape(M, N // mxwire.BLOCK, mxwire.BLOCK)
+    blocks = C.reshape(M, N // wire.BLOCK, wire.BLOCK)
     max_abs = np.abs(blocks).max(axis=2)
     if dtype in LUT_FMTS:
         with np.errstate(divide="ignore"):
             max_exp = np.floor(np.log2(max_abs.astype(np.float32))).astype(np.int64)
-        sc = np.clip(max_exp + mxwire.E8M0_BIAS, 0, 254).astype(np.uint8)
+        sc = np.clip(max_exp + wire.E8M0_BIAS, 0, 254).astype(np.uint8)
         sc[max_abs == 0.0] = 0
-        scale = np.exp2((sc.astype(np.int64) - mxwire.E8M0_BIAS).astype(np.float64)).astype(np.float32)
-        elem = mxwire.encode_requant((blocks / scale[:, :, None]).reshape(M, N), dtype=dtype)
-        return sc, elem, mxlut.finder_indices(elem, book_vals, fmt=f, axis="row", g=g)
+        scale = np.exp2((sc.astype(np.int64) - wire.E8M0_BIAS).astype(np.float64)).astype(np.float32)
+        elem = wire.encode_requant((blocks / scale[:, :, None]).reshape(M, N), dtype=dtype)
+        return sc, elem, codebook.finder_indices(elem, book_vals, fmt=f, axis="row", g=g)
 
     # The direct 8-bit path: epsilon-clamped scale, no bf16 pre-round, no finder.
     amax = np.maximum(max_abs, np.finfo(np.float32).eps)
-    sc = np.clip(np.floor(np.log2(amax)).astype(np.int64) + mxwire.E8M0_BIAS, 0, 254).astype(np.uint8)
-    scale = np.exp2((sc.astype(np.int64) - mxwire.E8M0_BIAS).astype(np.float64)).astype(np.float32)
+    sc = np.clip(np.floor(np.log2(amax)).astype(np.int64) + wire.E8M0_BIAS, 0, 254).astype(np.uint8)
+    scale = np.exp2((sc.astype(np.int64) - wire.E8M0_BIAS).astype(np.float64)).astype(np.float32)
     scaled = (blocks / scale[:, :, None]).reshape(M, N)
-    elem = np.array([mxwire.fp8_e4m3_encode_f32(v) for v in scaled.ravel().tolist()],
+    elem = np.array([wire.fp8_e4m3_encode_f32(v) for v in scaled.ravel().tolist()],
                     dtype=np.uint8).reshape(M, N)
     return sc, elem, elem
 
 
 def books_for(f, rng, nbooks: int):
     """A codebook drawn from the values the finder can actually distinguish."""
-    cand = mxlut.codebook_values(f)
-    vals = np.stack([np.sort(rng.choice(cand, mxlut.LUT_SIZE, replace=False))
+    cand = codebook.codebook_values(f)
+    vals = np.stack([np.sort(rng.choice(cand, codebook.LUT_SIZE, replace=False))
                      for _ in range(nbooks)])
-    enc = mxlut._value_to_code(f)
+    enc = codebook._value_to_code(f)
     codes = np.array([[enc(v) for v in row] for row in vals.tolist()], np.uint8)
     return vals, codes
 
@@ -130,19 +131,19 @@ def main() -> int:
         return 0
 
     rng = np.random.default_rng(0)
-    g = mxformats.LUT_GRANULARITY
+    g = formats.LUT_GRANULARITY
     failures = 0
     # A spread of magnitudes on purpose: the divergences this test was built to catch live at the
     # edges -- values that round to zero (signed zero), and values that sit exactly on a tie.
     for scale in (0.25, 4.0, 64.0):
         for dtype in FMT_ID:
-            f = mxformats.get(dtype, where="selftest_requant")
+            f = formats.get(dtype, where="selftest_requant")
             M, N = 64, 64
             C = (rng.standard_normal((M, N)) * scale).astype(np.float32)
             # The direct path has no codebook; the oracle still reads a book block, so send zeros.
             vals, codes = (books_for(f, rng, ((M - 1) >> g) + 1) if dtype in LUT_FMTS
-                           else (np.zeros((((M - 1) >> g) + 1, mxlut.LUT_SIZE), np.float32),
-                                 np.zeros((((M - 1) >> g) + 1, mxlut.LUT_SIZE), np.uint8)))
+                           else (np.zeros((((M - 1) >> g) + 1, codebook.LUT_SIZE), np.float32),
+                                 np.zeros((((M - 1) >> g) + 1, codebook.LUT_SIZE), np.uint8)))
 
             osc, oel, oix = oracle(binary, C, codes, dtype, g)
             psc, pel, pix = python_steps(C, vals, dtype, g)
@@ -163,11 +164,11 @@ def main() -> int:
             # is the book entry the oracle's index names -- or, for the direct path, the decode of
             # the oracle's own element code.
             if dtype in LUT_FMTS:
-                P, _ = requantize_chained(C, dtype=dtype, books=mxlut.pack_codebooks(vals, fmt=f))
+                P, _ = requantize_chained(C, dtype=dtype, books=codebook.pack_codebooks(vals, fmt=f))
                 want = np.take_along_axis(vals[np.arange(M) >> g], oix.astype(np.intp), axis=1)
             else:
                 P, _ = requantize_chained(C, dtype=dtype)
-                want = mxwire.DECODERS[dtype](oix)
+                want = wire.DECODERS[dtype](oix)
             if not np.array_equal(P.numpy().T, want.astype(np.float32)):
                 failures += 1
                 print(f"FAIL {tag} requantize_chained disagrees with the oracle's own indices")

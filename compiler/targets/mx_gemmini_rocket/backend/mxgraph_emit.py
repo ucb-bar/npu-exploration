@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from app import mxformats as _fmt
+from compiler import formats as _fmt
 
 from .mxgemm_emit import (BF16_PER_WORD, DEFAULT_GEOMETRY, MxEmitError, _c_array_2d)
 
@@ -89,11 +89,11 @@ def _helpers(dim: int, spad_rows: int) -> list[str]:
 
 #: RMSNorm over an fp32 tile. `mx_host.h`'s `mx_rmsnorm` takes bf16 inputs, which is right for the
 #: reference kernel's residual stream but not for a graph where every edge is already fp32. Same
-#: arithmetic, same order of operations, so `app.mxhost.rmsnorm` remains its twin.
+#: arithmetic, same order of operations, so `kernels.host_ops.rmsnorm` remains its twin.
 _ROPE_F32 = """\
 /* RoPE with fp32 cos/sin tables. mx_host.h's mx_rope takes them as uint32 bit patterns and puns
    through a union; the emitter bakes real floats, so this variant takes them directly. Same
-   arithmetic and same indexing, so app.mxhost.rope stays its twin. */
+   arithmetic and same indexing, so kernels.host_ops.rope stays its twin. */
 static void mx_rope_f32(const uint16_t *x_bf16, const float *cosv, const float *sinv,
                         int M, int H, float *out) {
   const int half = H / 2;
@@ -137,7 +137,7 @@ def _bf16_to_f32(name: str, m: int, n: int) -> list[str]:
 def generate_graph_driver(cb: dict[str, Any], *, dtype: str = "fp8_e4m3") -> str:
     """Emit the one-ELF driver for a graph-shaped kernel.
 
-    ``cb["graph"]`` carries the step list (see :mod:`app.mxgraph`) and ``cb["graph_operands"]`` the
+    ``cb["graph"]`` carries the step list (see :mod:`compiler.graph`) and ``cb["graph_operands"]`` the
     quantized leaves. The graph is a side channel because ``merlin_iface`` v0.1 cannot express it —
     three live values, computed B operands, and a softmax it has no op for.
     """
@@ -157,6 +157,12 @@ def generate_graph_driver(cb: dict[str, Any], *, dtype: str = "fp8_e4m3") -> str
 
     steps, shapes, uses = graph["steps"], graph["shapes"], graph["uses"]
     consts = cb.get("graph_consts") or {}
+    # A mesh output a host op reads as fp32 (rmsnorm, swiglu and add read `<v>_f32`; softmax and
+    # rope read the bf16 directly) needs its bf16 -> f32 conversion even when no later matmul
+    # consumes it. `uses` records mesh-side consumers only, so without this the host op read a
+    # zeroed buffer (found 2026-09-25 by compiling a SwiGLU module: g and u were never converted).
+    host_f32 = {s for st in steps if st["kind"] == "host" and st["op"] not in ("softmax", "rope")
+                for s in st["srcs"]}
     leaves = set(graph["leaves"])
     result = graph["result"]
 
@@ -214,7 +220,7 @@ def generate_graph_driver(cb: dict[str, Any], *, dtype: str = "fp8_e4m3") -> str
         if st["kind"] == "host":
             body += _emit_host_step(st, uses)
             continue
-        body += _emit_mesh_step({**st, "_uses": uses}, shapes, leaves, dim,
+        body += _emit_mesh_step({**st, "_uses": uses, "_host_f32": host_f32}, shapes, leaves, dim,
                                 a_spad, spad_dest, spad_rows, f)
     body += ["", "  c1 = read_cycles();"]
 
@@ -269,9 +275,9 @@ def generate_graph_driver(cb: dict[str, Any], *, dtype: str = "fp8_e4m3") -> str
 
 def _emit_host_step(st: dict, uses: dict) -> list[str]:
     """A host op, plus the re-quantization that hands its result back to the mesh."""
-    from app import mxhost
+    from kernels import host_ops
 
-    o = mxhost.get(st["op"], **st["params"])
+    o = host_ops.get(st["op"], **st["params"])
     m, n, out = st["m"], st["n"], st["out"]
     srcs = list(st["srcs"])
     src = srcs[0]
@@ -309,7 +315,8 @@ def _emit_host_step(st: dict, uses: dict) -> list[str]:
     return lines + _emit_uses(out, m, n, uses, from_bf16=False) + [""]
 
 
-def _emit_uses(name: str, m: int, n: int, uses: dict, *, from_bf16: bool) -> list[str]:
+def _emit_uses(name: str, m: int, n: int, uses: dict, *, from_bf16: bool,
+               host_f32: bool = False) -> list[str]:
     """Hand a produced value back to the mesh, on whichever side(s) it is consumed.
 
     THE host seam, and unavoidable rather than lazy: the value is in host memory because either a
@@ -320,7 +327,7 @@ def _emit_uses(name: str, m: int, n: int, uses: dict, *, from_bf16: bool) -> lis
     columns. Getting that wrong is silent, so the side is part of every buffer's name.
     """
     how_set = sorted(uses.get(name, []))
-    if not how_set:
+    if not how_set and not host_f32:
         return []
     lines = []
     if from_bf16:
@@ -378,19 +385,33 @@ def _emit_mesh_step(st: dict, shapes: dict, leaves: set, dim: int,
     ]
     if chunks > 1:
         b_spad = spad_rows - (k // dim) * (nc // dim) * dim
+        # The A tiles stay resident across the chunks, so the chunk result cannot land on them: it
+        # goes right after A (spad_dest, 128, is inside A whenever M*K > 128*DIM; before 2026-09-29
+        # chunk 0's store clobbered A and every later chunk multiplied garbage -- rmsnorm(32x512) @
+        # [512x512] came back 8192/16384 identical, the second chunk all inf/NaN). The budget above
+        # already counts A + B + out, so [a_rows, a_rows + out) never reaches b_spad.
+        a_rows = (m * k) // dim
+        chunk_dest = max(spad_dest, a_rows)
+        assert chunk_dest + (m * nc * 2) // dim <= b_spad, (out, m, k, nc, chunk_dest, b_spad)
         lines += [
             f"  /* N-chunked x{chunks}: {m}x{k}x{n} needs "
             f"{(m*k)//dim + (k*n)//dim + (m*n*2)//dim} rows of {spad_rows}; each chunk needs "
             f"{(m*k)//dim + (k*nc)//dim + (m*nc*2)//dim}. */",
             f"  {{ static uint16_t chunk[{m} * {nc}];",
+            f"    static uint8_t bsc[{k // 32} * {nc}];",
             f"    for (int n0 = 0; n0 < {n}; n0 += {nc}) {{",
-            f"      gemmini_mx_load_scales((uint64_t)&{b_tag}_scales[0][n0], "
-            f"{nc} * {k // 32}, 1);",
+            # The B scales are [K/32][N]; the chunk needs columns [n0, n0+nc) of EVERY block row,
+            # which is not one contiguous run (it was loaded as one before 2026-09-29: block row 0's
+            # spill stood in for block row 1, and llama_mlp's Y came back 52764/65536 identical).
+            f"      for (int g = 0; g < {k // 32}; g++)",
+            f"        for (int j = 0; j < {nc}; j++)",
+            f"          bsc[g * {nc} + j] = ((const uint8_t *){b_tag}_scales)[g * {n} + n0 + j];",
+            f"      gemmini_mx_load_scales((uint64_t)bsc, {k // 32} * {nc}, 1);",
             "      gemmini_fence();",
             f"      mvin_B((const uint8_t *){b_tag}_codes, {k}, n0, {nc}, {n}, {b_spad});",
             f"      mesh_matmul({m}, {k}, {nc}, {f.tile_m}, {f.tile_n}, {a_spad}, {spad_rows}, "
-            f"{spad_dest}, (uint64_t)scale_factors);",
-            f"      mvout_bf16(chunk, {spad_dest}, {m}, {nc});",
+            f"{chunk_dest}, (uint64_t)scale_factors);",
+            f"      mvout_bf16(chunk, {chunk_dest}, {m}, {nc});",
             f"      paste_cols({out}_bf16, {n}, chunk, {m}, n0, {nc});",
             "    } }",
         ]
@@ -403,4 +424,5 @@ def _emit_mesh_step(st: dict, shapes: dict, leaves: set, dim: int,
             f"{spad_dest}, (uint64_t)scale_factors);",
             f"  mvout_bf16({out}_bf16, {spad_dest}, {m}, {n});",
         ]
-    return lines + _emit_uses(out, m, n, st["_uses"], from_bf16=True) + [""]
+    return lines + _emit_uses(out, m, n, st["_uses"], from_bf16=True,
+                              host_f32=out in st.get("_host_f32", ())) + [""]

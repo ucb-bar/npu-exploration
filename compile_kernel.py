@@ -1,0 +1,292 @@
+"""PyTorch kernel -> ELF for MX-Gemmini. Compile mode: no spike run, no grade.
+
+One command turns a kernel, a hardware recipe and a run recipe into a directory the RTL team can run as is:
+
+    source scripts/env.sh
+    .venv/bin/python compile_kernel.py --list
+    .venv/bin/python compile_kernel.py --kernel mlp3                            # out/compile/mlp3/spike/
+    .venv/bin/python compile_kernel.py --kernel attention --target mx_rocket    # the RTL build
+    .venv/bin/python compile_kernel.py --kernel linear --hw wide_acc --run fp4_e2m1 --out /tmp/lin
+    .venv/bin/python compile_kernel.py --module tests/fixtures/modules.py:Attn --m 64 --k 64
+    .venv/bin/python compile_kernel.py --module my_model.py:Block --input x.npy      # a real input
+
+``--module FILE.py:Name`` traces a plain PyTorch module (``kernels/trace.py``: bias-free Linear,
+matmul, causal softmax, add, silu*mul, nn.RMSNorm, RoPE with fixed tables) instead of a registry
+kernel. ``Name`` is a class, instantiated with no arguments after ``torch.manual_seed(seed)``, or
+an instance; the input is ``randn(m, k)`` unless ``--input`` names a ``[M][K]`` .npy file.
+
+The directory holds ``mx_gemmini_rocket.elf`` and its ``main.c``, ``command_buffer.json`` (what the
+backend emitted from, minus the byte arrays), ``operands.npz`` (the input and every wire operand),
+``expected.npy`` (the bits the ELF must print: the mxquant model of this recipe, bit-exact against
+spike on every graded kernel) and ``manifest.json`` (recipe, format, lowering, target, tool and
+repo heads, hashes). ``--target`` changes only the build define: the C is byte-identical.
+
+Refused rather than approximated: a kernel the lowering can only run one ELF per matmul (a host
+stage with a Python function), a graph kernel in a format other than fp8_e4m3 (the host-side
+re-quantizer in mx_host.h encodes E4M3 only), a recipe whose mesh the backend does not plan for,
+shape violations, and a recipe the mxquant model cannot follow. Exit 0 compiled, 1 the build
+failed, 2 refused.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+# The backend package registers itself with merlin whenever merlin is importable. This compiler is
+# built without merlin, so the process refuses to load it rather than depending on the environment.
+sys.modules.setdefault("merlin", None)
+
+from compiler.lower import lower, refuse_graph_dtype, wire_paths  # noqa: E402
+
+TARGETS = ("spike", "mx_rocket")
+
+
+def compile(spec, recipe, run=None, *, target: str = "spike", out: Path, tel=None) -> dict:
+    """Lower ``spec`` on the hardware recipe ``recipe`` driven by the run recipe ``run`` (default
+    config/run/default.json), build the ELF into ``out``, write the expected bits and the manifest.
+    Returns the manifest. Raises ``ValueError`` for anything refused."""
+    from grade.telemetry import Telemetry
+    tel = tel or Telemetry()
+    wire_paths()
+    import numpy as np
+    import backend as mx
+    from config.recipe import RecipeError, check, load_run
+    from models import mxquant, mxq_commit
+
+    if target not in TARGETS:
+        raise ValueError(f"unknown target {target!r}; choose from {', '.join(TARGETS)}")
+    run = run or load_run("default")
+    check(recipe, run, "kernel")
+    dtype = run.operand_fmt
+    tel.log("recipe", f"{recipe.describe()}   build_id={recipe.build_id()}")
+    tel.log("run", f"{run.describe()}   run_id={run.run_id()}")
+    tel.log("kernel", f"{spec.describe()}   ({len(spec.stages)} stage"
+                      f"{'s' if len(spec.stages) != 1 else ''})")
+    errs = spec.validate(dim=recipe.dim, block=recipe.block)
+    if errs:
+        raise ValueError(f"{spec.name}: {len(errs)} shape violation(s):\n  " + "\n  ".join(errs))
+
+    low = lower(spec, dtype, allow_lossy_chain=run.allow_lossy_chain,
+                warn=lambda m: tel.log("warning", m))
+    if low.kind == "per_stage":
+        host = [st.name for st in spec.stages if not st.on_mesh and not st.emittable]
+        raise ValueError(
+            f"{spec.name} cannot be compiled ahead of time: host stage(s) {host} carry a Python "
+            "function, not an op the emitter knows (kernels/host_ops.OPS), so the only lowering is one "
+            "ELF per matmul, each fed by the previous run. run_kernel.py drives that path.")
+    refuse_graph_dtype(low, spec.name, dtype)
+    cb = low.cb
+    cb["params"] = recipe.geometry()                 # the emitters' scratchpad plan, from the recipe
+    if low.kind == "graph":
+        n_mesh = sum(r["where"] == "mesh" for r in low.stages)
+        tel.log("lower", f"{len(low.stages)} step(s) -> ONE command buffer via the GRAPH path "
+                         f"({n_mesh} mesh, {len(low.stages) - n_mesh} host, "
+                         f"{len(cb['graph_operands'])} baked operands)")
+    else:
+        tel.log("lower", f"{len(low.stages)} stage(s) -> ONE command buffer "
+                         f"({len(cb['commands'])} commands, {len(cb['tensors'])} leaf tensors)")
+
+    # The expected bits come before the build: a kernel the model cannot follow is refused whole.
+    try:
+        ref = mxquant.run(spec, recipe, dtype=dtype, edges=low.edges, shipped=False)
+    except (mxquant.Unavailable, RecipeError) as exc:
+        raise ValueError(f"no expected bits for {spec.name} on {recipe.name}: {exc}") from exc
+
+    gcc = mx.runner.gcc_path()                      # MxRunnerError when the toolchain is missing
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    elf = mx.compile_command_buffer(cb, out, target=target)
+    main_c = out / "main.c"
+    tel.log("compile", f"{low.kind} -> {elf} ({elf.stat().st_size} B)   target {target}")
+
+    y = np.asarray(ref["y"], np.float32)
+    np.save(out / "expected.npy", y)
+    tel.log("expected", f"{ref['tier']} {tuple(y.shape)} -> expected.npy")
+
+    (out / "command_buffer.json").write_text(json.dumps(
+        {k: v for k, v in cb.items() if k not in ("mx_operands", "graph_operands", "graph_consts")},
+        indent=1, default=_json_default) + "\n")
+    saved = {"x": spec.x.numpy()}
+    if low.kind == "graph":
+        for name, ops in cb["graph_operands"].items():
+            base, how = name.split(":")
+            for key, val in ops.items():
+                saved[f"{base}_{how.replace('.', '')}_{key}"] = np.asarray(val)
+        for name, val in cb["graph_consts"].items():
+            saved[f"{name}_f32"] = np.asarray(val, np.float32)
+    else:
+        for i, bundle in enumerate(cb["mx_operands"]):
+            for key, val in bundle.items():
+                saved[f"s{i}_{key}"] = np.asarray(val)
+    np.savez_compressed(out / "operands.npz", **saved)
+
+    mesh = spec.mesh_stages
+    mnk = spec.stage_mnk()
+    manifest = {
+        "kernel": spec.name, "module": getattr(spec, "module", None),
+        "lowering": low.kind, "target": target, "dtype": dtype,
+        "intermediate_dtype": (cb["tensors"] and next(iter(cb["tensors"].values()))["dtype"]
+                               if low.kind == "fused" and len(spec.stages) > 1 else None),
+        "m": spec.m,
+        "dims": [mnk[mesh[0].name][1]] + [mnk[s.name][2] for s in mesh],
+        "stages": low.stages,
+        "edges": {k: v["via"] for k, v in low.edges.items()},
+        "recipe": {"name": recipe.name, "build_id": recipe.build_id(), "path": str(recipe.path),
+                   "hardware": recipe.hardware()},
+        "run": {"name": run.name, "run_id": run.run_id(), "path": str(run.path), **run.fields()},
+        "repo_head": _git_head(REPO), "mxq_head": mxq_commit(), "gcc": str(gcc),
+        "elf": {"path": str(elf), "bytes": elf.stat().st_size, "sha256": _sha256(elf)},
+        "main_c_sha256": _sha256(main_c),
+        "expected": {"file": "expected.npy", "shape": list(y.shape), "tier": ref["tier"],
+                     "model": ref["model"]},
+        "files": sorted([p.name for p in out.iterdir()] + ["manifest.json"]),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=1, default=_json_default) + "\n")
+    tel.log("manifest", f"{out / 'manifest.json'}")
+    return manifest
+
+
+def _json_default(v):
+    import numpy as np
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    if isinstance(v, np.generic):
+        return v.item()
+    return str(v)
+
+
+def _sha256(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _git_head(path: Path) -> str | None:
+    try:
+        out = subprocess.run(["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=10)
+        return out.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def load_module(ref: str, *, m: int, k: int, seed: int, recipe, input_npy: Path | None = None):
+    """``FILE.py:Name`` -> a traced KernelSpec, named ``Name``. TraceError is a ValueError."""
+    import numpy as np
+    import torch
+    from kernels.trace import trace
+    file, _, attr = ref.rpartition(":")
+    if not file or not attr:
+        raise ValueError(f"--module must be FILE.py:Name, got {ref!r}")
+    path = Path(file)
+    if not path.exists():
+        raise ValueError(f"--module: {path} does not exist")
+    ms = importlib.util.spec_from_file_location(path.stem, path)
+    mod = importlib.util.module_from_spec(ms)
+    ms.loader.exec_module(mod)
+    obj = getattr(mod, attr, None)
+    if obj is None:
+        raise ValueError(f"--module: {path} has no attribute {attr!r}")
+    torch.manual_seed(seed)
+    module = obj() if isinstance(obj, type) else obj
+    if not isinstance(module, torch.nn.Module):
+        raise ValueError(f"--module: {ref} is not an nn.Module (got {type(module).__name__})")
+    if input_npy is not None:
+        x = np.load(input_npy)
+        if x.ndim != 2:
+            raise ValueError(f"--input {input_npy}: expected a 2-D [M][K] array, got shape {x.shape}")
+        x = torch.from_numpy(np.ascontiguousarray(x, np.float32))
+    else:
+        x = torch.randn(m, k)
+    spec = trace(module, x, name=attr, dim=recipe.dim, block=recipe.block)
+    spec.module = ref
+    return spec
+
+
+def main(argv: list[str] | None = None) -> int:
+    from config.recipe import RecipeError, list_hardware, list_runs, load_hardware, load_run, removed_flag
+    from grade.telemetry import Telemetry
+    from kernels.registry import build, list_kernels
+
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--list", action="store_true", help="list kernels, recipes and targets, then exit")
+    src = ap.add_mutually_exclusive_group()
+    src.add_argument("--kernel", default=None, help="kernel name (see --list); default linear")
+    src.add_argument("--module", default=None,
+                     help="FILE.py:Name -- trace a PyTorch module instead of a registry kernel "
+                          "(--h/--n do not apply: the module fixes its own widths)")
+    ap.add_argument("--input", type=Path, default=None,
+                    help="with --module: a [M][K] float .npy to use as the input instead of randn")
+    ap.add_argument("--hw", "--config", dest="hw", default="baseline",
+                    help="hardware recipe: a name in config/hardware/ or a path to a .json")
+    ap.add_argument("--run", default="default",
+                    help="run recipe: a name in config/run/ or a path to a .json (operand format, tolerances)")
+    ap.add_argument("--m", type=int, default=64, help="batch rows")
+    ap.add_argument("--k", type=int, default=64, help="in_features")
+    ap.add_argument("--h", type=int, default=64, help="hidden width (chained kernels)")
+    ap.add_argument("--n", type=int, default=64, help="out_features")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--target", choices=TARGETS, default="spike",
+                    help="build define: spike (-DSPIKE_SIM) or mx_rocket (-DMX_ROCKET, the RTL build)")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output directory (default out/compile/<kernel>/<target>)")
+    gone = removed_flag(sys.argv[1:] if argv is None else argv)
+    if gone:
+        print(f"[error   ] {gone}", file=sys.stderr)
+        return 2
+    a = ap.parse_args(argv)
+
+    if a.list:
+        print("kernels:")
+        for name, desc in list_kernels().items():
+            print(f"  {name:10s} {desc}")
+        print("\nhardware recipes (--hw):")
+        for name, desc in list_hardware().items():
+            print(f"  {name:14s} {desc}")
+        print("\nrun recipes (--run):")
+        for name, desc in list_runs().items():
+            print(f"  {name:14s} {desc}")
+        print("\ntargets (--target): " + ", ".join(TARGETS))
+        return 0
+
+    tel = Telemetry()
+    wire_paths()
+    from backend import MxEmitError, MxRunnerError
+    try:
+        recipe, run = load_hardware(a.hw), load_run(a.run)
+        if a.input is not None and a.module is None:
+            raise ValueError("--input applies to --module only; registry kernels make their own input")
+        if a.module:
+            spec = load_module(a.module, m=a.m, k=a.k, seed=a.seed, recipe=recipe, input_npy=a.input)
+        else:
+            spec = build(a.kernel or "linear", m=a.m, k=a.k, h=a.h, n=a.n, seed=a.seed)
+        out = a.out or REPO / "out" / "compile" / spec.name / a.target
+        compile(spec, recipe, run, target=a.target, out=out, tel=tel)
+    except RecipeError as exc:
+        tel.log("error", f"bad recipe: {exc}")
+        return 2
+    except ValueError as exc:
+        tel.log("error", str(exc))
+        return 2
+    except (MxRunnerError, MxEmitError) as exc:
+        tel.log("error", f"build failed: {exc}")
+        return 1
+    except Exception as exc:
+        tel.log("error", f"{type(exc).__name__}: {exc}")
+        return 2
+    print(f"COMPILED  {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

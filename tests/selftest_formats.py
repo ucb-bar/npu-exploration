@@ -26,13 +26,12 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parent.parent
-for _p in (REPO, REPO / "app", REPO / "compiler" / "targets" / "mx_gemmini_rocket",
-           REPO / "merlin" / "merlin" / "python"):
+for _p in (REPO, REPO / "app", REPO / "compiler" / "targets" / "mx_gemmini_rocket"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-import mxiface                                   # noqa: E402
-from app import mxformats                        # noqa: E402
+from compiler import formats                        # noqa: E402
+from compiler.lower import MatmulStage, command_buffer   # noqa: E402
 from backend import runner                       # noqa: E402
 
 ROCC = REPO.parent / "software" / "gemmini-rocc-tests"
@@ -74,7 +73,7 @@ def defines(text: str) -> dict[str, int]:
 
 
 def run_case(fmt_name: str, header: str, test: str) -> tuple[bool, str]:
-    f = mxformats.FORMATS[fmt_name.split("@")[0]]
+    f = formats.FORMATS[fmt_name.split("@")[0]]
     path = ROCC / "include" / header
     if not path.exists():
         return True, f"SKIP (no {header})"
@@ -85,22 +84,21 @@ def run_case(fmt_name: str, header: str, test: str) -> tuple[bool, str]:
     a_name = "A_in_hw" if f.bits == 4 else "A_in"
     a_codes = parse_array(text, a_name)[0].reshape(M // f.packed_per_byte, K)
     b_codes = parse_array(text, "B_in")[0].reshape(K, N // f.packed_per_byte)
-    a_scales = parse_array(text, "A_scales_row")[0].reshape(K // mxformats.BLOCK, M)
-    b_scales = parse_array(text, "B_scales_col")[0].reshape(K // mxformats.BLOCK, N)
+    a_scales = parse_array(text, "A_scales_row")[0].reshape(K // formats.BLOCK, M)
+    b_scales = parse_array(text, "B_scales_col")[0].reshape(K // formats.BLOCK, N)
     want = parse_array(text, "C_out_bf16")[0].reshape(M, N)
 
     bundle = {"a_codes": a_codes, "b_codes": b_codes,
               "a_scales": a_scales, "b_scales": b_scales}
     if f.lut:
-        g = mxformats.LUT_GRANULARITY
-        words = mxformats.lut_words(f.entry_bits)
+        g = formats.LUT_GRANULARITY
+        words = formats.lut_words(f.entry_bits)
         for key, name, n_lut in (("a_lut", "A_lut", M >> g), ("b_lut", "B_lut", N >> g),
                                  ("c_lut", "C_lut", M >> g)):
             bundle[key] = parse_array(text, name)[0].reshape(n_lut, words)
 
-    stage = mxiface.MatmulStage(m=M, k=K, n=N, weight="W0", out="Y0", lhs="X", out_dtype="bf16")
-    iface = mxiface.chain_interface_mlir([stage], operand_fmt=f.name)
-    cb = mxiface.to_command_buffer(iface, [bundle])
+    stage = MatmulStage(m=M, k=K, n=N, weight="W0", out="Y0", lhs="X", out_dtype="bf16")
+    cb = command_buffer([stage], [bundle], operand_fmt=f.name)
 
     with tempfile.TemporaryDirectory() as td:
         elf = runner.compile_command_buffer(cb, td)
@@ -134,14 +132,14 @@ CHAIN_CASES = {
 
 def run_chain_case(fmt_name: str, header: str, test: str) -> tuple[bool, str]:
     """A 2-stage chain on the reference's own operands; compare our C1 to its golden."""
-    f = mxformats.FORMATS[fmt_name]
+    f = formats.FORMATS[fmt_name]
     path = ROCC / "include" / header
     if not path.exists():
         return True, f"SKIP (no {header})"
     text = path.read_text()
     d = defines(text)
     M, K, N = d["MATMUL_M"], d["MATMUL_K"], d["MATMUL_N"]
-    ppb, gk, gn = f.packed_per_byte, K // mxformats.BLOCK, N // mxformats.BLOCK
+    ppb, gk, gn = f.packed_per_byte, K // formats.BLOCK, N // formats.BLOCK
 
     a_name = "A_in_hw" if f.bits == 4 else "A_in"
     bundles = [
@@ -153,7 +151,7 @@ def run_chain_case(fmt_name: str, header: str, test: str) -> tuple[bool, str]:
          "b_scales": parse_array(text, "B2_scales_col")[0].reshape(gk, N)},
     ]
     if f.lut:
-        g, w = mxformats.LUT_GRANULARITY, mxformats.lut_words(f.entry_bits)
+        g, w = formats.LUT_GRANULARITY, formats.lut_words(f.entry_bits)
         c1 = parse_array(text, "C1_lut")[0].reshape(M >> g, w)
         bundles[0] |= {"a_lut": parse_array(text, "A_lut")[0].reshape(M >> g, w),
                        "b_lut": parse_array(text, "B_lut")[0].reshape(N >> g, w),
@@ -167,11 +165,10 @@ def run_chain_case(fmt_name: str, header: str, test: str) -> tuple[bool, str]:
 
     et = f.mlir or f.name
     stages = [
-        mxiface.MatmulStage(m=M, k=K, n=N, weight="W0", out="T0", lhs="X", out_dtype=et),
-        mxiface.MatmulStage(m=M, k=N, n=N, weight="W1", out="Y0", lhs="T0", out_dtype="bf16"),
+        MatmulStage(m=M, k=K, n=N, weight="W0", out="T0", lhs="X", out_dtype=et),
+        MatmulStage(m=M, k=N, n=N, weight="W1", out="Y0", lhs="T0", out_dtype="bf16"),
     ]
-    cb = mxiface.to_command_buffer(
-        mxiface.chain_interface_mlir(stages, operand_fmt=f.name), bundles)
+    cb = command_buffer(stages, bundles, operand_fmt=f.name)
 
     with tempfile.TemporaryDirectory() as td:
         elf = runner.compile_command_buffer(cb, td)

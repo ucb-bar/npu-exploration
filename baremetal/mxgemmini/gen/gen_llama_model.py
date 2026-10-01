@@ -48,7 +48,7 @@ import gen_llama_attn_full as GA        # noqa: E402  -- Blob, attention_chain()
 import gen_llama_mlp_full as GM         # noqa: E402  -- mlp_chain()
 from gen_llama_layer_full import _bf16_rne, _bf16_val, residual  # noqa: E402
 from mesh_par import mesh_parallel      # noqa: E402
-from app.mxhostmath import rmsnorm  # noqa: E402  -- the device's host math, bit-exact
+from kernels.host_math import rmsnorm  # noqa: E402  -- the device's host math, bit-exact
 
 FMT = GL.FMT
 BLOCK = 32
@@ -59,7 +59,7 @@ def load_layer(n: int) -> dict:
     p = CAPTURE / f"layer{n}.npz"
     if not p.exists():
         raise SystemExit(f"{p} missing -- run:\n"
-                         f"    cd {NPU} && .venv/bin/python3 -m app.capture_llama_model")
+                         f"    cd {NPU} && .venv/bin/python3 -m kernels.captures.llama_model")
     with np.load(p) as z:
         return {k: z[k] for k in z.files}
 
@@ -67,7 +67,7 @@ def load_layer(n: int) -> dict:
 def load_model() -> dict:
     p = CAPTURE / "model.npz"
     if not p.exists():
-        raise SystemExit(f"{p} missing -- run app.capture_llama_model")
+        raise SystemExit(f"{p} missing -- run kernels.captures.llama_model")
     with np.load(p) as z:
         return {k: z[k] for k in z.files}
 
@@ -117,7 +117,7 @@ def main() -> int:
 
     have = sorted(int(p.stem[5:]) for p in CAPTURE.glob("layer*.npz"))
     if not have:
-        raise SystemExit(f"no layer captures in {CAPTURE} -- run app.capture_llama_model")
+        raise SystemExit(f"no layer captures in {CAPTURE} -- run kernels.captures.llama_model")
     NL = args.layers if args.layers else len(have)
     if have[:NL] != list(range(NL)):
         raise SystemExit(f"need layers 0..{NL - 1} captured consecutively; have {have}")

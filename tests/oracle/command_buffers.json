@@ -1,0 +1,7717 @@
+{
+ "source": "merlin.targetgen.contract.interface_emit.parse_interface_mlir on app.mxiface.chain_interface_mlir",
+ "cases": [
+  {
+   "name": "single/fp8_e4m3",
+   "operand_fmt": "fp8_e4m3",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "Y0",
+     "lhs": "X",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "name": "chain2/fp8_e4m3",
+   "operand_fmt": "fp8_e4m3",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "f8E4M3FN"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W1",
+     "out": "Y0",
+     "lhs": "T0",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f8E4M3FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f8E4M3FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "chain3/fp8_e4m3",
+   "operand_fmt": "fp8_e4m3",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "f8E4M3FN"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W1",
+     "out": "T1",
+     "lhs": "T0",
+     "out_dtype": "f8E4M3FN"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W2",
+     "out": "Y0",
+     "lhs": "T1",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "W2": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f8E4M3FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f8E4M3FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W2",
+       "dst": "W2_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T1",
+       "rhs": "W2_res",
+       "dst": "acc2"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc2",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W2_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "W2": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f8E4M3FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f8E4M3FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W2",
+       "dst": "W2_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T1",
+       "rhs": "W2_res",
+       "dst": "acc2"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc2",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W2_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        2,
+        4
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    },
+    {
+     "b_codes": [
+      [
+       2,
+       4
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "non-square/fp8_e4m3",
+   "operand_fmt": "fp8_e4m3",
+   "stages": [
+    {
+     "m": 32,
+     "k": 128,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "f8E4M3FN"
+    },
+    {
+     "m": 32,
+     "k": 64,
+     "n": 96,
+     "weight": "W1",
+     "out": "Y0",
+     "lhs": "T0",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       128,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       96
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       32,
+       128
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f8E4M3FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       128,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       96
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       32,
+       128
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f8E4M3FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "single/fp8_e4m3_quad",
+   "operand_fmt": "fp8_e4m3_quad",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "Y0",
+     "lhs": "X",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "name": "chain2/fp8_e4m3_quad",
+   "operand_fmt": "fp8_e4m3_quad",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "fp8_e4m3_quad"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W1",
+     "out": "Y0",
+     "lhs": "T0",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e4m3_quad"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e4m3_quad"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "chain3/fp8_e4m3_quad",
+   "operand_fmt": "fp8_e4m3_quad",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "fp8_e4m3_quad"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W1",
+     "out": "T1",
+     "lhs": "T0",
+     "out_dtype": "fp8_e4m3_quad"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W2",
+     "out": "Y0",
+     "lhs": "T1",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "W2": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e4m3_quad"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e4m3_quad"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W2",
+       "dst": "W2_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T1",
+       "rhs": "W2_res",
+       "dst": "acc2"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc2",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W2_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "W2": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e4m3_quad"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e4m3_quad"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W2",
+       "dst": "W2_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T1",
+       "rhs": "W2_res",
+       "dst": "acc2"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc2",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W2_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        2,
+        4
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    },
+    {
+     "b_codes": [
+      [
+       2,
+       4
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "non-square/fp8_e4m3_quad",
+   "operand_fmt": "fp8_e4m3_quad",
+   "stages": [
+    {
+     "m": 32,
+     "k": 128,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "fp8_e4m3_quad"
+    },
+    {
+     "m": 32,
+     "k": 64,
+     "n": 96,
+     "weight": "W1",
+     "out": "Y0",
+     "lhs": "T0",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       128,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       96
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       32,
+       128
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e4m3_quad"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       128,
+       64
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       96
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       32,
+       128
+      ],
+      "dtype": "fp8_e4m3_quad",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e4m3_quad"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "single/fp8_e5m2",
+   "operand_fmt": "fp8_e5m2",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "Y0",
+     "lhs": "X",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "name": "chain2/fp8_e5m2",
+   "operand_fmt": "fp8_e5m2",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "fp8_e5m2"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W1",
+     "out": "Y0",
+     "lhs": "T0",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e5m2"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e5m2"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "chain3/fp8_e5m2",
+   "operand_fmt": "fp8_e5m2",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "fp8_e5m2"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W1",
+     "out": "T1",
+     "lhs": "T0",
+     "out_dtype": "fp8_e5m2"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W2",
+     "out": "Y0",
+     "lhs": "T1",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "W2": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e5m2"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e5m2"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W2",
+       "dst": "W2_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T1",
+       "rhs": "W2_res",
+       "dst": "acc2"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc2",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W2_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "W2": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e5m2"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e5m2"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W2",
+       "dst": "W2_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T1",
+       "rhs": "W2_res",
+       "dst": "acc2"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc2",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W2_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        2,
+        4
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    },
+    {
+     "b_codes": [
+      [
+       2,
+       4
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "non-square/fp8_e5m2",
+   "operand_fmt": "fp8_e5m2",
+   "stages": [
+    {
+     "m": 32,
+     "k": 128,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "fp8_e5m2"
+    },
+    {
+     "m": 32,
+     "k": 64,
+     "n": 96,
+     "weight": "W1",
+     "out": "Y0",
+     "lhs": "T0",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       128,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       96
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       32,
+       128
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e5m2"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       128,
+       64
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       96
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       32,
+       128
+      ],
+      "dtype": "fp8_e5m2",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp8_e5m2"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "single/fp6_e3m2",
+   "operand_fmt": "fp6_e3m2",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "Y0",
+     "lhs": "X",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "name": "chain2/fp6_e3m2",
+   "operand_fmt": "fp6_e3m2",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "f6E3M2FN"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W1",
+     "out": "Y0",
+     "lhs": "T0",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f6E3M2FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f6E3M2FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "chain3/fp6_e3m2",
+   "operand_fmt": "fp6_e3m2",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "f6E3M2FN"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W1",
+     "out": "T1",
+     "lhs": "T0",
+     "out_dtype": "f6E3M2FN"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W2",
+     "out": "Y0",
+     "lhs": "T1",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "W2": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f6E3M2FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f6E3M2FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W2",
+       "dst": "W2_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T1",
+       "rhs": "W2_res",
+       "dst": "acc2"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc2",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W2_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "W2": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f6E3M2FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f6E3M2FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W2",
+       "dst": "W2_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T1",
+       "rhs": "W2_res",
+       "dst": "acc2"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc2",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W2_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        2,
+        4
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    },
+    {
+     "b_codes": [
+      [
+       2,
+       4
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "non-square/fp6_e3m2",
+   "operand_fmt": "fp6_e3m2",
+   "stages": [
+    {
+     "m": 32,
+     "k": 128,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "f6E3M2FN"
+    },
+    {
+     "m": 32,
+     "k": 64,
+     "n": 96,
+     "weight": "W1",
+     "out": "Y0",
+     "lhs": "T0",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       128,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       96
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       32,
+       128
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f6E3M2FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       128,
+       64
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       96
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       32,
+       128
+      ],
+      "dtype": "f6E3M2FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f6E3M2FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "single/fp6_e2m3",
+   "operand_fmt": "fp6_e2m3",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "Y0",
+     "lhs": "X",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "name": "chain2/fp6_e2m3",
+   "operand_fmt": "fp6_e2m3",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "fp6_e2m3"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W1",
+     "out": "Y0",
+     "lhs": "T0",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp6_e2m3"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp6_e2m3"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "chain3/fp6_e2m3",
+   "operand_fmt": "fp6_e2m3",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "fp6_e2m3"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W1",
+     "out": "T1",
+     "lhs": "T0",
+     "out_dtype": "fp6_e2m3"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W2",
+     "out": "Y0",
+     "lhs": "T1",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "W2": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp6_e2m3"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp6_e2m3"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W2",
+       "dst": "W2_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T1",
+       "rhs": "W2_res",
+       "dst": "acc2"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc2",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W2_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "W2": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp6_e2m3"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp6_e2m3"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W2",
+       "dst": "W2_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T1",
+       "rhs": "W2_res",
+       "dst": "acc2"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc2",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W2_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        2,
+        4
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    },
+    {
+     "b_codes": [
+      [
+       2,
+       4
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "non-square/fp6_e2m3",
+   "operand_fmt": "fp6_e2m3",
+   "stages": [
+    {
+     "m": 32,
+     "k": 128,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "fp6_e2m3"
+    },
+    {
+     "m": 32,
+     "k": 64,
+     "n": 96,
+     "weight": "W1",
+     "out": "Y0",
+     "lhs": "T0",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       128,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       96
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       32,
+       128
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp6_e2m3"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       128,
+       64
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       96
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       32,
+       128
+      ],
+      "dtype": "fp6_e2m3",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "fp6_e2m3"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "single/fp4_e2m1",
+   "operand_fmt": "fp4_e2m1",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "Y0",
+     "lhs": "X",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "name": "chain2/fp4_e2m1",
+   "operand_fmt": "fp4_e2m1",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "f4E2M1FN"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W1",
+     "out": "Y0",
+     "lhs": "T0",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f4E2M1FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f4E2M1FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "chain3/fp4_e2m1",
+   "operand_fmt": "fp4_e2m1",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "f4E2M1FN"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W1",
+     "out": "T1",
+     "lhs": "T0",
+     "out_dtype": "f4E2M1FN"
+    },
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W2",
+     "out": "Y0",
+     "lhs": "T1",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "W2": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f4E2M1FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f4E2M1FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W2",
+       "dst": "W2_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T1",
+       "rhs": "W2_res",
+       "dst": "acc2"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc2",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W2_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "W2": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f4E2M1FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f4E2M1FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W2",
+       "dst": "W2_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T1",
+       "rhs": "W2_res",
+       "dst": "acc2"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc2",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W2_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        2,
+        4
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    },
+    {
+     "b_codes": [
+      [
+       2,
+       4
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "non-square/fp4_e2m1",
+   "operand_fmt": "fp4_e2m1",
+   "stages": [
+    {
+     "m": 32,
+     "k": 128,
+     "n": 64,
+     "weight": "W0",
+     "out": "T0",
+     "lhs": "X",
+     "out_dtype": "f4E2M1FN"
+    },
+    {
+     "m": 32,
+     "k": 64,
+     "n": 96,
+     "weight": "W1",
+     "out": "Y0",
+     "lhs": "T0",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       128,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       96
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       32,
+       128
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f4E2M1FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W0": {
+      "shape": [
+       128,
+       64
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "W1": {
+      "shape": [
+       64,
+       96
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "weight"
+     },
+     "X": {
+      "shape": [
+       32,
+       128
+      ],
+      "dtype": "f4E2M1FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W0",
+       "dst": "W0_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "X",
+       "rhs": "W0_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f4E2M1FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W0_res"
+      }
+     },
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "T0",
+       "rhs": "W1_res",
+       "dst": "acc1"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc1",
+       "dst": "Y0"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     },
+     {
+      "b_codes": [
+       [
+        1,
+        2
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    },
+    {
+     "b_codes": [
+      [
+       1,
+       2
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null
+    }
+   ]
+  },
+  {
+   "name": "per-stage/bf16",
+   "operand_fmt": "fp8_e4m3",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W1",
+     "out": "T1",
+     "lhs": "A1",
+     "out_dtype": "bf16"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "A1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "A1",
+       "rhs": "W1_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "A1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "A1",
+       "rhs": "W1_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "bf16"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "name": "per-stage/f8E4M3FN",
+   "operand_fmt": "fp8_e4m3",
+   "stages": [
+    {
+     "m": 64,
+     "k": 64,
+     "n": 64,
+     "weight": "W1",
+     "out": "T1",
+     "lhs": "A1",
+     "out_dtype": "f8E4M3FN"
+    }
+   ],
+   "cb": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "A1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "A1",
+       "rhs": "W1_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f8E4M3FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ]
+   },
+   "cb_with_operands": {
+    "abi_version": "0.1",
+    "target": "mx_gemmini_rocket",
+    "tensors": {
+     "W1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "weight"
+     },
+     "A1": {
+      "shape": [
+       64,
+       64
+      ],
+      "dtype": "f8E4M3FN",
+      "role": "input"
+     }
+    },
+    "commands": [
+     {
+      "opcode": "RES_PACK",
+      "operands": {
+       "src": "W1",
+       "dst": "W1_res"
+      },
+      "attributes": {
+       "layout": "packed_rhs"
+      }
+     },
+     {
+      "opcode": "MATMUL_RESIDENT",
+      "operands": {
+       "lhs": "A1",
+       "rhs": "W1_res",
+       "dst": "acc0"
+      }
+     },
+     {
+      "opcode": "COMMIT",
+      "operands": {
+       "src": "acc0",
+       "dst": "T1"
+      },
+      "attributes": {
+       "epilogue": [],
+       "output_dtype": "f8E4M3FN"
+      }
+     },
+     {
+      "opcode": "EVICT",
+      "operands": {
+       "handle": "W1_res"
+      }
+     }
+    ],
+    "mx_operands": [
+     {
+      "b_codes": [
+       [
+        0,
+        0
+       ]
+      ],
+      "b_scales": [
+       [
+        7
+       ]
+      ],
+      "a_codes": [
+       [
+        1
+       ]
+      ],
+      "a_scales": [
+       [
+        3
+       ]
+      ]
+     }
+    ]
+   },
+   "bundles": [
+    {
+     "b_codes": [
+      [
+       0,
+       0
+      ]
+     ],
+     "b_scales": [
+      [
+       7
+      ]
+     ],
+     "a_lut": null,
+     "a_codes": [
+      [
+       1
+      ]
+     ],
+     "a_scales": [
+      [
+       3
+      ]
+     ]
+    }
+   ]
+  }
+ ]
+}

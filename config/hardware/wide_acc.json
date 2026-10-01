@@ -1,0 +1,260 @@
+{
+  "name": "wide_acc",
+  "description": "Ablation in the other direction: every accumulator column as wide as the last one (8e7m). Bounds how much the narrow ladder costs, and so whether baseline's widening schedule is well chosen.",
+  "array": {
+    "meshRows": 16,
+    "meshColumns": 16,
+    "tileRows": 1,
+    "tileColumns": 1
+  },
+  "types": {
+    "meshProdPrecisionList": [
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 4,
+        "sigWidth": 4,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      }
+    ],
+    "meshAccPrecisionList": [
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      },
+      {
+        "expWidth": 8,
+        "sigWidth": 8,
+        "count": 4,
+        "isRecoded": true,
+        "pad": false
+      }
+    ],
+    "prodFloor": -16
+  },
+  "mx": {
+    "scaleSize": 32,
+    "scaleSizeOut": 32,
+    "enable_lut": false
+  },
+  "scratchpad": {
+    "banks": 4,
+    "rows": 4096
+  },
+  "implementation": {
+    "clock_ns": 2.0,
+    "utilization": 0.965
+  },
+  "provenance": {
+    "note": "Derived from baseline by flattening meshAccPrecisionList upward.",
+    "prodFloor": "MxFPMul PROD_FLOOR = -16 (rtl_exact/rtl_datapath.py:139, mxq MXGEMMINI prod_floor)",
+    "scratchpad": "libgemmini gemmini_params.h BANK_NUM 4, BANK_ROWS 4096 at DIM 16 (was mxgemm_emit.DEFAULT_GEOMETRY)",
+    "implementation": "the PPA model's tapeout invocation: --clock-ns 2.0 --util 0.965 (was models/ppa/ppa.py constants)"
+  }
+}

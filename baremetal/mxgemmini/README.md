@@ -50,8 +50,8 @@ implementation of the same precision schedule, so agreement is a real gate rathe
 `make data` needs a capture first (once, needs the venv + HF cache):
 
 ```bash
-cd ../.. && .venv/bin/python3 -m app.capture_llama_layer              # single head
-          .venv/bin/python3 -m app.capture_llama_layer --all-heads    # for llama_attention_full
+cd ../.. && .venv/bin/python3 -m kernels.captures.llama_layer              # single head
+          .venv/bin/python3 -m kernels.captures.llama_layer --all-heads    # for llama_attention_full
 ```
 
 ## The scratchpad is a compile-time constraint, not an assumption

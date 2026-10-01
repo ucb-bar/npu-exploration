@@ -5,7 +5,7 @@
 // D in one loop_ws, and their A-side scale window is M*D/512 rows -- 256 at M=64, the ceiling.
 //
 // Regenerate the data with:
-//   .venv/bin/python3 -m app.capture_llama_model --seq 64 --out out/model_capture_m64
+//   .venv/bin/python3 -m kernels.captures.llama_model --seq 64 --out out/model_capture_m64
 //   cd gen && ../../../.venv/bin/python3 gen_llama_model.py --capture ../../../out/model_capture_m64 --tag _m64
 #define LLAMA_MODEL_HEADER "llama_model_m64.h"
 #include "llama_model.c"

@@ -1,99 +1,127 @@
-# config — hardware recipes
+# config — the two recipes
 
-A recipe is one JSON file = one machine. `[hashed]` fields are the hardware itself: changing one
-changes `build_id` and forces a new functional-model build. All other fields bind per-instruction
-(`runtime`) or in Python before the hardware runs (`software`). `formats.*` is derived by the loader;
-an explicit block may only confirm it.
+Every run takes two JSON files:
+
+- a **hardware recipe** (`hardware/*.json`, `--hw`): one machine. Every number in it is the chip.
+  Changing one changes `build_id` and gives the machine its own functional model.
+- a **run recipe** (`run/*.json`, `--run`): how software drives that machine. The operand format,
+  how operands are rounded, the scale floor, which reducer the perplexity path multiplies with, and
+  the kernel path's pass threshold. `run_id` is its digest.
+
+`recipe.py` loads both, strictly. An unknown key is refused by name, and every run field must be
+written out. `scheme.py` turns the pair into mxq's `Scheme`.
 
 ## Using it
 
 ```bash
-.venv/bin/python run_kernel.py --list                    # recipes and kernels
-.venv/bin/python run_kernel.py --config wide_acc
-.venv/bin/python -m models.spike.build_spike --config <recipe> --force
+.venv/bin/python run_kernel.py --list                                    # kernels, both recipe kinds
+.venv/bin/python run_kernel.py --kernel linear --hw wide_acc             # run recipe "default"
+.venv/bin/python run_kernel.py --kernel linear --hw baseline --run fp4_e2m1
+.venv/bin/python -m models.mxquant --workload tinyllama --hw baseline --run exact --gpus 0,1,2,3
+.venv/bin/python -m models.spike.build_spike --hw <recipe> --force
 ```
 
-| recipe | product | accumulator ladder |
+`--config` is still accepted as another name for `--hw`. The old per-setting flags (`--dtype`,
+`--rounding-mode`, `--scale-floor`, `--reduce`, `--tol`, `--allow-lossy-chain`) are refused with a
+message naming the run field that replaced each. To change one setting, copy `run/default.json`,
+edit that field and pass `--run <file>`.
+
+| hardware recipe | product | accumulator ladder |
 |---|---|---|
 | `baseline` | e4m3 | m4x8 -> m5x2 -> m6x5 -> e8m7 (stock) |
 | `flat_acc4` | e4m3 | e4m4 flat |
 | `wide_acc` | e4m3 | e8m7 flat |
 | `narrow_prod` | **e4m2** | same ladder as baseline |
 
-A recipe that is not the stock machine gets its own functional model, built and cached under
-`out/builds/<build_id>/`.
-
-## One artifact, two consumers
-
-`recipes/*.json` drives **both** compilation and hardware generation: it patches the functional model
-(`build_spike.py`) and elaborates the Chisel (`scala/JsonGemminiConfig.scala`). Those two could drift
-silently, so `tests/test_recipe_drift.py` holds them in agreement — it is the only thing that does.
-
-## Fields
-
-| attribute | description |
+| run recipe | differs from `default` in |
 |---|---|
-| `name` | recipe identifier; referenced by `--config` |
-| `description` | free text |
-| `array.meshRows` | systolic mesh rows (= `dim`) `[hashed]` |
-| `array.meshColumns` | systolic mesh columns; must equal `meshRows` `[hashed]` |
-| `array.tileRows` | rows per PE tile `[hashed]` |
-| `array.tileColumns` | columns per PE tile `[hashed]` |
-| `types.meshProdPrecisionList` | 16 MxFloat entries: per-lane product precision; must be uniform (spike declares one scalar `prod_e/prod_m`) `[hashed]` |
-| `types.meshAccPrecisionList` | 16 MxFloat entries: the accumulator ladder down the column `[hashed]` |
-| `types.*[].expWidth` | exponent bits of that lane's format |
-| `types.*[].sigWidth` | significand bits incl. the implicit leading bit (C mantissa = `sigWidth − 1`) |
-| `types.*[].count` | how many consecutive lanes use this format |
-| `types.*[].isRecoded` | Chisel recoded-format flag (pass-through) |
-| `types.*[].pad` | Chisel padding flag (pass-through) |
-| `mx.scaleSize` | input block-scale group: elements per E8M0 code (spike: only 32 wired) `[hashed]` |
-| `mx.scaleSizeOut` | requantizer output group size `[hashed]` |
-| `mx.enable_lut` | LUT decode hardware present `[hashed]` |
-| `runtime.operand_fmt` | element format per instruction: `fp8` \| `fp6` \| `fp4` (fp6/fp4 rejected at load until the encoder is wired) |
-| `runtime.out_dtype` | commit format: `bf16` \| `f8E4M3FN` |
-| `runtime.use_lut` | LUT decode enable bit (CONFIG_EX) |
-| `software.block` | quantizer group size along K |
-| `software.target_code_exp` | peak-code exponent the encoder targets (accumulator-overflow headroom) |
-| `software.seam` | chain-seam strategy: `weight` \| `rescale` |
-| `software.intermediate_dtype` | commit format of non-final chained stages |
-| `supported_backends` | simulators this recipe may run on: `spike` \| `verilator` |
-| `provenance.rtl` | Scala file(s) each hardware fact was taken from |
-| `provenance.spike` | C file(s) each hardware fact was taken from |
-| `provenance.note` | anything a future reader must know about the mapping |
-| `formats.<fmt>.tile` | `[M, N, K]` hardware tile for that operand format (derived: `[dim·pack, dim·pack, dim]`) |
-| `formats.<fmt>.codes_per_byte` | operand packing density (derived: fp4 = 2, else 1) |
-| `formats.<fmt>.prod_frac_bits` | exact product fraction width (derived: `2·m + 1`) |
-| `formats.<fmt>.via_lut` | decode goes through the LUT SRAMs (derived) |
-| `formats.fp6` | fail-closed: rejected at load until pinned against `lut_golden_model.py` |
+| `default` | nothing: what the chip does and every recorded result used |
+| `exact` | `reduce: exact`: the format's cost alone (perplexity path only) |
+| `bf16_tiles` | `reduce: bf16_tiles`: exact inside a block, bf16 across blocks (perplexity path only) |
+| `fp4_e2m1` | `operand_fmt: fp4_e2m1` |
 
-See [`../README.md`](../README.md) for install and the run command.
+## Hardware recipe fields
 
-## Recipe → mxq (`scheme.py`)
+All of these are in `build_id` except the labels (`name`, `description`, `provenance`).
 
-The mxquant and accuracy models run mxq (`microscaling-quant/`) with the arithmetic the recipe
-describes, and `scheme.py` is the only place that translation lives:
+| field | meaning | read by |
+|---|---|---|
+| `array.meshRows`, `array.meshColumns` | the mesh dimension `dim`; must be equal | mxquant (window), spike (`-DGEMMINI_DIM`), ppa (`--cols`), perf (`--rows/--cols`), emitters |
+| `array.tileRows`, `array.tileColumns` | PEs per tile | nothing in Python |
+| `types.meshProdPrecisionList` | per-lane product precision; must be uniform (spike has one `prod_e/prod_m`) | mxquant, spike, ppa (`--prod`) |
+| `types.meshAccPrecisionList` | the accumulator ladder down the column, one entry per lane | mxquant, spike, ppa (`--rows`) |
+| `types.*[].expWidth`, `sigWidth` | exponent bits; significand bits including the implicit bit (mantissa = `sigWidth - 1`) | same |
+| `types.*[].count`, `isRecoded`, `pad` | passed through, not read | |
+| `types.prodFloor` | a product below 2^prodFloor is flushed to zero (MxFPMul: -16); `null` for no flush | mxquant |
+| `mx.scaleSize` | elements per E8M0 scale on the operands | mxquant, spike (`GROUP`) |
+| `mx.scaleSizeOut` | the requantizer's output group | spike (`GROUP_OUT`) |
+| `mx.enable_lut` | the LUT unit is present (LUT formats send 4-bit indices into 16-entry LUTs) | perf (`--lut`); `check` warns on a LUT format when false |
+| `accumulator.acc_read_full_width`, `acc_read_small_width` | accumulator read widths | nothing in Python |
+| `scratchpad.banks`, `scratchpad.rows` | scratchpad geometry | emitters (`bank_num`, `bank_rows`) |
+| `implementation.clock_ns` | target clock period | ppa (`--clock-ns`), perf (`--clock-ns`) |
+| `implementation.utilization` | placement utilization | ppa (`--util`) |
+| `provenance.*` | where each number was taken from | people |
+
+## Run recipe fields
+
+| field | meaning | default |
+|---|---|---|
+| `operand_fmt` | MX operand format: `fp8_e4m3`, `fp8_e5m2`, `fp8_e4m3_quad`, `fp6_e3m2`, `fp6_e2m3`, `fp4_e2m1` | `fp8_e4m3` |
+| `rounding` | operand rounding: `rne` or `ties_away` | `rne` |
+| `scale_floor` | the block maximum is floored here before the scale is taken | 2^-23 |
+| `reduce` | how codes are multiplied: `hardware` (the recipe's array), `exact`, `bf16_tiles` | `hardware` |
+| `allow_lossy_chain` | run a chain whose codebook cannot be chosen exactly | `false` |
+| `fp32_tol` | kernel pass threshold on relative Frobenius error against fp32 | 0.15 |
+| `lut` (optional) | a LUT format's LUTs: `{"source": "data" or a .json of LUTs, "group": G, "pick": "host" or "hardware"}`; all three written. Absent: the kernel path's LUTs are the compiler's (from the data, G = 1), the perplexity path runs the full element grid, and `run_id` is unchanged. Read by no model yet | absent |
+
+`name` and `description` are labels and stay out of `run_id`. The hardware recipe says whether the LUT
+unit exists (`mx.enable_lut`); the run recipe says how it is used (`lut`). `lut` on a direct format
+(fp8_e4m3, fp4_e2m1) is refused; the kernel path also refuses `lut.group` other than 1. The perplexity cache key does not
+include `allow_lossy_chain` or `fp32_tol`, because the perplexity path never reads them.
+
+## Which path runs what
+
+`recipe.check(hw, run, path)` refuses, before any work, what a path cannot follow. The perplexity
+path (mxq alone) runs any pair whose format and reducer exist. The kernel path (emitters, spike,
+the chip's requantizer) is fixed in several places, which `recipe.py` names as constants:
+
+| constant | value | fixed by |
+|---|---|---|
+| `KERNEL_DIM` | 16 | the emitters' tile plan and libgemmini's `DIM` |
+| `KERNEL_BLOCK` | 32 | `mx_host.h` `MX_BLOCK`, `compiler/formats.BLOCK`, spike's `GROUP` |
+| `KERNEL_SCRATCHPAD` | 4 banks x 4096 rows | libgemmini `gemmini_params.h` |
+| `KERNEL_ROUNDING` | `rne` | the requantizer in `gemmini.cc` and `mx_host.h` |
+| `KERNEL_SCALE_FLOOR` | 2^-23 | the requantizer |
+
+The kernel path also needs `reduce: hardware`, since it grades the chip. `tests/test_recipe_drift.py`
+holds these constants and `baseline.json` equal to libgemmini, the Chisel source, the emitters and
+`rtl_exact/`.
+
+## Recipes to mxq (`scheme.py`)
 
 | function | gives | from |
 |---|---|---|
-| `format_name(recipe)` | mxq format name (`MXFP8_E4M3`, `MXFP6_E3M2`, `MXFP4`) | `runtime.operand_fmt` |
-| `quantizer(recipe)` | `block.mxgemmini.quantize` with `block_size`, `rounding_mode="rne"`, `scale_floor=2^-23` always passed explicitly | `software.block` |
-| `datapath(recipe)` | `(MXGEMMINI(prod_e, prod_m), [(e, m) per lane], window = dim)` | `types.meshProdPrecisionList`, `types.meshAccPrecisionList`, `array.meshRows` |
-| `shipped_datapath(recipe)` | the same on `MXQUANT(prod_e, prod_m)` — the as-shipped definition | same |
-| `scheme(recipe)` | an mxq `Scheme` (quantizer for A and B + `matmul.systolic` on the datapath) for model-level use | all of the above |
+| `mxq_format(dtype)` | mxq's format name (`MXFP8_E4M3`, `MXFP4`, ...) | `run.operand_fmt` |
+| `quantizer(hw, run)` | `block.mxgemmini.quantize` with block size, rounding and scale floor passed explicitly | `mx.scaleSize`, `run.rounding`, `run.scale_floor` |
+| `mxgemmini(hw)` | `MXGEMMINI(prod_e, prod_m, prod_floor)` | product list, `types.prodFloor` |
+| `datapath(hw)` | `(mxgemmini(hw), [(e, m) per lane], window = dim)` | plus the ladder and `dim` |
+| `shipped_datapath(hw)` | the same on `MXQUANT(prod_e, prod_m)`, the as-shipped definition | same |
+| `scheme(hw, run)` | an mxq `Scheme`: the quantizer for A and B, and the reducer `run.reduce` names | all of the above |
 
 Refused with `RecipeError`, never approximated: a non-uniform product list, an accumulator list
-whose length is not the mesh dimension, and — at model level (`scheme()`) — `use_lut`/`enable_lut`
-recipes and codebook formats (mxq has no codebooks; the mxquant model still grades those formats
-because it feeds `datapath()` the wire operands). Ignored knowingly, because mxq models the
-arithmetic and not the machine around it: `tileRows/tileColumns`, `isRecoded/pad`, `scaleSizeOut`,
-`target_code_exp`, `seam`, `intermediate_dtype`, `out_dtype`, `supported_backends`.
-`tests/selftest_scheme.py` holds `scheme(recipe).matmul` bit-identical to the hardware team's
-extracted model (`app/mxmesh/fp8`) on every recipe.
+whose length is not the mesh dimension. The LUT formats run on their full element grid on the
+perplexity path, and its record says so.
+`tests/selftest_scheme.py` holds `scheme(hw, run).matmul` bit-identical to the extracted hardware
+model (`rtl_exact/mxmesh/fp8`) on every recipe.
 
-## Silicon cost (PPA)
+## Silicon cost (ppa) and predicted performance (perf)
 
-`models/ppa/ppa.py` maps a recipe onto the MxGemmini area/power model (`../MxGemmini-workspace/ppa`, override with `MX_PPA_ROOT`) and every graded run records the result under `metrics["ppa"]`. No recipe fields are added: the model consumes the hashed sections (`acc` ladder, product precision, mesh dims, operand format) directly. Standalone: `python -m models.ppa.ppa --config <recipe> [--json]`. Numbers are post-synthesis (tstech16c, 2.0 ns), calibrated at 16x16 only.
+`models/ppa/ppa.py` maps a hardware recipe and the run's operand format onto the MxGemmini area and
+power model (`../MxGemmini-workspace/ppa`, or `MX_PPA_ROOT`). The clock and utilization come from
+`implementation`. The model is calibrated at 16x16 in tstech16c at tt0p8v25c; those are labels of the
+calibration, not settings. Standalone: `python -m models.ppa.ppa --hw <recipe> [--run <run>] [--json]`.
 
-## Predicted performance (perf)
-
-`models/perf/perf.py` maps the recipe plus each stage's GEMM shape onto the RTL-calibrated performance model (`../MxGemmini-workspace/ppa/perf/perf_model.py`); every graded run records predicted cycles, wall time, utilization, phase breakdown and energy-at-achieved-utilization under `metrics["perf"]`. The prediction is a full kernel timeline (setup, loads, LUT, compute, drain) and is **not comparable to spike's stage cycles**, which are a functional op counter — both are recorded, labelled, never graded against each other. Standalone: `python -m models.perf.perf --config <recipe> --m 64 --k 64 --n 64 [--json]`. Again no recipe fields are added.
+`models/perf/perf.py` maps the same pair plus each stage's GEMM shape onto the performance model
+(`../MxGemmini-workspace/ppa/perf/perf_model.py`). Its prediction is a full kernel timeline and is
+not comparable to spike's stage cycles, which count operations. Both are recorded and labelled.
+Standalone: `python -m models.perf.perf --hw <recipe> [--run <run>] --m 64 --k 64 --n 64 [--json]`.

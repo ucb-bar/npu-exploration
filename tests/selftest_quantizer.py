@@ -2,9 +2,9 @@
 
 Two claims, checked against two independent artifacts rather than asserted:
 
-1. **It is MXQuant.** ``app/mxq_golden.quantize_operand`` reaches ``quantize_mx_block32`` by import,
+1. **It is MXQuant.** ``compiler/operands.quantize_operand`` reaches ``quantize_mx_block32`` by import,
    never by transcription, so it cannot drift. The wire encoding on top of it is lossless by
-   construction and ``golden()`` asserts that on every call.
+   construction and ``encode()`` asserts that on every call.
 
 2. **It is what the baremetal examples run.** The shipped
    ``gemmini-rocc-tests/include/matmul_fp8_*.h`` headers contain the exact operand bytes spike is
@@ -15,7 +15,7 @@ Claim 2 is the load-bearing one. It is what makes "the ELF our compiler emits" a
 gemmini-rocc-tests" numerically the same program, which is the premise of the whole port
 (``planning/merlin_glue_port_plan.md`` D1/D3).
 
-Needs the captured tiles (``python3 -m app.capture_llama_tiles``); skips cleanly without them.
+Needs the captured tiles (``python3 -m tests.fixtures.llama_tiles``); skips cleanly without them.
 
     .venv/bin/python tests/selftest_quantizer.py
 """
@@ -31,12 +31,13 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from app import mxformats                                    # noqa: E402
-from app.mxq_golden import MXQ_ROOT, quantize_operand        # noqa: E402
+from compiler import formats                                    # noqa: E402
+from compiler.operands import quantize_operand                  # noqa: E402
 
 #: The baremetal reference. D1: we depend on this tree for `gemmini.h` and read it for provenance;
 #: nothing here is built against it.
 ROCC = REPO.parent / "software" / "gemmini-rocc-tests"
+MXQ_ROOT = REPO / "MXQuant"                       # the old MXQuant clone, optional: only its logged tiles are read
 DATA = MXQ_ROOT / "end_to_end_linear" / "systolic_simulation" / "data_evalrun_512"
 
 #: (header, M, K, N, layer, projection) — mirrors gen_matmul_llama.SHAPES for the FP8 entries.
@@ -79,7 +80,7 @@ def load_pair(M: int, K: int, N: int, layer: str, proj: str):
 def main() -> int:
     if not DATA.is_dir():
         print(f"SKIP: captured tiles missing at {DATA}\n"
-              f"      run: .venv/bin/python3 -m app.capture_llama_tiles")
+              f"      run: .venv/bin/python3 -m tests.fixtures.llama_tiles")
         return 0
     if not (ROCC / "include").is_dir():
         print(f"SKIP: baremetal reference missing at {ROCC}")
@@ -88,25 +89,25 @@ def main() -> int:
     checks = fails = 0
 
     # --- 1. the format table is self-consistent ------------------------------------------------
-    for key, f in mxformats.FORMATS.items():
+    for key, f in formats.FORMATS.items():
         assert f.name == key, f"{key}: name/key mismatch"
         assert f.bits in (4, 8), f"{key}: odd wire width {f.bits}"
         assert (f.entry_bits is not None) == f.lut, f"{key}: entry_bits must be set iff LUT-indexed"
         assert f.out_requant in ("mxquant", "model"), f"{key}: bad out_requant"
         checks += 1
-    print(f"format table          {len(mxformats.FORMATS)} formats, "
-          f"{sum(f.proven for f in mxformats.FORMATS.values())} proven")
+    print(f"format table          {len(formats.FORMATS)} formats, "
+          f"{sum(f.proven for f in formats.FORMATS.values())} proven")
 
     # --- 2. an unproven format fails closed ----------------------------------------------------
     # Picked dynamically: formats become proven as Step 5 lands them, and a hardcoded name here
     # would turn "we proved another format" into a test failure.
-    unproven = next((f.name for f in mxformats.FORMATS.values() if not f.proven), None)
+    unproven = next((f.name for f in formats.FORMATS.values() if not f.proven), None)
     if unproven is None:
         print("  (every format is proven -- nothing left to fail closed)")
     else:
         try:
-            mxformats.get(unproven, where="selftest")
-        except mxformats.MxFormatError:
+            formats.get(unproven, where="selftest")
+        except formats.MxFormatError:
             checks += 1
         else:
             print(f"FAIL: unproven format {unproven} was accepted"); fails += 1
@@ -114,13 +115,13 @@ def main() -> int:
     # --- 3. the elaboration gate actually gates ------------------------------------------------
     # fp4 on an E4M3-only build: spike would run it, the elaborated hardware could not.
     try:
-        mxformats.check_elaboration(["fp4_e2m1"], "MxGemminiRocketConfig")
-    except mxformats.MxFormatError:
+        formats.check_elaboration(["fp4_e2m1"], "MxGemminiRocketConfig")
+    except formats.MxFormatError:
         checks += 1
     else:
         print("FAIL: fp4 was accepted on an E4M3-only elaboration"); fails += 1
-    mxformats.check_elaboration(["fp8_e4m3"], "MxGemminiRocketConfig")
-    mxformats.check_elaboration(["fp4_e2m1"], "MxAllGemminiRocketConfig")
+    formats.check_elaboration(["fp8_e4m3"], "MxGemminiRocketConfig")
+    formats.check_elaboration(["fp4_e2m1"], "MxAllGemminiRocketConfig")
     checks += 2
 
     # --- 4. byte equality with the shipped baremetal headers -----------------------------------

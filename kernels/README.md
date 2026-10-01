@@ -8,6 +8,9 @@ becomes N stages.
 |---|---|
 | `spec.py` | `Stage`, `KernelSpec`, `from_module()` — the machinery; rarely edited |
 | `registry.py` | the catalogue: name → builder. **Add kernels here.** |
+| `host_ops.py` | the host op vocabulary (softmax, rmsnorm, silu, swiglu, add, rope, transpose): Python twin of `mx_host.h`; a `HostStage` names one of these |
+| `trace.py` | PyTorch module → KernelSpec |
+| `captures/llama_layer.py`, `captures/llama_model.py` | real TinyLlama tensors for the llama kernels (`python -m kernels.captures.llama_layer`; needs the MXQuant clone) |
 
 Two stage kinds:
 
@@ -62,3 +65,13 @@ equivalents, where the glue *does* run on Rocket, it is 99.9% of the cycles
 ([`../planning/llama_layer_hw_plan.md`](../planning/llama_layer_hw_plan.md) §8.3).
 
 See [`../README.md`](../README.md) for install and the run command.
+
+## Tracing a torch module (kernels/trace.py)
+
+`trace(module, x, name=...)` turns a plain PyTorch module into a KernelSpec via torch.fx --
+bias-free Linears, matmuls (rhs transpose folded to `.T`), scaled/causal softmax, add,
+`silu(g)*u` (swiglu), `nn.RMSNorm`, and `kernels.trace.RoPE` (rotary embedding with fixed
+`[M][H]` cos/sin tables). A custom module is lowered whole by registering its type in
+`kernels.trace.TRANSLATORS` (it is then an FX leaf, never inlined). Anything else raises, including
+a shape the mesh cannot take. Every traced spec satisfies `spec.reference() == module(x)` in fp32
+(tests/selftest_trace.py). `compile_kernel.py --module FILE.py:Name` compiles one straight to an ELF.
