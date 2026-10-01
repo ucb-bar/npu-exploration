@@ -14,6 +14,16 @@ exact invocation and the workspace git head.
 
 Root discovery: ``$MX_PPA_ROOT``, else ``<repo>/../MxGemmini-workspace/ppa``.
 Absence is not an error here -- callers treat :class:`PpaError` as "skip, log".
+
+Two additions, reported beside the totals and never folded into them:
+
+* ``memory``: the on-chip memory inventory from the workspace's ``memory_model.py`` (SRAM macros per
+  memory, area, leakage, access energy, access / cycle time against the recipe's clock). It needs the
+  SRAM compiler tables (``tech/sram_qrt/qrt_table.csv``, PDK data kept out of the workspace repo); without
+  them the record says so. The Gemmini total already contains the MEASURED Scratchpad block, so the
+  inventory is not added to ``area_um2`` / ``power_mw``.
+* ``pe``: the PE mode, ops per PE per cycle and RTL-test status of the run's format, from the workspace's
+  ``pair_modes.spec`` (mxgen ``requiredPEMode``).
 """
 from __future__ import annotations
 
@@ -195,7 +205,71 @@ def run_ppa(recipe, dtype: str = "fp8_e4m3") -> dict:
         "enable_lut": recipe.enable_lut,
         "workspace_head": _workspace_head(root),
     }
+    out["pe"] = pe_spec(dtype)
+    out["memory"] = memory_inventory(recipe)
     return out
+
+
+#: The SRAM compiler tables memory_model.py reads, relative to the workspace root. PDK data: not in the repo.
+QRT_TABLE = Path("tech/sram_qrt/qrt_table.csv")
+
+#: The workspace's memory preset for the chip our hardware recipes describe: "rocket" is the Gemmini-only Rocket
+#: SoC, MxGemminiRocketConfig = gemmini-mx-cleanup standaloneMxFPConfig, the machine config/hardware/baseline.json
+#: states. The recipe gives the scratchpad; accumulator, scale memory, L2 and L1 come from the preset.
+MEMORY_SYSTEM = "rocket"
+GEMMINI_MEMORIES = ("smem", "acc", "scale")
+
+
+def _workspace_module(name: str):
+    """Import one of the workspace's pure-Python modules (pair_modes, memory_model) from ppa_root()."""
+    import importlib
+    root = str(ppa_root())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    return importlib.import_module(name)
+
+
+def pe_spec(dtype: str) -> dict:
+    """The PE mode this format runs in, as the workspace's pair_modes.spec states it (activation = weight = dtype)."""
+    tok = format_tokens(dtype)[0]
+    try:
+        sp = _workspace_module("pair_modes").spec(tok, tok, uses_lut(dtype))
+    except Exception as exc:                                   # the workspace moved: report, do not fail ppa
+        return {"available": False, "why": f"pair_modes.spec: {exc}"}
+    return {"mode": sp["mode"], "ops_per_pe_cycle": sp["products"], "rtl_tested": sp["rtl_ok"] is not None,
+            "rtl_ok": sp["rtl_ok"], "note": sp["note"] or None}
+
+
+def memory_inventory(recipe) -> dict:
+    """The recipe machine's on-chip memories, from the workspace's memory_model.py. Never raises."""
+    try:
+        root = ppa_root()
+        if not (root / QRT_TABLE).exists():
+            return {"available": False,
+                    "why": f"no SRAM compiler tables at {root / QRT_TABLE} (PDK data, not in the workspace repo)"}
+        import argparse
+        mm = _workspace_module("memory_model")
+        ap = argparse.ArgumentParser()
+        mm.add_args(ap, preset=MEMORY_SYSTEM)
+        a = mm.apply_system(ap.parse_args([]), preset=MEMORY_SYSTEM)
+        a.smem_kb = recipe.banks * recipe.rows * recipe.dim / 1024      # banks x rows of dim bytes
+        a.smem_banks, a.smem_words, a.smem_wordbytes = recipe.banks, 1, recipe.dim
+        a.acc_cols = recipe.dim
+        mems = mm.resolve(mm.inventory(a), mm.load_qrt(), a.vdd, a.temp, a.vt)
+    except Exception as exc:
+        return {"available": False, "why": f"memory_model: {exc}"}
+    per = {name: {"macro": m["macro"], "count": m["count"], "exact": m["exact"],
+                  "area_um2": round(m["area_total_um2"], 1), "leak_mw": round(m["leak_total_uW"] / 1e3, 4),
+                  "e_read_pj": round(m["e_read_pJ"], 3), "e_write_pj": round(m["e_write_pJ"], 3),
+                  "taa_ns": m["taa_ns"], "tcyc_ns": m["tcyc_ns"], "meets_clock": m["tcyc_ns"] <= recipe.clock_ns}
+           for name, m in mems.items()}
+    gem = [n for n in per if n in GEMMINI_MEMORIES]
+    return {"available": True, "system": MEMORY_SYSTEM, "vdd": a.vdd, "temp": a.temp, "vt": a.vt,
+            "from_recipe": ["smem"], "memories": per,
+            "gemmini_area_um2": round(sum(per[n]["area_um2"] for n in gem), 1),
+            "gemmini_leak_mw": round(sum(per[n]["leak_mw"] for n in gem), 4),
+            "slower_than_clock": [n for n, m in per.items() if not m["meets_clock"]],
+            "note": "separate from area_um2 / power_mw: the Gemmini total already has the measured Scratchpad block"}
 
 
 def line(ppa: dict) -> str:

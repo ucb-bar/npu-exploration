@@ -127,3 +127,18 @@ count the C LUT the emitter also loads for a bf16 output; the record notes it). 
 ladder (`--acc-rows`); it has no `--prod`, so a non-e4m3 product is noted in the record, not priced there.
 The kernel pipeline runs perf as measured (today's kernels, the validated configuration);
 `python -m models.perf.perf --ideal [--tiles TM TN TK] [--dma-bw B] [--recipe-spad]` estimates a production GEMM.
+
+Two more things each model reports, beside its totals and never added to them:
+
+- `pe` (ppa) and `pe_mode` / `ops_per_pe_cycle` (perf, per stage): the PE mode the format runs in, its
+  products per PE per cycle, and whether that mode was RTL-tested (`pair_modes.spec`, same format on both
+  operands; mixed activation x weight pairs would need a second operand format in the run recipe, so they are
+  not offered).
+- `memory`: the SRAM macros the workspace's `memory_model.py` picks for the recipe's scratchpad (banks x rows x
+  DIM bytes), the accumulator and the scale memory, with area, leakage, access energy and whether each meets the
+  recipe clock (ppa); and perf's `--mem` read/write energy per stage (perf, on the memories perf itself uses:
+  Radiance's as measured). Both need the SRAM compiler tables (`tech/sram_qrt/qrt_table.csv`), which are PDK
+  data outside the workspace repo; without them `memory` is `{"available": false, "why": ...}` and nothing else
+  changes. The memory energy is separate on purpose: ppa's power already contains the measured Scratchpad
+  block, so adding the two would count the scratchpad twice. `tests/ppa_memfixture.py` runs both paths on an
+  invented table to check the plumbing only.

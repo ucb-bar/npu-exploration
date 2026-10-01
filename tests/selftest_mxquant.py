@@ -149,7 +149,7 @@ def main() -> int:
     s_arith, sched, window = scheme.shipped_datapath(base)
     PA2, XA2 = block.mxquant.quantize(torch.from_numpy(np.ascontiguousarray(x.T)), "MXFP8_E4M3", axis=0)
     PB2, XB2 = block.mxquant.quantize(torch.from_numpy(W), "MXFP8_E4M3", axis=0)
-    y_ship = matmul.systolic(PA2, XA2, PB2, XB2, s_arith, sched, window=window).numpy()
+    y_ship = matmul.systolic(PA2, XA2, PB2, XB2, s_arith, sched, size=window).numpy()
     check("shipped_y is block.mxquant + MXQUANT on the recipe's ladder", same(res["shipped_y"], y_ship))
     check("shipped differs from the hardware reference (the gap is real)", not same(res["shipped_y"], res["y"]))
     check("model record names mxq, the arithmetic and the build_id",

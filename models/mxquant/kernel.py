@@ -232,7 +232,7 @@ def _mesh_hw(recipe, arith, sched, window: int, dtype: str, fmt: str):
             if a_px is not None:
                 PA, XA = a_px                        # a chained operand: the requantizer already made it
         Y = matmul.systolic(PA.float(), XA.float(), PB.float(), XB.float(), arith, sched,
-                            window=window, block_size=recipe.block)
+                            size=window, block_size=recipe.block)
         return Y.numpy().astype(np.float32)
     return mesh
 
@@ -246,7 +246,7 @@ def _mesh_shipped(recipe, arith, sched, window: int, fmt: str):
                                         fmt, axis=0, block_size=recipe.block)
         PB, XB = block.mxquant.quantize(torch.from_numpy(np.ascontiguousarray(W, np.float32)),
                                         fmt, axis=0, block_size=recipe.block)
-        Y = matmul.systolic(PA, XA, PB, XB, arith, sched, window=window, block_size=recipe.block)
+        Y = matmul.systolic(PA, XA, PB, XB, arith, sched, size=window, block_size=recipe.block)
         return Y.numpy().astype(np.float32)
     return mesh
 

@@ -124,6 +124,40 @@ def main() -> int:
               len(two["stages"]) == 2 and two["total_cycles_predicted"]
               == sum(p["cycles_predicted"] for p in two["stages"]))
 
+    if live:
+        print("B: memory energy beside the timeline (never in it)")
+        from models.ppa.ppa import ppa_root
+        stage = {"stage": 0, "m": 128, "k": 128, "n": 128, "out_dtype": "bf16"}
+        real = run_perf(r, "fp6_e3m2", [stage])
+        check("real workspace: memory unavailable, and says why",
+              real["memory"]["available"] is False and "SRAM compiler tables" in real["memory"]["why"])
+        check("the stage states its PE mode and ops/PE/cycle (fp6 LUT: mode 4, 4)",
+              (real["stages"][0].get("pe_mode"), real["stages"][0].get("ops_per_pe_cycle")) == (4, 4))
+        import shutil
+        sys.path.insert(0, str(REPO / "tests"))
+        from ppa_memfixture import synthetic_workspace
+        fx = synthetic_workspace(ppa_root())
+        old_root = os.environ.get("MX_PPA_ROOT")
+        os.environ["MX_PPA_ROOT"] = str(fx)
+        try:
+            syn = run_perf(r, "fp6_e3m2", [stage])
+        finally:
+            if old_root is None:
+                os.environ.pop("MX_PPA_ROOT", None)
+            else:
+                os.environ["MX_PPA_ROOT"] = old_root
+            shutil.rmtree(fx.parent, ignore_errors=True)
+        sm = syn["stages"][0].get("memory", {})
+        check("synthetic SRAM table: --mem parsed per stage (plumbing only; numbers invented)",
+              syn["memory"].get("available") is True and {"smem", "acc", "scale"} <= set(sm.get("memories", {})),
+              str(syn["memory"])[:120])
+        if sm:
+            check("memory energy parsed (uJ macros > 0, reads > 0)",
+                  sm["uj_macros"] > 0 and sm["memories"]["smem"]["reads"] > 0)
+            check("kernel memory total = stage sum", syn["memory"]["uj_macros"] == round(sm["uj_macros"], 3))
+        check("cycles and energy do not move with --mem",
+              (syn["total_cycles_predicted"], syn.get("energy")) == (real["total_cycles_predicted"], real.get("energy")))
+
     print("fail-soft: bad MX_PPA_ROOT raises PerfError, nothing else")
     old = os.environ.get("MX_PPA_ROOT")
     os.environ["MX_PPA_ROOT"] = "/nonexistent-ppa"
