@@ -31,6 +31,7 @@ import torch  # noqa: E402
 import models  # noqa: E402
 from config import scheme  # noqa: E402
 from config.recipe import RecipeError, list_hardware, list_runs, load_hardware, load_run  # noqa: E402
+from config.recipe import check as check_recipes  # noqa: E402
 
 FAILURES: list[str] = []
 TINYLLAMA = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
@@ -109,6 +110,7 @@ def main() -> int:
 
     print("\n[3] mxq_config(hw, run).scheme() == scheme(hw, run) -----------------------")
     runs = [load_run(r) for r in list_runs()]
+    runs = [r for r in runs if r.lut is None]   # each base run, crossed with every format below
     variants = []
     for r in runs:
         if r.reduce == "bf16_tiles":
@@ -119,12 +121,18 @@ def main() -> int:
                 check("bf16_tiles is refused", True)
             continue
         for fmt in scheme.MXQ_FORMAT:
-            variants.append(dataclasses.replace(r, operand_fmt=fmt))
+            # A LUT format carries its run recipe's lut block (config/run/<fmt>.json), never one made here.
+            lut = load_run(fmt).lut if scheme.is_codebook(fmt) else None
+            variants.append(dataclasses.replace(r, operand_fmt=fmt, lut=lut))
         variants.append(dataclasses.replace(r, rounding="ties_away", scale_floor=1e-38))
     n = bad = 0
     for hname in list_hardware():
         hw = load_hardware(hname)
         for run in variants:
+            try:
+                check_recipes(hw, run, "perplexity")
+            except RecipeError:
+                continue                            # a LUT format this build's LUT unit does not serve
             want_s, got_s = scheme.scheme(hw, run), scheme.mxq_config(hw, run).scheme()
             for seed in (0, 1):
                 A, B = operands(seed)

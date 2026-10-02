@@ -351,7 +351,7 @@ def pack_operand(codes: np.ndarray, *, side: Literal["a", "b"],
 
 
 def quantize_operand(V: np.ndarray, *, side: Literal["a", "b"],
-                     dtype: str = "fp8_e4m3") -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+                     dtype: str = "fp8_e4m3", lut=None) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Quantize one matmul operand to the wire format the device reads.
 
     ``side`` names the operand, and that alone fixes both the blocking axis and the scale layout,
@@ -370,7 +370,8 @@ def quantize_operand(V: np.ndarray, *, side: Literal["a", "b"],
 
     Returns ``(codes, scales, codebooks)``. ``codebooks`` is ``None`` for a direct format and the
     packed ``[n_groups][words]`` uint32 LUT for a codebook format -- which is compile OUTPUT derived
-    from the data, so it cannot be reconstructed downstream and travels with the operands.
+    from the data, so it cannot be reconstructed downstream and travels with the operands. A codebook
+    format needs ``lut``, the run's :class:`compiler.codebook.Settings` (``config.recipe.lut_settings``).
 
     This matches the baremetal headers byte for byte: ``gen_matmul_llama.py:280-281`` quantizes A
     with ``axis="row"`` and writes ``A_scales_row[GK][M]`` from the transpose, and B with
@@ -406,11 +407,12 @@ def quantize_operand(V: np.ndarray, *, side: Literal["a", "b"],
         # microxcaling's level2_scratch does. See compiler/codebook.py.
         from compiler import codebook
 
+        _need_lut(f, lut)
         out = quantize_mx_block32(torch.from_numpy(V), fmt=f.mxq, axis=axis,
                                   round_mode=ROUND_MODE)
         P = out.P.numpy().astype(np.float32)
-        books = codebook.build_codebooks(P, axis=axis, fmt=f)
-        idx = codebook.assign_indices(P, books, axis=axis)
+        books = codebook.build_codebooks(P, axis=axis, fmt=f, lut=lut)
+        idx = codebook.assign_indices(P, books, axis=axis, g=lut.group)
         codes = pack_operand(idx, side=side, dtype=dtype)
         scales = e8m0_encode_exact(out.X.numpy().astype(np.float32))
         scales = np.ascontiguousarray(scales.T) if side == "a" else np.ascontiguousarray(scales)
@@ -427,12 +429,18 @@ def quantize_operand(V: np.ndarray, *, side: Literal["a", "b"],
     return codes, scales, None
 
 
+def _need_lut(f, lut) -> None:
+    if lut is None:
+        raise ValueError(f"{f.name} is LUT-indexed: pass lut=, the run's codebook settings "
+                         "(config.recipe.lut_settings), which the two recipes hold")
+
+
 class NotModelled(RuntimeError):
     """The reference cannot reproduce this edge, so no golden should be claimed for it."""
 
 
 def requantize_chained(C_bf16: np.ndarray, *, dtype: str = "fp8_e4m3",
-                       books: np.ndarray | None = None):
+                       books: np.ndarray | None = None, lut=None):
     """The A operand a CHAINED stage receives: what the device's requantizer wrote.
 
     Not the same thing as quantizing the intermediate on the host — the device requantizes with its
@@ -457,7 +465,7 @@ def requantize_chained(C_bf16: np.ndarray, *, dtype: str = "fp8_e4m3",
         return _requantize_direct_e4m3(C_bf16, f)
 
     if f.lut:
-        return _requantize_codebook(C_bf16, f, books)
+        return _requantize_codebook(C_bf16, f, books, lut)
 
     # The hardware's own requantizer, from the extracted mesh model.
     from rtl_exact.mxmesh import fp4 as M4, fp8 as M8
@@ -516,7 +524,7 @@ def _requantize_direct_e4m3(C: np.ndarray, f):
     return torch.from_numpy(np.ascontiguousarray(P.T)), torch.from_numpy(np.ascontiguousarray(X.T))
 
 
-def _requantize_codebook(C: np.ndarray, f, books):
+def _requantize_codebook(C: np.ndarray, f, books, lut):
     """The codebook requant-output path, transcribed statement for statement from ``gemmini.cc``.
 
     A codebook intermediate never leaves the device as a value: the requantizer picks a 4-bit INDEX
@@ -541,8 +549,9 @@ def _requantize_codebook(C: np.ndarray, f, books):
 
     if books is None:
         raise ValueError(f"{f.name} chains through a codebook; its C book is needed")
+    _need_lut(f, lut)
     vals = codebook.unpack_codebooks(books, fmt=f)
-    g = formats.LUT_GRANULARITY
+    g = lut.group
     # The requantizer reads the accumulator out of SMEM, where it is bf16 -- so the block maximum
     # is a maximum over bf16 values, not over the fp32 the caller happens to hold. Under
     # `rtl_exact` the caller's array is already bf16-valued and this is a no-op; it is here so the
@@ -571,7 +580,7 @@ def _requantize_codebook(C: np.ndarray, f, books):
 
 def wire_to_px(codes: np.ndarray, scales: np.ndarray, *, side: Literal["a", "b"],
                dtype: str = "fp8_e4m3", books: np.ndarray | None = None,
-               shape: tuple[int, int] | None = None):
+               shape: tuple[int, int] | None = None, lut=None):
     """Decode wire bytes back to the ``(P, X)`` pair a datapath model consumes.
 
     ``P`` is the block-normalized VALUE of each element and ``X`` its block scale — the two things
@@ -602,7 +611,8 @@ def wire_to_px(codes: np.ndarray, scales: np.ndarray, *, side: Literal["a", "b"]
     if f.lut:
         if books is None:
             raise ValueError(f"{f.name} is codebook-indexed; its books are needed to decode")
-        g = formats.LUT_GRANULARITY
+        _need_lut(f, lut)
+        g = lut.group
         vals = codebook.unpack_codebooks(books, fmt=f)
         r, c = idx.shape
         if side == "a":                              # one book per 2**G ROWS of A

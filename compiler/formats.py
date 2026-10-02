@@ -162,11 +162,6 @@ E8M0_BIAS = 127
 #: The output-only pseudo-format: the raw bf16 accumulator readout, no requantization.
 BF16_FMT_CODE = 3
 
-#: Codebook granularity ``G``: one 16-entry LUT per ``2**G`` rows of A / columns of B
-#: (``gemmini.cc:1392`` ``lut_idx = (i*TM + m) >> G``). Every shipped LUT test uses 1, and it is
-#: also what ``gemmini_mxquant_config_mvout``'s last argument carries.
-LUT_GRANULARITY = 1
-
 #: A codebook is 16 entries of ``entry_bits``, LE-packed into 32-bit words.
 def lut_words(entry_bits: int) -> int:
     """uint32 words per codebook: 3 for 6-bit entries (96 bits), 4 for 8-bit (128)."""

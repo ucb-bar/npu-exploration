@@ -241,7 +241,17 @@
   "mx": {
     "scaleSize": 32,
     "scaleSizeOut": 32,
-    "enable_lut": false
+    "enable_lut": true,
+    "lut": {
+      "projFormat": "LutFP6E3M2",
+      "rdataWidth": 6,
+      "raddrWidth": 4,
+      "numEntries": [64, 64, 64],
+      "numBits": [96, 96, 96],
+      "lutUpdateRegularityWidth": 16,
+      "actCodeWidth": 0,
+      "weiCodeWidth": 0
+    }
   },
   "scratchpad": {
     "banks": 4,
@@ -252,6 +262,7 @@
     "utilization": 0.965
   },
   "provenance": {
+    "lut": "standaloneMxFPConfig: lut = Some(GemminiLUTConfig()), the defaults in MxConfigFragments.scala:48-58 (LutFP6E3M2, 6-bit entries, 64 LUTs per table). enable_lut is GemminiArrayConfig's default true and is read by no RTL module",
     "note": "Derived from baseline by narrowing meshProdPrecisionList.",
     "prodFloor": "MxFPMul PROD_FLOOR = -16 (rtl_exact/rtl_datapath.py:139, mxq MXGEMMINI prod_floor)",
     "scratchpad": "libgemmini gemmini_params.h BANK_NUM 4, BANK_ROWS 4096 at DIM 16 (was mxgemm_emit.DEFAULT_GEOMETRY)",

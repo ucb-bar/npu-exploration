@@ -33,6 +33,8 @@ for _p in (REPO, REPO / "app", REPO / "compiler" / "targets" / "mx_gemmini_rocke
 from compiler import formats                        # noqa: E402
 from compiler.lower import MatmulStage, command_buffer   # noqa: E402
 from backend import runner                       # noqa: E402
+from config.recipe import emitter_params            # noqa: E402
+from tests.fixtures import luts                     # noqa: E402
 
 ROCC = REPO.parent / "software" / "gemmini-rocc-tests"
 
@@ -90,8 +92,9 @@ def run_case(fmt_name: str, header: str, test: str) -> tuple[bool, str]:
 
     bundle = {"a_codes": a_codes, "b_codes": b_codes,
               "a_scales": a_scales, "b_scales": b_scales}
+    hw, run = luts.recipes(f.name)                  # the shipped headers are built at their run recipe's G
     if f.lut:
-        g = formats.LUT_GRANULARITY
+        g = run.lut.group
         words = formats.lut_words(f.entry_bits)
         for key, name, n_lut in (("a_lut", "A_lut", M >> g), ("b_lut", "B_lut", N >> g),
                                  ("c_lut", "C_lut", M >> g)):
@@ -99,6 +102,7 @@ def run_case(fmt_name: str, header: str, test: str) -> tuple[bool, str]:
 
     stage = MatmulStage(m=M, k=K, n=N, weight="W0", out="Y0", lhs="X", out_dtype="bf16")
     cb = command_buffer([stage], [bundle], operand_fmt=f.name)
+    cb["params"] = emitter_params(hw, run)
 
     with tempfile.TemporaryDirectory() as td:
         elf = runner.compile_command_buffer(cb, td)
@@ -150,8 +154,9 @@ def run_chain_case(fmt_name: str, header: str, test: str) -> tuple[bool, str]:
         {"b_codes": parse_array(text, "B2_in")[0].reshape(K, N // ppb),
          "b_scales": parse_array(text, "B2_scales_col")[0].reshape(gk, N)},
     ]
+    hw, run = luts.recipes(f.name)
     if f.lut:
-        g, w = formats.LUT_GRANULARITY, formats.lut_words(f.entry_bits)
+        g, w = run.lut.group, formats.lut_words(f.entry_bits)
         c1 = parse_array(text, "C1_lut")[0].reshape(M >> g, w)
         bundles[0] |= {"a_lut": parse_array(text, "A_lut")[0].reshape(M >> g, w),
                        "b_lut": parse_array(text, "B_lut")[0].reshape(N >> g, w),
@@ -169,6 +174,7 @@ def run_chain_case(fmt_name: str, header: str, test: str) -> tuple[bool, str]:
         MatmulStage(m=M, k=N, n=N, weight="W1", out="Y0", lhs="T0", out_dtype="bf16"),
     ]
     cb = command_buffer(stages, bundles, operand_fmt=f.name)
+    cb["params"] = emitter_params(hw, run)
 
     with tempfile.TemporaryDirectory() as td:
         elf = runner.compile_command_buffer(cb, td)

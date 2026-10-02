@@ -183,7 +183,7 @@ def main() -> int:
     st = W._settings(w, base, dflt)
     check("key includes the mxq commit", models.mxq_commit() and st["mxq_commit"] == models.mxq_commit())
     check("a direct format carries no codebook note", "codebook" not in st)
-    st6 = W._settings(w, base, Run(operand_fmt="fp6_e3m2"))
+    st6 = W._settings(w, base, load_run("fp6_e3m2"))
     check("a codebook format is run on the full grid and says so", st6.get("codebook") == "not modelled" and st6["format"] == "MXFP6_E3M2")
 
     print("\n[4] refusals and availability ---------------------------------------------")
@@ -192,7 +192,7 @@ def main() -> int:
         check("an unknown operand format is refused before any GPU work", False, "no RecipeError")
     except RecipeError as exc:
         check("an unknown operand format is refused before any GPU work", True, str(exc)[:70])
-    check("a codebook format builds a Scheme (full grid)", scheme.scheme(base, Run(operand_fmt="fp6_e3m2")).a.keywords["fmt"] == "MXFP6_E3M2")
+    check("a codebook format builds a Scheme (full grid)", scheme.scheme(base, load_run("fp6_e3m2")).a.keywords["fmt"] == "MXFP6_E3M2")
     ok, why = W.available()
     check("available() answers with a reason", isinstance(ok, bool) and isinstance(why, str), why)
 

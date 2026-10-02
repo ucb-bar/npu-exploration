@@ -200,11 +200,13 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
     # precisions, the block-scale group. It drives the software model, spike and the Chisel from
     # one artifact, so a run cannot be graded against a machine that was never built.
     from config.recipe import check as check_recipes
+    from config.recipe import emitter_params, lut_settings
     from config.recipe import load_hardware, load_run
     recipe = recipe or load_hardware("baseline")
     run_recipe = run_recipe or load_run("default")
     check_recipes(recipe, run_recipe, "kernel")
     dtype, tol, allow_lossy_chain = run_recipe.operand_fmt, run_recipe.fp32_tol, run_recipe.allow_lossy_chain
+    lut = lut_settings(recipe, run_recipe)
     tel.log("recipe", f"{recipe.describe()}   build_id={recipe.build_id()}  "
                       f"src={recipe.path.name}")
     tel.log("run", f"{run_recipe.describe()}   run_id={run_recipe.run_id()}")
@@ -265,7 +267,7 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
     INTERMEDIATE_DTYPE = _f.mlir or _f.name
     hw = None
     low = lower(spec, dtype, per_stage=per_stage_elf, allow_lossy_chain=allow_lossy_chain,
-                warn=lambda m: tel.log("warning", m))
+                warn=lambda m: tel.log("warning", m), lut=lut)
     refuse_graph_dtype(low, spec.name, dtype)          # a non-fp8 graph ELF returns NaN from spike; refuse, do not grade
     graphed, fused = low.kind == "graph", low.kind == "fused"
 
@@ -287,11 +289,11 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
                 pending["mxquant"] = why                     # a string: unavailable, say why
             elif legacy is not None:
                 pending["mxquant"] = pool.submit(lambda: (
-                    legacy.simulate(spec, rtl_exact=True, dtype=dtype, edges=edges),
-                    legacy.simulate(spec, rtl_exact=False, dtype=dtype, edges=edges)))
+                    legacy.simulate(spec, rtl_exact=True, dtype=dtype, edges=edges, lut=lut),
+                    legacy.simulate(spec, rtl_exact=False, dtype=dtype, edges=edges, lut=lut)))
             else:
                 pending["mxquant"] = pool.submit(mxquant_model.run, spec, recipe,
-                                                 dtype=dtype, edges=edges)
+                                                 dtype=dtype, edges=edges, lut=lut)
         if "ppa" in models:
             def _ppa():
                 from models.ppa.ppa import run_ppa
@@ -312,7 +314,7 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
         start_models(edges, stage_records)
     elif graphed:
         cb, stage_records, edges = low.cb, low.stages, low.edges
-        cb["params"] = recipe.geometry()                 # the emitters' scratchpad plan, from the recipe
+        cb["params"] = emitter_params(recipe, run_recipe)    # the emitters' scratchpad and LUT plan, from the recipes
         gdir = workdir / "graph"
         n_mesh = sum(r["where"] == "mesh" for r in stage_records)
         n_host = len(stage_records) - n_mesh
@@ -341,7 +343,7 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
             *[int(v) for v in cb["graph"]["shapes"][cb["graph"]["result"]]])
     elif fused:
         cb, stage_records, edges = low.cb, low.stages, low.edges
-        cb["params"] = recipe.geometry()
+        cb["params"] = emitter_params(recipe, run_recipe)
         chain_dir = workdir / "chain"
         tel.log("lower", f"{len(stage_records)} stage(s) -> ONE command buffer "
                          f"({len(cb['commands'])} commands, {len(cb['tensors'])} leaf tensors)"
@@ -456,14 +458,14 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
             if requant_chain and i > 0:
                 a_codes, a_scales = carried[prev]
                 b_codes, b_scales, _bl = quantize_operand(
-                    st.weight.numpy().astype(np.float32), side="b", dtype=dtype)
+                    st.weight.numpy().astype(np.float32), side="b", dtype=dtype, lut=lut)
                 ops = {"a_codes": a_codes, "a_scales": a_scales,
                        "b_codes": b_codes, "b_scales": b_scales}
             else:
                 b_np = (st.weight.numpy().astype(np.float32) if st.weight is not None
                         else operand(st.rhs))
-                a_c, a_s, _al = quantize_operand(operand(lhs_ref), side="a", dtype=dtype)
-                b_c, b_s, _bl2 = quantize_operand(b_np, side="b", dtype=dtype)
+                a_c, a_s, _al = quantize_operand(operand(lhs_ref), side="a", dtype=dtype, lut=lut)
+                b_c, b_s, _bl2 = quantize_operand(b_np, side="b", dtype=dtype, lut=lut)
                 ops = {"a_codes": a_c, "a_scales": a_s, "b_codes": b_c, "b_scales": b_s}
 
             # A mesh stage commits through the requantizer only when a later stage will consume it in
@@ -473,7 +475,7 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
                 [MatmulStage(m=m_, k=k_, n=n_, weight=f"W{i}", out=out_name, lhs=lhs_name,
                              out_dtype=INTERMEDIATE_DTYPE if emit_fp8 else "bf16")],
                 [ops], operand_fmt=dtype)
-            cb["params"] = recipe.geometry()
+            cb["params"] = emitter_params(recipe, run_recipe)
             stage_dir = workdir / f"stage{i}"
 
             if build_only:

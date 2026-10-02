@@ -165,7 +165,7 @@ def from_spec(spec) -> Graph:
     return g
 
 
-def operand_bundles(g: Graph, *, dtype: str = "fp8_e4m3") -> dict:
+def operand_bundles(g: Graph, *, dtype: str = "fp8_e4m3", lut=None) -> dict:
     """Quantize every LEAF, on whichever side(s) it is used. Computed values are quantized on device.
 
     A leaf used as both A and B (attention's ``X`` is only an A; a weight only a B) would appear
@@ -182,6 +182,6 @@ def operand_bundles(g: Graph, *, dtype: str = "fp8_e4m3") -> dict:
             side = USE_A if how == USE_A else USE_B
             src = V.T if how == USE_BT else V
             codes, scales, luts = quantize_operand(
-                np.ascontiguousarray(src, dtype=np.float32), side=side, dtype=dtype)
+                np.ascontiguousarray(src, dtype=np.float32), side=side, dtype=dtype, lut=lut)
             out[f"{name}:{how}"] = {"codes": codes, "scales": scales, "luts": luts}
     return out

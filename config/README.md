@@ -55,7 +55,8 @@ All of these are in `build_id` except the labels (`name`, `description`, `proven
 | `types.prodFloor` | a product below 2^prodFloor is flushed to zero (MxFPMul: -16); `null` for no flush | mxquant |
 | `mx.scaleSize` | elements per E8M0 scale on the operands | mxquant, spike (`GROUP`) |
 | `mx.scaleSizeOut` | the requantizer's output group | spike (`GROUP_OUT`) |
-| `mx.enable_lut` | the LUT unit is present (LUT formats send 4-bit indices into 16-entry LUTs) | perf (`--lut`); `check` warns on a LUT format when false |
+| `mx.enable_lut` | a copy of the RTL's `GemminiArrayConfig.enable_lut`, which no RTL module reads | recorded by ppa and perf; nothing decides from it |
+| `mx.lut` | the LUT unit as built, the RTL's `GemminiLUTConfig` field for field, or `null` for a build without one: `projFormat` (which finders the requantizer has, so which LUT formats the build serves), `rdataWidth` (bits per entry), `raddrWidth` (log2 entries per LUT; 4), `numEntries` (LUTs per table, by `MX_LOAD_LUT` sel: B, A, C), `numBits` (16 x `rdataWidth`), `lutUpdateRegularityWidth` (the G register's width), `actCodeWidth`/`weiCodeWidth` (0; asymmetric builds are refused). Every key written | `check` (the formats served, the index and entry widths, G's range), emitters (each table's capacity) |
 | `accumulator.acc_read_full_width`, `acc_read_small_width` | accumulator read widths | nothing in Python |
 | `scratchpad.banks`, `scratchpad.rows` | scratchpad geometry | emitters (`bank_num`, `bank_rows`) |
 | `implementation.clock_ns` | target clock period | ppa (`--clock-ns`), perf (`--clock-ns`) |
@@ -72,11 +73,14 @@ All of these are in `build_id` except the labels (`name`, `description`, `proven
 | `reduce` | how codes are multiplied: `hardware` (the recipe's array), `exact`, `bf16_tiles` | `hardware` |
 | `allow_lossy_chain` | run a chain whose codebook cannot be chosen exactly | `false` |
 | `fp32_tol` | kernel pass threshold on relative Frobenius error against fp32 | 0.15 |
-| `lut` (optional) | a LUT format's LUTs: `{"source": "data" or a .json of LUTs, "group": G, "pick": "host" or "hardware"}`; all three written. Absent: the kernel path's LUTs are the compiler's (from the data, G = 1), the perplexity path runs the full element grid, and `run_id` is unchanged. Read by no model yet | absent |
+| `lut` (LUT formats) | how a LUT format's tables are made, every key written: `group` (G: one LUT per 2**G rows of A, columns of B, rows of C), `weights` (B tables: `data`), `activations` (A tables: `data`), `outputs` (a chain's C tables: `estimate`, fitted to an fp32 run of the input), `pick` (A and B indices: `host`, nearest by value), `fit` (`{"method": "kmeans", "init": "quantile", "max_iters"}`). Each accepts what the compiler implements today; the plan's other values are refused by name. Required for a LUT format, refused for a direct one; a recipe without it keeps its `run_id` | `config/run/<format>.json` for the four LUT formats |
 
-`name` and `description` are labels and stay out of `run_id`. The hardware recipe says whether the LUT
-unit exists (`mx.enable_lut`); the run recipe says how it is used (`lut`). `lut` on a direct format
-(fp8_e4m3, fp4_e2m1) is refused; the kernel path also refuses `lut.group` other than 1. The perplexity cache key does not
+`name` and `description` are labels and stay out of `run_id`. The hardware recipe says what LUT unit was
+built (`mx.lut`); the run recipe says how it is used (`lut`). On both paths `check` refuses a LUT format on a
+build with no LUT unit or one whose projection does not serve it, and a `lut` block on a direct format
+(fp8_e4m3, fp4_e2m1); the kernel path also refuses entries wider than the format's (fp6 on an 8-bit build),
+and the emitter refuses a stage that needs more LUTs than a table holds. `config/hardware/` has a build for
+each LUT format: `baseline` (E3M2), `lut_fp6e2m3`, `lut_fp8e5m2`, `lut_fp8e4m3`. The perplexity cache key does not
 include `allow_lossy_chain` or `fp32_tol`, because the perplexity path never reads them.
 
 ## Which path runs what

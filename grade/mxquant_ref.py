@@ -106,7 +106,7 @@ class MxQuantRun:
 
 
 def _matmul(env, A: np.ndarray, W: np.ndarray, dtype: str = "fp8_e4m3",
-            a_px=None) -> np.ndarray:
+            a_px=None, lut=None) -> np.ndarray:
     """``A[M][K] @ W[K][N]`` through ``MXLinearSim``, on the operands the DEVICE was given.
 
     ``MXLinearSim`` wraps an ``nn.Linear`` (weight ``[out][in]``, so W is transposed in), and would
@@ -133,13 +133,13 @@ def _matmul(env, A: np.ndarray, W: np.ndarray, dtype: str = "fp8_e4m3",
     sim = EC.MXLinearSim(layer, f.mxq, False, cfg.product[0], cfg.product[1],
                          cfg.acc_schedule, 0, 0, window=cfg.window)
 
-    bc, bsc, bl = quantize_operand(np.ascontiguousarray(W, np.float32), side="b", dtype=dtype)
+    bc, bsc, bl = quantize_operand(np.ascontiguousarray(W, np.float32), side="b", dtype=dtype, lut=lut)
     if a_px is not None:
         PA, XA = a_px                    # a chained operand: the requantizer already made it
     else:
-        ac, asc, al = quantize_operand(np.ascontiguousarray(A, np.float32), side="a", dtype=dtype)
-        PA, XA = wire_to_px(ac, asc, side="a", dtype=dtype, books=al)
-    PB, XB = wire_to_px(bc, bsc, side="b", dtype=dtype, books=bl)
+        ac, asc, al = quantize_operand(np.ascontiguousarray(A, np.float32), side="a", dtype=dtype, lut=lut)
+        PA, XA = wire_to_px(ac, asc, side="a", dtype=dtype, books=al, lut=lut)
+    PB, XB = wire_to_px(bc, bsc, side="b", dtype=dtype, books=bl, lut=lut)
     sim._wire_operands = (PA, XA, PB, XB)
 
     with torch.no_grad():
@@ -171,7 +171,7 @@ VIA_REQUANT = "requant"
 
 
 def simulate(spec, *, rtl_exact: bool = True, dtype: str = "fp8_e4m3",
-             edges: dict | None = None) -> MxQuantRun:
+             edges: dict | None = None, lut=None) -> MxQuantRun:
     """Run a whole :class:`KernelSpec` in MXQuant and return its outputs.
 
     Walks the same graph the device does: mesh stages go to ``MXLinearSim``, host stages run their
@@ -225,12 +225,12 @@ def simulate(spec, *, rtl_exact: bool = True, dtype: str = "fp8_e4m3",
                     from compiler.operands import NotModelled, requantize_chained
                     try:
                         a_px = requantize_chained(vals[lhs_name], dtype=dtype,
-                                                  books=edge.get("books"))
+                                                  books=edge.get("books"), lut=lut)
                     except NotModelled as exc:
                         # Degrade the TIER, never the numbers: a golden we cannot produce must not
                         # be faked. The caller drops to the fp32 tier and says why.
                         raise MxQuantUnavailable(str(exc)) from exc
-                vals[st.name] = _matmul(env, a, b, dtype, a_px=a_px)
+                vals[st.name] = _matmul(env, a, b, dtype, a_px=a_px, lut=lut)
             prev = st.name
 
         return MxQuantRun(y=vals[spec.stages[-1].name],

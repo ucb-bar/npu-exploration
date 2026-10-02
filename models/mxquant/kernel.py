@@ -66,14 +66,16 @@ def available() -> tuple[bool, str]:
     return True, f"mxq {models.mxq_commit()}"
 
 
-def run(spec, recipe, *, dtype: str = "fp8_e4m3", edges: dict | None = None, shipped: bool = True) -> dict:
+def run(spec, recipe, *, dtype: str = "fp8_e4m3", edges: dict | None = None, shipped: bool = True,
+        lut=None) -> dict:
     """The reference for one KernelSpec on the machine ``recipe`` (a hardware recipe) describes, with operands
     in ``dtype`` (the run recipe's ``operand_fmt``). Rounding and scale floor are the chip's: the kernel path
     refuses a run recipe that asks for others (``config.recipe.check``).
 
     Returns ``{"y", "stages", "shipped_y", "tier", "model"}``: ``y`` the final output (fp32 values of
     bf16 bits), ``stages`` every intermediate by name, ``shipped_y`` the as-shipped output or None,
-    ``model`` what was run, for the results record.
+    ``model`` what was run, for the results record. A LUT format needs ``lut``, the run's codebook
+    settings (``config.recipe.lut_settings``): the wire operands are built with them.
     """
     ok, why = available()
     if not ok:
@@ -87,11 +89,13 @@ def run(spec, recipe, *, dtype: str = "fp8_e4m3", edges: dict | None = None, shi
         raise Unavailable(f"{recipe.name}: block = {recipe.block}, but the wire operands are quantized "
                           f"in groups of {BLOCK}; this model cannot follow")
     codebook = _scheme.is_codebook(dtype)
-    y, stages = _walk(spec, dtype, edges, _mesh_hw(recipe, arith, sched, window, dtype, fmt))
+    if codebook and lut is None:
+        raise Unavailable(f"{dtype} is LUT-indexed: pass lut= (config.recipe.lut_settings of the two recipes)")
+    y, stages = _walk(spec, dtype, edges, _mesh_hw(recipe, arith, sched, window, dtype, fmt, lut), lut)
     shipped_y = None
     if shipped:
         s_arith, _, _ = _scheme.shipped_datapath(recipe)
-        shipped_y, _ = _walk(spec, dtype, None, _mesh_shipped(recipe, s_arith, sched, window, fmt))
+        shipped_y, _ = _walk(spec, dtype, None, _mesh_shipped(recipe, s_arith, sched, window, fmt), lut)
     return {
         "y": y, "stages": stages, "shipped_y": shipped_y, "tier": TIER,
         "model": {
@@ -151,7 +155,7 @@ def line(metrics: dict) -> str:
 
 # --- internals --------------------------------------------------------------------------------------
 
-def _walk(spec, dtype: str, edges: dict | None, mesh):
+def _walk(spec, dtype: str, edges: dict | None, mesh, lut):
     """Run the whole KernelSpec: host stages in fp32, mesh stages through ``mesh(A, W, a_px)``."""
     from kernels.spec import INPUT
 
@@ -176,7 +180,7 @@ def _walk(spec, dtype: str, edges: dict | None, mesh):
             edge = edge_map.get(lhs_name, {})
             a_px = None
             if edge.get("via") == VIA_REQUANT:
-                a_px = _requant(vals[lhs_name], dtype, edge.get("books"))
+                a_px = _requant(vals[lhs_name], dtype, edge.get("books"), lut)
             vals[st.name] = mesh(a, b, a_px)
         prev = st.name
     return vals[spec.stages[-1].name], {k: v for k, v in vals.items() if k != INPUT}
@@ -197,7 +201,7 @@ def _operands(A: np.ndarray, W: np.ndarray, fmt: str):
     return PA, XA, PB, XB
 
 
-def _requant(C: np.ndarray, dtype: str, books) -> tuple[torch.Tensor, torch.Tensor]:
+def _requant(C: np.ndarray, dtype: str, books, lut) -> tuple[torch.Tensor, torch.Tensor]:
     """The A operand a chained stage receives: the device requantizer's output, ``(P [N][M], X [N/32][M])``.
 
     The requantizer reads the accumulator out of SMEM, which holds bf16, blocks each row along N and
@@ -206,7 +210,7 @@ def _requant(C: np.ndarray, dtype: str, books) -> tuple[torch.Tensor, torch.Tens
     model.
     """
     if _scheme.is_codebook(dtype):
-        return _device_requant(C, dtype, books)
+        return _device_requant(C, dtype, books, lut)
     return _requant_mxq(C, dtype)
 
 
@@ -219,14 +223,14 @@ def _requant_mxq(C: np.ndarray, dtype: str) -> tuple[torch.Tensor, torch.Tensor]
     return P.t().contiguous(), X.t().contiguous()
 
 
-def _mesh_hw(recipe, arith, sched, window: int, dtype: str, fmt: str):
+def _mesh_hw(recipe, arith, sched, window: int, dtype: str, fmt: str, lut):
     """``A[M][K] @ W[K][N]`` on the operands the device is given, through mxq's systolic column."""
     from mxq import matmul
     codebook = _scheme.is_codebook(dtype)
 
     def mesh(A: np.ndarray, W: np.ndarray, a_px) -> np.ndarray:
         if codebook:
-            PA, XA, PB, XB = _device_operands(A, W, dtype, a_px)
+            PA, XA, PB, XB = _device_operands(A, W, dtype, a_px, lut)
         else:
             PA, XA, PB, XB = _operands(A, W, fmt)
             if a_px is not None:
@@ -253,23 +257,23 @@ def _mesh_shipped(recipe, arith, sched, window: int, fmt: str):
 
 # --- what mxq does not have: the codebook formats, on the hardware team's model in compiler/operands.py ---
 
-def _device_operands(A: np.ndarray, W: np.ndarray, dtype: str, a_px):
+def _device_operands(A: np.ndarray, W: np.ndarray, dtype: str, a_px, lut):
     """Codebook formats: the wire operands the compiler emits (indices + per-row-pair tables), decoded."""
     from compiler.operands import quantize_operand, wire_to_px
-    bc, bsc, bl = quantize_operand(np.ascontiguousarray(W, np.float32), side="b", dtype=dtype)
-    PB, XB = wire_to_px(bc, bsc, side="b", dtype=dtype, books=bl)
+    bc, bsc, bl = quantize_operand(np.ascontiguousarray(W, np.float32), side="b", dtype=dtype, lut=lut)
+    PB, XB = wire_to_px(bc, bsc, side="b", dtype=dtype, books=bl, lut=lut)
     if a_px is not None:
         PA, XA = a_px
     else:
-        ac, asc, al = quantize_operand(np.ascontiguousarray(A, np.float32), side="a", dtype=dtype)
-        PA, XA = wire_to_px(ac, asc, side="a", dtype=dtype, books=al)
+        ac, asc, al = quantize_operand(np.ascontiguousarray(A, np.float32), side="a", dtype=dtype, lut=lut)
+        PA, XA = wire_to_px(ac, asc, side="a", dtype=dtype, books=al, lut=lut)
     return PA, XA, PB, XB
 
 
-def _device_requant(C: np.ndarray, dtype: str, books):
+def _device_requant(C: np.ndarray, dtype: str, books, lut):
     """The device requantizer transcribed from gemmini.cc / the extracted mesh model (compiler/operands.py)."""
     from compiler.operands import NotModelled, requantize_chained
     try:
-        return requantize_chained(C, dtype=dtype, books=books)
+        return requantize_chained(C, dtype=dtype, books=books, lut=lut)
     except NotModelled as exc:
         raise Unavailable(str(exc)) from exc

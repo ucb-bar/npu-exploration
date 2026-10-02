@@ -55,11 +55,6 @@ def perf_model_path() -> Path:
 #: stage out_dtype -> --out-fmt ("bf16" means no requant projection).
 _OUT_TOK = {"bf16": "bf16", "f8E4M3FN": "fp8", "f8E5M2": "fp8e5m2"}
 
-#: One LUT per 2**G rows of A / columns of W / rows of C: config.recipe.KERNEL_LUT_GROUP, the compiler's
-#: LUT_GRANULARITY. A run recipe's lut.group overrides it.
-DEFAULT_LUT_GROUP = 1
-
-
 def perf_args(recipe, dtype: str, m: int, n: int, k: int, out_fmt: str, *,
               as_measured: bool = True, energy: bool = False, lut_group: int | None = None,
               tiles: tuple[int, int, int] | None = None, dma_bw: float | None = None,
@@ -67,7 +62,8 @@ def perf_args(recipe, dtype: str, m: int, n: int, k: int, out_fmt: str, *,
     """Map a hardware recipe, the run's operand format and one GEMM stage onto perf_model's CLI.
 
     A LUT format (models.ppa.ppa.uses_lut) runs with --lut and the chip's LUT layout: one LUT per 2**G rows of
-    A, 2**G columns of W and 2**G rows of C, across the whole other dimension (the model's own default is one
+    A, 2**G columns of W and 2**G rows of C, across the whole other dimension, G being ``lut_group`` (the run
+    recipe's lut.group, required for a LUT format) (the model's own default is one
     per 128x128 block). Each load moves only the tables the stage needs, as our emitter issues them
     (mxgemm_emit._emit_load_luts: N/2**G, M/2**G, M/2**G), not the full 64-table set per port the workspace's
     own kernels loaded (its --lut-full-set). The emitter also loads a C LUT for a bf16 output, which the model
@@ -85,7 +81,9 @@ def perf_args(recipe, dtype: str, m: int, n: int, k: int, out_fmt: str, *,
             "--act", tok, "--wei", tok, "--out-fmt", out,
             "--clock-ns", str(recipe.clock_ns)]
     if uses_lut(dtype):
-        g = 1 << (DEFAULT_LUT_GROUP if lut_group is None else lut_group)
+        if lut_group is None:
+            raise PerfError(f"{dtype} is a LUT format: lut_group (the run recipe's lut.group) is required")
+        g = 1 << lut_group
         args += ["--lut", "--lut-a", str(g), str(k), "--lut-w", str(k), str(g), "--lut-c", str(g), str(n)]
     if as_measured:
         if tiles or dma_bw or spad_kb:

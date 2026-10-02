@@ -108,15 +108,15 @@ def main() -> int:
         raw["types"]["meshProdPrecisionList"][3]["sigWidth"] = 3
     refused("non-uniform product list is refused", raw_variant(mixed_prod), scheme.datapath)
 
-    def lut_on(raw):
-        raw["mx"]["enable_lut"] = True
+    def no_lut(raw):
+        raw["mx"]["lut"] = None
     try:
-        scheme.scheme(parse_hardware(raw_variant(lut_on), path=base.path), Run())
-        check("an enable_lut recipe builds a Scheme (the perplexity path runs the full element grid)", True)
+        scheme.scheme(parse_hardware(raw_variant(no_lut), path=base.path), Run())
+        check("a build without a LUT unit (mx.lut null) builds a Scheme for a direct format", True)
     except RecipeError as exc:
-        check("an enable_lut recipe builds a Scheme (the perplexity path runs the full element grid)", False, str(exc)[:90])
+        check("a build without a LUT unit (mx.lut null) builds a Scheme for a direct format", False, str(exc)[:90])
 
-    s6 = scheme.scheme(base, Run(operand_fmt="fp6_e3m2"))
+    s6 = scheme.scheme(base, load_run("fp6_e3m2"))
     check("an fp6 run builds a Scheme on the full MXFP6_E3M2 grid", s6.a.keywords["fmt"] == "MXFP6_E3M2")
     check("is_codebook knows the four table-indexed formats",
           [d for d in scheme.MXQ_FORMAT if scheme.is_codebook(d)] == ["fp8_e4m3_quad", "fp8_e5m2", "fp6_e3m2", "fp6_e2m3"])
@@ -183,45 +183,91 @@ def main() -> int:
     check_recipes(base, load_run("fp4_e2m1"), "kernel")
     refused_load("an unknown operand format is refused", lambda: check_recipes(base, Run(operand_fmt="fp9"), "perplexity"), "fp9")
 
-    print("\n[5b] the run recipe's lut block ----------------------------------------")
-    import warnings
-    from config.recipe import KERNEL_LUT_GROUP, Lut
-    from compiler import formats as cformats
-    check("recorded run_ids unchanged by the lut field (a recipe without it hashes as before)",
+    print("\n[5b] the LUT, in both recipes ------------------------------------------")
+    from config.recipe import LUT_SERVES, Fit, Lut, emitter_params, lut_settings
+    from compiler.codebook import Settings
+    check("recorded run_ids unchanged (a recipe without a lut block hashes as before)",
           {r: load_run(r).run_id() for r in ("default", "exact", "bf16_tiles", "fp4_e2m1")}
           == {"default": "611f047101d540f2", "exact": "f4c02e1652fe39ec",
               "bf16_tiles": "e28620394769c9a0", "fp4_e2m1": "19527a31314dcfa5"})
     check("no lut block: Run.lut is None and fields() has no lut key", dflt.lut is None and "lut" not in dflt.fields())
-    lraw = {**rraw, "operand_fmt": "fp6_e3m2"}
-    good = {"source": "data", "group": 1, "pick": "host"}
-    lrun = parse_run({**lraw, "lut": good})
-    check("a lut block parses", lrun.lut == Lut("data", 1, "host"), lrun.describe())
-    check("run_id moves with the lut block", lrun.run_id() != parse_run(lraw).run_id()
-          and lrun.run_id() != parse_run({**lraw, "lut": {**good, "pick": "hardware"}}).run_id())
-    check("fields() round-trips through parse_run", parse_run({"name": "x", **lrun.fields()}) == parse_run({**lraw, "lut": good}))
+    lrun = load_run("fp6_e3m2")
+    check("config/run/fp6_e3m2.json writes today's compiler rule",
+          lrun.lut == Lut(group=1, weights="data", activations="data", outputs="estimate", pick="host",
+                          fit=Fit(method="kmeans", init="quantile", max_iters=50)), lrun.describe())
+    lraw = {"name": "x", **lrun.fields()}
+    good = lraw["lut"]
+    check("fields() round-trips through parse_run", parse_run(lraw) == parse_run({**lraw}) and parse_run(lraw).lut == lrun.lut)
+    check("run_id moves with the lut block",
+          lrun.run_id() != parse_run({**lraw, "lut": {**good, "fit": {**good["fit"], "max_iters": 49}}}).run_id())
     refused_load("unknown lut key refused by name", lambda: parse_run({**lraw, "lut": {**good, "size": 16}}), "size")
-    refused_load("every lut key is written", lambda: parse_run({**lraw, "lut": {"source": "data"}}), "required")
-    refused_load("lut.pick is host or hardware", lambda: parse_run({**lraw, "lut": {**good, "pick": "both"}}), "pick")
+    refused_load("every lut key is written", lambda: parse_run({**lraw, "lut": {"group": 1}}), "required")
+    refused_load("every lut.fit key is written",
+                 lambda: parse_run({**lraw, "lut": {**good, "fit": {"method": "kmeans"}}}), "required")
+    for key, val in (("weights", "tables.json"), ("activations", "top16"), ("outputs", "calibrated"), ("pick", "finder")):
+        refused_load(f"lut.{key} {val!r} is not implemented yet, refused by name",
+                     lambda: parse_run({**lraw, "lut": {**good, key: val}}), "implemented today")
+    refused_load("lut.fit.method other than kmeans refused",
+                 lambda: parse_run({**lraw, "lut": {**good, "fit": {**good["fit"], "method": "lloyd"}}}), "implemented today")
     refused_load("lut.group is a non-negative integer", lambda: parse_run({**lraw, "lut": {**good, "group": -1}}), "group")
-    refused_load("lut.source file must exist", lambda: parse_run({**lraw, "lut": {**good, "source": "no_such.json"}}), "no such")
     refused_load("a lut block on a direct format is refused",
                  lambda: check_recipes(base, parse_run({**rraw, "lut": good}), "perplexity"), "not a LUT format")
-    check("KERNEL_LUT_GROUP is the compiler's LUT_GRANULARITY", KERNEL_LUT_GROUP == cformats.LUT_GRANULARITY)
-    g2 = parse_run({**lraw, "lut": {**good, "group": 2}})
-    refused_load("kernel path refuses lut.group 2", lambda: check_recipes(base, g2, "kernel"), "lut.group")
-    try:
-        check_recipes(base, g2, "perplexity")
-        check("perplexity path accepts lut.group 2", True)
-    except RecipeError as exc:
-        check("perplexity path accepts lut.group 2", False, str(exc)[:90])
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        check_recipes(base, lrun, "kernel")
-        check_recipes(base, parse_run(lraw), "kernel")
-        check_recipes(base, dflt, "kernel")
-    msgs = [str(x.message) for x in w]
-    check("a LUT format with enable_lut false warns (not refused) on the kernel path, a direct one does not",
-          len(msgs) == 2 and all("enable_lut is false" in m for m in msgs), f"{len(msgs)} warnings")
+    nolut = parse_run({k: v for k, v in lraw.items() if k != "lut"})
+    for path in ("kernel", "perplexity"):
+        refused_load(f"a LUT format without a lut block is refused ({path})",
+                     lambda: check_recipes(base, nolut, path), "needs a lut block")
+
+    print("\n[5c] the hardware recipe's mx.lut -----------------------------------")
+    check("baseline's LUT unit is the stock one (LutFP6E3M2, 6-bit, 64 per table, 16-bit G)",
+          (base.lut.projection, base.lut.entry_bits, base.lut.index_bits, base.lut.tables, base.lut.group_bits)
+          == ("LutFP6E3M2", 6, 4, (64, 64, 64), 16), str(base.lut))
+    refused_load("mx.lut is required", lambda: parse_hardware(raw_variant(lambda r: r["mx"].pop("lut"))), "mx.lut")
+    refused_load("every mx.lut key is written",
+                 lambda: parse_hardware(raw_variant(lambda r: r["mx"]["lut"].pop("projFormat"))), "required")
+    refused_load("an unknown projFormat is refused",
+                 lambda: parse_hardware(raw_variant(lambda r: r["mx"]["lut"].update(projFormat="LutFP4"))), "projFormat")
+    refused_load("an FP8 projection needs 8-bit entries",
+                 lambda: parse_hardware(raw_variant(lambda r: r["mx"]["lut"].update(projFormat="LutFP8E4M3"))), "rdataWidth 8")
+    refused_load("numBits is 16 entries x rdataWidth",
+                 lambda: parse_hardware(raw_variant(lambda r: r["mx"]["lut"].update(numBits=[128, 128, 128]))), "numBits")
+    unit = parse_hardware(raw_variant(no_lut))
+    for path in ("kernel", "perplexity"):
+        refused_load(f"a LUT format on a build without a LUT unit is refused ({path})",
+                     lambda: check_recipes(unit, lrun, path), "without a LUT unit")
+        refused_load(f"a LUT format the projection does not serve is refused ({path})",
+                     lambda: check_recipes(base, load_run("fp8_e4m3_quad"), path), "serves")
+    refused_load("raddrWidth other than the 4-bit index is refused",
+                 lambda: check_recipes(parse_hardware(raw_variant(lambda r: r["mx"]["lut"].update(
+                     raddrWidth=5, numBits=[192, 192, 192]))), lrun, "kernel"), "raddrWidth")
+    refused_load("an asymmetric LUT build is refused",
+                 lambda: check_recipes(parse_hardware(raw_variant(lambda r: r["mx"]["lut"].update(actCodeWidth=6))),
+                                       lrun, "kernel"), "asymmetric")
+    refused_load("G beyond the G register is refused",
+                 lambda: check_recipes(parse_hardware(raw_variant(lambda r: r["mx"]["lut"].update(lutUpdateRegularityWidth=1))),
+                                       parse_run({**lraw, "lut": {**good, "group": 2}}), "kernel"), "G register")
+    check_recipes(base, parse_run({**lraw, "lut": {**good, "group": 2}}), "kernel")
+    check("check accepts G = 2 (the emitter holds each table to its capacity)", True)
+    fp8 = load_hardware("lut_fp8e4m3")
+    refused_load("fp6 on an 8-bit-entry build is refused on the kernel path (packing)",
+                 lambda: check_recipes(fp8, lrun, "kernel"), "packing")
+    check_recipes(fp8, lrun, "perplexity")
+    check("...and accepted on the perplexity path (the finder serves it)", True)
+    for fmt in ("fp8_e4m3_quad", "fp8_e5m2", "fp6_e3m2", "fp6_e2m3"):
+        builds = [h for h in ("baseline", "lut_fp8e4m3", "lut_fp8e5m2", "lut_fp6e2m3")
+                  if fmt in LUT_SERVES[load_hardware(h).lut.projection]]
+        ok = []
+        for h in builds:
+            try:
+                check_recipes(load_hardware(h), load_run(fmt), "kernel")
+                ok.append(h)
+            except RecipeError:
+                pass
+        check(f"{fmt} has a build in config/hardware/ that runs it on the kernel path", bool(ok), ", ".join(ok))
+    check("lut_settings: G and the fit's passes, from the recipes",
+          lut_settings(base, lrun) == Settings(group=1, max_iters=50) and lut_settings(base, dflt) is None)
+    check("emitter_params: G and each table's capacity for a LUT run, the geometry alone otherwise",
+          emitter_params(base, lrun) == {**base.geometry(), "lut_group": 1, "lut_tables": [64, 64, 64]}
+          and emitter_params(base, dflt) == base.geometry())
     from config.recipe import removed_flag
     check("a removed flag names its run field", "operand_fmt" in (removed_flag(["--kernel", "x", "--dtype", "fp4_e2m1"]) or ""))
     check("--flag=value spelling is caught too", "rounding" in (removed_flag(["--rounding-mode=ties_away"]) or ""))

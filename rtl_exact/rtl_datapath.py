@@ -234,9 +234,12 @@ def install(eval_complete_module, cfg: RtlConfig | None = None) -> None:
             P_B, X_B = EC.mx_block32_quantize(B, self.mx_fmt, axis="col")
 
         if wire is None and self.lut_weight and self.mx_fmt != "FP32" and not self.no_input_mx:
-            P_B = EC.apply_lut_to_mx_weight(
-                P_B, granularity=self.lut_granularity, num_signposts=self.lut_signposts,
-                iters=self.lut_iters)
+            # MXQuant's level-2 "LUT" clusters per-element mantissas and keeps each element's own
+            # exponent: not the chip's 4-bit-index tables (planning/LUT_integration.md 1.3). A LUT
+            # format reaches this datapath only as wire operands, built by the compiler's chip rule.
+            raise RuntimeError(
+                "rtl_exact: MXQuant's lut_weight is not the chip's LUT; pass the compiler's wire "
+                "operands (grade/mxquant_ref._matmul) instead")
 
         C = torch.zeros((M, N), dtype=torch.float32, device=device)
         window = self.window

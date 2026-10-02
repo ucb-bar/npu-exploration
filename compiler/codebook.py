@@ -19,13 +19,27 @@ Ported from ``gemmini-rocc-tests/llama_operands.py`` (D1: the workload side move
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from compiler import formats
 from compiler.wire import DECODERS
 
-#: Entries per codebook. Fixed by the hardware: the index is a nibble.
+#: Entries per codebook: a fact of the wire, whose index is a nibble (formats.FORMATS ``bits=4``).
+#: config.recipe.check refuses a build whose mx.lut.raddrWidth says otherwise.
 LUT_SIZE = 16
+
+
+@dataclass(frozen=True)
+class Settings:
+    """What shapes a codebook, from the two recipes (``config.recipe.lut_settings``); no defaults.
+
+    group      G: one codebook per ``2**G`` rows of A / columns of B / rows of C
+    max_iters  the k-means fit's most Lloyd passes
+    """
+    group: int
+    max_iters: int
 
 
 # --- what the hardware's nearest-entry finder can actually tell apart ------------------------------
@@ -98,7 +112,7 @@ _DIFF_MASK = {"fp6_e3m2": 0x1FF, "fp6_e2m3": None, "fp8_e5m2": 0x1FFFFFFFF,
 
 
 def finder_indices(codes: np.ndarray, books: np.ndarray, *, fmt: formats.MxFormat,
-                   axis: str = "row", g: int = formats.LUT_GRANULARITY) -> np.ndarray:
+                   axis: str, g: int) -> np.ndarray:
     """Index assignment **as the HARDWARE does it** — nearest in fixed-point, ties to lower index.
 
     Distinct from :func:`assign_indices`, and the distinction is not pedantry:
@@ -172,7 +186,7 @@ def codebook_values(fmt: formats.MxFormat) -> np.ndarray:
     return np.unique(np.array(sorted(seen.values()), dtype=np.float32))
 
 
-def _kmeans_1d(values: np.ndarray, k: int) -> np.ndarray:
+def _kmeans_1d(values: np.ndarray, k: int, max_iters: int) -> np.ndarray:
     """Deterministic weighted 1-D k-means over the DISTINCT values present.
 
     The support is tiny (an FP6 codebook has 64 members), so this collapses to a weighted Lloyd over
@@ -187,7 +201,7 @@ def _kmeans_1d(values: np.ndarray, k: int) -> np.ndarray:
     cdf = np.cumsum(counts) / counts.sum()
     probes = (np.arange(k) + 0.5) / k
     centers = np.unique(uniq[np.searchsorted(cdf, probes).clip(0, uniq.size - 1)])
-    for _ in range(50):
+    for _ in range(max_iters):
         lab = np.abs(uniq[:, None] - centers[None, :]).argmin(axis=1)
         new = np.unique(np.array([
             (uniq[lab == c] * counts[lab == c]).sum() / counts[lab == c].sum()
@@ -199,8 +213,7 @@ def _kmeans_1d(values: np.ndarray, k: int) -> np.ndarray:
     return centers
 
 
-def build_codebooks(P: np.ndarray, *, axis: str, fmt: formats.MxFormat,
-                    g: int = formats.LUT_GRANULARITY) -> np.ndarray:
+def build_codebooks(P: np.ndarray, *, axis: str, fmt: formats.MxFormat, lut: Settings) -> np.ndarray:
     """``[n_groups][16]`` codebook VALUES for an already-MX-quantized tile.
 
     ``axis="row"`` groups rows (the A side), ``axis="col"`` groups columns (the B side) — matching
@@ -211,6 +224,7 @@ def build_codebooks(P: np.ndarray, *, axis: str, fmt: formats.MxFormat,
     means the encoder's choice between them is arbitrary and unreproducible.
     """
     P = np.asarray(P, dtype=np.float32)
+    g = lut.group
     cb = codebook_values(fmt)
     span = P.shape[0] if axis == "row" else P.shape[1]
     if span % (1 << g):
@@ -220,7 +234,7 @@ def build_codebooks(P: np.ndarray, *, axis: str, fmt: formats.MxFormat,
     for grp in range(span >> g):
         sl = slice(grp << g, (grp + 1) << g)
         vals = (P[sl, :] if axis == "row" else P[:, sl]).ravel()
-        centers = _kmeans_1d(vals, LUT_SIZE)
+        centers = _kmeans_1d(vals, LUT_SIZE, lut.max_iters)
         snapped = cb[np.abs(centers[:, None] - cb[None, :]).argmin(axis=1)]
         entries = list(dict.fromkeys(snapped.tolist()))          # order-preserving dedupe
         for c in sorted(cb.tolist(), key=abs):                   # pad with unused codes
@@ -232,8 +246,7 @@ def build_codebooks(P: np.ndarray, *, axis: str, fmt: formats.MxFormat,
     return out
 
 
-def assign_indices(P: np.ndarray, books: np.ndarray, *, axis: str,
-                   g: int = formats.LUT_GRANULARITY) -> np.ndarray:
+def assign_indices(P: np.ndarray, books: np.ndarray, *, axis: str, g: int) -> np.ndarray:
     """Nearest-entry index for every element, against ITS group's codebook. ``[R][C]`` of 0..15."""
     P = np.asarray(P, dtype=np.float32)
     idx = np.zeros(P.shape, dtype=np.uint8)

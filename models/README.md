@@ -107,8 +107,8 @@ still lives in `grade/pipeline.py`.
 
 Both are Amanda Shi's models (MxGemmini-workspace/ppa), called as she calls them. Each operand format gets the
 workspace's own tokens (`models/ppa/ppa.py: FORMATS`, held equal to its `pair_modes.spec` by
-`tests/selftest_ppa.py`); a LUT format is priced on the LUT hardware, whatever `mx.enable_lut` says, because
-the kernels compiled for it carry LUTs (`config.recipe.check` warns about the mismatch; both are recorded).
+`tests/selftest_ppa.py`); a LUT format is priced on the LUT hardware, because the kernels compiled for it
+carry LUTs.
 
 | operand format | ppa `--stim` | products | perf `--act/--wei` | LUT |
 |---|---|---|---|---|
@@ -122,7 +122,7 @@ the kernels compiled for it carry LUTs (`config.recipe.check` warns about the mi
 `fp8n` / `fp8qn` are the NaN-safe E4M3 kernels (mxgen reads E4M3 272..448 as NaN). With a LUT, ppa uses the
 workspace's LUT settings (`--fmtset mxgemmini-all --calib all --blocks-variant all --lut fp8`), and perf runs
 `--lut` with the chip's LUT layout: one LUT per 2**G rows of A, columns of W and rows of C (G = `run.lut.group`,
-default 1), each load moving only the tables a stage needs, as our emitter issues them (the model does not
+required), each load moving only the tables a stage needs, as our emitter issues them (the model does not
 count the C LUT the emitter also loads for a bf16 output; the record notes it). perf's `--energy` gets the recipe's
 ladder (`--acc-rows`); it has no `--prod`, so a non-e4m3 product is noted in the record, not priced there.
 The kernel pipeline runs perf as measured (today's kernels, the validated configuration);

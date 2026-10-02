@@ -241,7 +241,17 @@
   "mx": {
     "scaleSize": 32,
     "scaleSizeOut": 32,
-    "enable_lut": false
+    "enable_lut": true,
+    "lut": {
+      "projFormat": "LutFP6E3M2",
+      "rdataWidth": 6,
+      "raddrWidth": 4,
+      "numEntries": [64, 64, 64],
+      "numBits": [96, 96, 96],
+      "lutUpdateRegularityWidth": 16,
+      "actCodeWidth": 0,
+      "weiCodeWidth": 0
+    }
   },
   "scratchpad": {
     "banks": 4,
@@ -252,6 +262,7 @@
     "utilization": 0.965
   },
   "provenance": {
+    "lut": "standaloneMxFPConfig: lut = Some(GemminiLUTConfig()), the defaults in MxConfigFragments.scala:48-58 (LutFP6E3M2, 6-bit entries, 64 LUTs per table). enable_lut is GemminiArrayConfig's default true and is read by no RTL module",
     "rtl": "generators/gemmini/src/main/scala/gemmini/ConfigsFP.scala:222,268,270-273 (GemminiMxFPConfigs.defaultMxFPConfig, inherited unchanged by standaloneMxFPConfig)",
     "spike": "generators/gemmini/software/libgemmini/gemmini.cc:1145-1148",
     "note": "MxFloat(expWidth, sigWidth, ...) counts the implicit bit, so acc_m == sigWidth-1. All 16 entries of both lists map term-for-term onto the C literals.",
