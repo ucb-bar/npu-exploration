@@ -17,6 +17,8 @@ numbers, and a perplexity is tied to the ``build_id`` that VERDICT was proved ag
     hw types.meshAccPrecisionList             schedule = [(expWidth, sigWidth - 1)] x dim
     hw array.meshRows                         window
     run.reduce                                which reducer (REDUCERS)
+    run.lut.group, run.lut.fit.max_iters      block.lut.quantize(group, max_iters)            a LUT format's operands;
+                                              Scheme(rows=2**group)                           MXLinear keeps 2**G tokens together
 
 Every knob is passed explicitly, never left to mxq's defaults: the RTL rounds operands
 round-to-nearest-even since 2026-09-10 and floors the block max at FLT_EPSILON = 2^-23, while mxq's
@@ -28,9 +30,10 @@ Deliberately ignored, because none of them changes a matmul's value: ``array.til
 
 Refused (``RecipeError``): a per-lane product list that is not uniform (mxq has one product format
 per Arithmetic); an accumulator list whose length is not the mesh dimension. A codebook (LUT) format
-is not refused: mxq has no codebooks, so a Scheme quantizes it on the format's full element grid
-(``is_codebook`` says which formats the hardware sends through a table; the bit path grades those
-through the wire operands the compiler emitted, ``models/mxquant/kernel.py`` ``_device_operands``).
+(``is_codebook``) runs through the chip's tables: ``mxq.block.lut``, the rule ``compiler/codebook.py``
+also calls, so both operands (A: 2**G tokens per table, B: 2**G output channels per table) see the 16
+entries the chip would. A layer's output is not requantized through a C table here (no chained stage),
+and the chip's table capacity is enforced on the kernel path only; ``lut_record`` says so in the record.
 """
 from __future__ import annotations
 
@@ -40,8 +43,7 @@ import models  # noqa: F401  -- puts the mxq submodule on sys.path
 from config.recipe import Hardware, RecipeError, Run
 
 #: operand format (run.operand_fmt, the compiler's spelling) -> mxq's format table key. The four CODEBOOK
-#: formats travel as 4-bit indices into a per-row-pair table on this hardware (compiler/codebook.py); mxq
-#: quantizes them on their full element grid.
+#: formats travel as 4-bit indices into a table per 2**G rows / columns on this hardware (mxq.lut).
 MXQ_FORMAT = {"fp8_e4m3": "MXFP8_E4M3", "fp8_e4m3_quad": "MXFP8_E4M3", "fp8_e5m2": "MXFP8_E5M2",
               "fp6_e3m2": "MXFP6_E3M2", "fp6_e2m3": "MXFP6_E2M3", "fp4_e2m1": "MXFP4"}
 CODEBOOK = frozenset({"fp8_e4m3_quad", "fp8_e5m2", "fp6_e3m2", "fp6_e2m3"})
@@ -66,10 +68,36 @@ def is_codebook(dtype: str) -> bool:
 
 
 def quantizer(hw: Hardware, run: Run):
-    """``V -> (P, X)`` for one operand, blocks along axis 0 (K): the run's format, rounding and floor."""
+    """``V -> (P, X)`` for one operand, blocks along axis 0 (K): the run's format, rounding and floor; a LUT
+    format then through its tables (``run.lut``: one per 2**G columns of V)."""
     from mxq import block
+    if is_codebook(run.operand_fmt):
+        _need_lut(run)
+        return partial(block.lut.quantize, fmt=mxq_format(run.operand_fmt), axis=0, block_size=hw.block,
+                       rounding_mode=run.rounding, scale_floor=run.scale_floor, group=run.lut.group,
+                       max_iters=run.lut.fit.max_iters)
     return partial(block.mxgemmini.quantize, fmt=mxq_format(run.operand_fmt), axis=0, block_size=hw.block,
                    rounding_mode=run.rounding, scale_floor=run.scale_floor)
+
+
+def rows(run: Run) -> int:
+    """Token rows one activation quantizer call must keep together: 2**G for a LUT format, else 1."""
+    return 1 << run.lut.group if is_codebook(run.operand_fmt) else 1
+
+
+def lut_record(run: Run) -> dict | None:
+    """What the record and cache key say about a LUT format's tables, or None for a direct format."""
+    if not is_codebook(run.operand_fmt):
+        return None
+    _need_lut(run)
+    return {"group": run.lut.group, "max_iters": run.lut.fit.max_iters, "rule": "mxq.lut",
+            "tables": "A and B; no C (a layer's output is not requantized); capacity not enforced"}
+
+
+def _need_lut(run: Run) -> None:
+    if run.lut is None:
+        raise RecipeError(f"run {run.name}: {run.operand_fmt} is a LUT format and needs a lut block "
+                          f"(config/run/{run.operand_fmt}.json is the template)")
 
 
 def product(recipe: Hardware) -> tuple[int, int]:
@@ -133,12 +161,14 @@ def mxq_config(hw: Hardware, run: Run, *, compiled: bool = False):
     return MXQConfig(fmt=mxq_format(run.operand_fmt), rounding_mode=run.rounding, scale_floor=run.scale_floor,
                      block_size=hw.block, prod=list(product(hw)), prod_floor=hw.prod_floor,
                      ladder=[list(e) for e in schedule(hw)], size=hw.dim, reduce=run.reduce, compiled=compiled,
-                     name=hw.name if run.reduce == "hardware" else f"{hw.name}/{run.reduce}")
+                     name=hw.name if run.reduce == "hardware" else f"{hw.name}/{run.reduce}",
+                     **({"lut": {"group": run.lut.group, "max_iters": run.lut.fit.max_iters}}
+                        if is_codebook(run.operand_fmt) else {}))
 
 
 def scheme(recipe: Hardware, run: Run, *, compiled: bool = False):
     """The two recipes as one mxq ``Scheme``: quantizer for both operands, and how the codes are multiplied.
-    A codebook format runs on its full element grid, see ``is_codebook``. ``run.reduce`` is one of
+    A codebook format runs through the chip's tables, see ``quantizer``. ``run.reduce`` is one of
     ``REDUCERS``: "hardware" is the recipe's array (its Arithmetic, schedule and window; ``compiled=True``
     fuses it through torch.compile, GPU, bit-identical, 5-7x faster per layer); "exact" is mxq's
     ``fp64_accum``; "bf16_tiles" is fp32 inside each block, bf16 across (``compiled`` applies to it too). The
@@ -161,4 +191,5 @@ def scheme(recipe: Hardware, run: Run, *, compiled: bool = False):
                     block_size=recipe.block)
     else:
         raise RecipeError(f"reduce {reduce!r}; choose from {', '.join(REDUCERS)}")
-    return Scheme(recipe.name if reduce == "hardware" else f"{recipe.name}/{reduce}", a=q, b=q, reduce=r)
+    return Scheme(recipe.name if reduce == "hardware" else f"{recipe.name}/{reduce}", a=q, b=q, reduce=r,
+                  rows=rows(run))

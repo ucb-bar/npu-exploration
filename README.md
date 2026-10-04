@@ -236,8 +236,8 @@ Python code reads them. The kernel path accepts only a 16x16 mesh, 32-element bl
 scratchpad, `rne`, the 2^-23 floor and `reduce: hardware`; `config.recipe.check` refuses anything else
 before any work, and the perplexity path runs it. A LUT format needs, on both paths, a build whose
 `mx.lut` serves it and a run recipe with a `lut` block; every LUT setting is in those two files and the
-code holds no default for any of them. The perplexity path still runs a LUT format on its full element
-grid (`"codebook": "not modelled"`); planning/LUT_integration.md is the plan for modelling it.
+code holds no default for any of them. Both paths run a LUT format through the chip's tables
+(`mxq.lut`, one rule: the compiler emits them, the perplexity path quantizes A and B through them).
 
 ## Where things are
 

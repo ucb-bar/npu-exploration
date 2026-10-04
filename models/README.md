@@ -57,9 +57,10 @@ what can run (`tinyllama`: 16 samples × 2048 tokens, seed 0, attention projecti
 under `results/accuracy/<key>.json`; the key hashes everything the number depends on (model, samples,
 seed, rules, hardware recipe `build_id`, operand format, rounding, scale floor, mxq commit, torch and
 transformers versions). The bf16 baseline is measured once the same way. The run recipe's
-`operand_fmt` picks the operand format; every format runs on its full element grid, and for the four
-codebook formats the record says `codebook: not modelled`, since the hardware sends those through a
-16-entry table that mxq does not have (the bit path grades them through the wire operands).
+`operand_fmt` picks the operand format. The four codebook (LUT) formats run through the chip's 16-entry
+tables (`mxq.block.lut`, the same rule the compiler emits, `tests/selftest_codebook_mxq.py`): one per 2**G
+tokens of A and per 2**G output channels of B, G and the fit from the run recipe's `lut`. A layer's output
+is not requantized through a C table (no chained stage), and the record's `codebook` says so.
 The run recipe's `reduce` picks how the codes are multiplied, with the same quantizers in all three cases:
 `hardware` (default) is the recipe's array; `exact` is mxq's `fp64_accum`, the format's cost with a
 perfect multiplier; `bf16_tiles` sums each 32-block in fp32 and folds it into the output with the

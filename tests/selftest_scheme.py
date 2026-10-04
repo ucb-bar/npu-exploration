@@ -248,10 +248,10 @@ def main() -> int:
     check_recipes(base, parse_run({**lraw, "lut": {**good, "group": 2}}), "kernel")
     check("check accepts G = 2 (the emitter holds each table to its capacity)", True)
     fp8 = load_hardware("lut_fp8e4m3")
-    refused_load("fp6 on an 8-bit-entry build is refused on the kernel path (packing)",
-                 lambda: check_recipes(fp8, lrun, "kernel"), "packing")
-    check_recipes(fp8, lrun, "perplexity")
-    check("...and accepted on the perplexity path (the finder serves it)", True)
+    refused_load("fp6 on an 8-bit-entry build is refused on the kernel path (wider entries not modelled)",
+                 lambda: check_recipes(fp8, lrun, "kernel"), "not modelled")
+    refused_load("...and on the perplexity path (mxq.lut holds the format's own entries)",
+                 lambda: check_recipes(fp8, lrun, "perplexity"), "not modelled")
     for fmt in ("fp8_e4m3_quad", "fp8_e5m2", "fp6_e3m2", "fp6_e2m3"):
         builds = [h for h in ("baseline", "lut_fp8e4m3", "lut_fp8e5m2", "lut_fp6e2m3")
                   if fmt in LUT_SERVES[load_hardware(h).lut.projection]]

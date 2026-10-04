@@ -78,8 +78,8 @@ All of these are in `build_id` except the labels (`name`, `description`, `proven
 `name` and `description` are labels and stay out of `run_id`. The hardware recipe says what LUT unit was
 built (`mx.lut`); the run recipe says how it is used (`lut`). On both paths `check` refuses a LUT format on a
 build with no LUT unit or one whose projection does not serve it, and a `lut` block on a direct format
-(fp8_e4m3, fp4_e2m1); the kernel path also refuses entries wider than the format's (fp6 on an 8-bit build),
-and the emitter refuses a stage that needs more LUTs than a table holds. `config/hardware/` has a build for
+(fp8_e4m3, fp4_e2m1), and entries wider than the format's (fp6 on an 8-bit build: neither the compiler nor
+mxq.lut models them); the emitter refuses a stage that needs more LUTs than a table holds. `config/hardware/` has a build for
 each LUT format: `baseline` (E3M2), `lut_fp6e2m3`, `lut_fp8e5m2`, `lut_fp8e4m3`. The perplexity cache key does not
 include `allow_lossy_chain` or `fp32_tol`, because the perplexity path never reads them.
 
@@ -113,8 +113,9 @@ holds these constants and `baseline.json` equal to libgemmini, the Chisel source
 | `scheme(hw, run)` | an mxq `Scheme`: the quantizer for A and B, and the reducer `run.reduce` names | all of the above |
 
 Refused with `RecipeError`, never approximated: a non-uniform product list, an accumulator list
-whose length is not the mesh dimension. The LUT formats run on their full element grid on the
-perplexity path, and its record says so.
+whose length is not the mesh dimension. A LUT format runs through the chip's tables on the
+perplexity path too (`mxq.block.lut`, the rule `compiler/codebook.py` calls; `run.lut.group` and
+`run.lut.fit.max_iters`), A and B only, and its record's `codebook` says so.
 `tests/selftest_scheme.py` holds `scheme(hw, run).matmul` bit-identical to the extracted hardware
 model (`rtl_exact/mxmesh/fp8`) on every recipe.
 

@@ -483,12 +483,6 @@ def check(hw: Hardware, run: Run, path: str) -> None:
         refusals.append(f"scale_floor {run.scale_floor:g}: the chip's requantizer floors the block max at 2^-23")
     if run.reduce != "hardware":
         refusals.append(f"reduce {run.reduce}: the kernel path grades the chip, whose reducer is the recipe's ladder")
-    if is_lut:
-        from compiler import formats
-        width = formats.get(run.operand_fmt, where="check").entry_bits
-        if width != hw.lut.entry_bits:
-            refusals.append(f"{run.operand_fmt} on {hw.lut.entry_bits}-bit LUT entries: the compiler packs "
-                            f"{width}-bit entries, and packing them into wider ones is not implemented")
     if refusals:
         raise RecipeError(f"{hw.name} + run {run.name} on the kernel path: " + "; ".join(refusals)
                           + " (the perplexity path, python -m models.mxquant, runs these)")
@@ -509,6 +503,10 @@ def _check_lut(hw: Hardware, run: Run) -> None:
     if unit.index_bits != formats.get(fmt, where="check").bits:
         raise RecipeError(f"{hw.name}: mx.lut.raddrWidth {unit.index_bits}, but {fmt} sends "
                           f"{formats.get(fmt, where='check').bits}-bit indices")
+    width = formats.get(fmt, where="check").entry_bits
+    if width != unit.entry_bits:
+        raise RecipeError(f"{hw.name}: {fmt} on {unit.entry_bits}-bit LUT entries ({unit.projection}): the compiler "
+                          f"and mxq.lut hold {width}-bit {fmt} entries, and wider entries are not modelled")
     if unit.act_code_bits or unit.wei_code_bits:
         raise RecipeError(f"{hw.name}: mx.lut.actCodeWidth/weiCodeWidth set (an asymmetric LUT build), "
                           "which no model follows yet")
