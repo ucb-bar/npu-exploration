@@ -119,7 +119,7 @@ def chain_refusal(fmt: "MxFormat") -> str | None:
     The requantizer normalizes its output to ``[2**out_pmax, 2**(out_pmax+1))``. The next stage
     reads those values through a codebook, and the hardware's nearest-entry finder compares in a
     fixed-point domain whose width mask makes large magnitudes ALIAS onto small ones
-    (``compiler/codebook._fixed_point``). If the requant range starts ABOVE the largest value the finder can
+    (``mxq.lut.formats``). If the requant range starts ABOVE the largest value the finder can
     represent faithfully, every element aliases and the chain returns noise. That is exactly what
     the codebook formats used to do:
 
