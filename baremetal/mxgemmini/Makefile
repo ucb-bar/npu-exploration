@@ -33,7 +33,7 @@ KERNELS   := llama_mlp llama_mlp_small llama_mlp_tiny llama_mlp_tiny_t1 llama_ml
              llama_qkv_tiny llama_proj_q llama_proj_k llama_proj_v llama_sep_qkv llama_two_mm llama_two_mm_micro \
              llama_layer_full llama_layer_full_native llama_layer_full_native_gh \
              mx_bench_matmul mx_bench_matmul_m32 mx_bench_matmul_m32_blk \
-             attn_vpu attn_vpu_mid attn_vpu_fa
+             attn_vpu attn_vpu_mid attn_vpu_fa attn_flash attn_flash_mid attn_flash_llama attn_flash_llama_wide attn_flash_llama_causal
 
 # Kernels whose data is a linked binary blob rather than C initializers, and the blob each uses.
 # See the objcopy rule below for why the basenames matter.
@@ -114,6 +114,7 @@ $(foreach d,spike mx_rocket,\
 $(foreach d,spike mx_rocket,\
   $(foreach k,mx_bench_matmul mx_bench_matmul_m32 mx_bench_matmul_m32_blk,$(eval $(OUT)/$(d)/$(k): $(CURDIR)/src/mx_bench_matmul.c $(CURDIR)/include/mx_native.h $(CURDIR)/data/mx_bench.h)))
 $(foreach d,spike mx_rocket,$(foreach k,attn_vpu_mid attn_vpu_fa,$(eval $(OUT)/$(d)/$(k): $(CURDIR)/src/attn_vpu.c)))
+$(foreach d,spike mx_rocket,$(foreach k,attn_flash_mid attn_flash_llama attn_flash_llama_wide attn_flash_llama_causal,$(eval $(OUT)/$(d)/$(k): $(CURDIR)/src/attn_flash.c)))
 $(foreach k,llama_mlp_small llama_mlp_tiny llama_mlp_tiny_t1 llama_mlp_tiny_db llama_mlp_tiny_native llama_mlp_small_native llama_mlp_tiny_native_ua llama_mlp_native,\
   $(eval $(OUT)/spike/$(k) $(OUT)/mx_rocket/$(k): $(CURDIR)/src/llama_mlp.c))
 
