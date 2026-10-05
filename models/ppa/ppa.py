@@ -41,9 +41,19 @@ REPO = Path(__file__).resolve().parents[2]
 CALIBRATED_DIM = 16
 TECH, CORNER = "tstech16c", "tt0p8v25c"
 CALIBRATION = ("--fmtset", "mxgemmini", "--calib", "new", "--blocks-variant", "new")
-#: With the LUT path on, the settings the workspace itself uses (perf/perf_model.py energy(), README's quad line):
-#: the PE with the quad arm, the calibration and blocks measured with LUTs, the fp8 QuantLut projection.
+#: The MxAll machine as the workspace measured it (perf/perf_model.py energy(), README's quad line): the PE with
+#: the quad arm, its calibration, and its Scratchpad and MxRequantizer (an FP8 E4M3 QuantLut with all finders).
 CALIBRATION_LUT = ("--fmtset", "mxgemmini-all", "--calib", "all", "--blocks-variant", "all", "--lut", "fp8")
+
+#: The hardware recipe's LUT unit (mx.lut.projFormat) -> the whole machine the workspace measured with that unit
+#: (blocks/blocks.yaml: requantizer_new is "default tapeout config, FP6 LUT", requantizer_all "MxAll config, FP8
+#: E4M3 codebook LUT with all deproject finders"). The build decides what is priced; the run's format decides
+#: only the stimulus. A LUT unit the workspace has not measured on the current RTL, or no LUT unit, has no
+#: price: ppa_args raises PpaError, which callers skip.
+MACHINES = {
+    "LutFP6E3M2": CALIBRATION,
+    "LutFP8E4M3": CALIBRATION_LUT,
+}
 
 #: run operand_fmt -> (pair_modes token, compose --stim, ops per PE per cycle, perf_model --act/--wei).
 #: The stim and products are what the workspace's pair_modes.spec(tok, tok, lut) gives for that format, LUT on
@@ -68,8 +78,8 @@ def format_tokens(dtype: str) -> tuple[str, str, int, str]:
 
 
 def uses_lut(dtype: str) -> bool:
-    """Does this format reach the mesh through LUTs? The kernels compiled for it carry them, whatever the
-    hardware recipe's mx.enable_lut says (config.recipe.check warns about that mismatch)."""
+    """Does this format reach the mesh through LUTs? The kernels compiled for it carry them. What hardware is
+    priced is the recipe's (MACHINES), not this."""
     from config.scheme import is_codebook
     return is_codebook(dtype)
 
@@ -114,18 +124,22 @@ def ppa_args(recipe, dtype: str = "fp8_e4m3") -> list[str]:
     (e, m = sig-1), so sig = m + 1 here. The acc ladder is run-length encoded
     per the model's --rows grammar; baseline must come out exactly as the
     model's documented tapeout invocation (tests/selftest_ppa.py pins this).
-    A LUT format is priced on the LUT hardware the way the workspace prices it
-    (CALIBRATION_LUT, the pair_modes products), matching its README quad line.
+    The machine priced is the recipe's LUT unit's (MACHINES); the format sets the stimulus, and a LUT format
+    the pair_modes products, matching the workspace's README quad line.
     """
     _, stim, products, _ = format_tokens(dtype)
-    lut = uses_lut(dtype)
+    proj = recipe.lut.projection if recipe.lut is not None else None
+    if proj not in MACHINES:
+        raise PpaError(f"{recipe.name}: MxGemmini-workspace has no measurement of a machine with "
+                       f"{'no LUT unit' if proj is None else f'a {proj} LUT unit'} on the current RTL; it has "
+                       f"{', '.join(MACHINES)} (blocks/blocks.yaml)")
     args = ["--rows", acc_rows(recipe),
             "--prod", f"{recipe.prod_e},{recipe.prod_m + 1}",
             "--cols", str(recipe.dim),
             "--stim", stim,
-            *(CALIBRATION_LUT if lut else CALIBRATION),
+            *MACHINES[proj],
             "--util", str(recipe.utilization), "--clock-ns", str(recipe.clock_ns)]
-    if lut:
+    if uses_lut(dtype):
         args += ["--products", str(products)]   # without a LUT the model's own default is the same number
     return args
 
@@ -191,6 +205,9 @@ def run_ppa(recipe, dtype: str = "fp8_e4m3") -> dict:
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise PpaError(f"compose_gemmini failed to run: {exc}") from exc
     if r.returncode != 0:
+        if "missing leaf point" in r.stderr:            # the workspace measured this machine, not with this format
+            raise PpaError(f"{recipe.name} running {dtype}: MxGemmini-workspace has no measurement of this "
+                           f"mesh with that stimulus ({r.stderr.strip().splitlines()[-1]})")
         raise PpaError(f"compose_gemmini exited {r.returncode}:\n{r.stderr[-1500:]}")
     out = _parse(r.stdout)
     out["model"] = {
@@ -202,6 +219,7 @@ def run_ppa(recipe, dtype: str = "fp8_e4m3") -> dict:
         "calibrated_dim": CALIBRATED_DIM,
         "calibrated": recipe.dim == CALIBRATED_DIM,
         "lut": uses_lut(dtype),
+        "lut_unit": recipe.lut.projection,
         "enable_lut": recipe.enable_lut,
         "workspace_head": _workspace_head(root),
     }

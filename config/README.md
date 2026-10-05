@@ -122,7 +122,8 @@ model (`rtl_exact/mxmesh/fp8`) on every recipe.
 ## Silicon cost (ppa) and predicted performance (perf)
 
 `models/ppa/ppa.py` maps a hardware recipe and the run's operand format onto the MxGemmini area and
-power model (`../MxGemmini-workspace/ppa`, or `MX_PPA_ROOT`). The clock and utilization come from
+power model (`../MxGemmini-workspace/ppa`, or `MX_PPA_ROOT`). The recipe's `mx.lut.projFormat` picks the
+measured machine (models/README.md); a build the workspace has not measured is reported as unavailable. The clock and utilization come from
 `implementation`. The model is calibrated at 16x16 in tstech16c at tt0p8v25c; those are labels of the
 calibration, not settings. Standalone: `python -m models.ppa.ppa --hw <recipe> [--run <run>] [--json]`.
 

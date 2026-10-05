@@ -108,8 +108,17 @@ still lives in `grade/pipeline.py`.
 
 Both are Amanda Shi's models (MxGemmini-workspace/ppa), called as she calls them. Each operand format gets the
 workspace's own tokens (`models/ppa/ppa.py: FORMATS`, held equal to its `pair_modes.spec` by
-`tests/selftest_ppa.py`); a LUT format is priced on the LUT hardware, because the kernels compiled for it
-carry LUTs.
+`tests/selftest_ppa.py`). The hardware recipe decides which machine ppa prices: its LUT unit
+(`mx.lut.projFormat`) names a machine the workspace measured whole, and the run's format sets only the stimulus.
+
+| `mx.lut.projFormat` | machine (workspace `blocks.yaml`) | ppa settings |
+|---|---|---|
+| LutFP6E3M2 (baseline) | tapeout default: `mxgemmini` PE, `requantizer_new` (FP6 LUT) | `--fmtset mxgemmini --calib new --blocks-variant new` |
+| LutFP8E4M3 | MxAll (`allMxFPConfig`): `mxgemmini-all` quad PE, `requantizer_all` (FP8 E4M3 LUT, all finders) | `--fmtset mxgemmini-all --calib all --blocks-variant all --lut fp8` |
+| LutFP8E5M2, LutFP6E2M3, none | not measured on the current RTL | PpaError: callers record ppa as unavailable |
+
+A format the workspace never ran on that machine's mesh (fp6_e2m3 on either; the quad arm on the tapeout PE)
+is a PpaError too, with the missing point named. Nothing is extrapolated.
 
 | operand format | ppa `--stim` | products | perf `--act/--wei` | LUT |
 |---|---|---|---|---|
@@ -120,8 +129,8 @@ carry LUTs.
 | fp6_e2m3 | fp6e2m3q | 4 | fp6e2m3 | yes |
 | fp4_e2m1 | fp4 | 4 | fp4 | no |
 
-`fp8n` / `fp8qn` are the NaN-safe E4M3 kernels (mxgen reads E4M3 272..448 as NaN). With a LUT, ppa uses the
-workspace's LUT settings (`--fmtset mxgemmini-all --calib all --blocks-variant all --lut fp8`), and perf runs
+`fp8n` / `fp8qn` are the NaN-safe E4M3 kernels (mxgen reads E4M3 272..448 as NaN). With a LUT format, ppa adds
+the format's products (`--products`), and perf runs
 `--lut` with the chip's LUT layout: one LUT per 2**G rows of A, columns of W and rows of C (G = `run.lut.group`,
 required), each load moving only the tables a stage needs, as our emitter issues them (the model does not
 count the C LUT the emitter also loads for a bf16 output; the record notes it). perf's `--energy` gets the recipe's
