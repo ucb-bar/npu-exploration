@@ -68,6 +68,8 @@ def perf_args(recipe, dtype: str, m: int, n: int, k: int, out_fmt: str, *,
     (mxgemm_emit._emit_load_luts: N/2**G, M/2**G, M/2**G), not the full 64-table set per port the workspace's
     own kernels loaded (its --lut-full-set). The emitter also loads a C LUT for a bf16 output, which the model
     does not count: M/2**G tables, noted in the record.
+    As measured, a span that is not a multiple of 2**G or needs more LUTs than the build's mx.lut.numEntries is
+    refused, as the emitter refuses it; ``as_measured=False`` models it anyway (a production GEMM).
     With --energy the power model gets the recipe's accumulator ladder, not the tapeout default.
     ``tiles``, ``dma_bw`` and ``spad_kb`` describe a production GEMM and need ``as_measured=False``.
     """
@@ -84,6 +86,13 @@ def perf_args(recipe, dtype: str, m: int, n: int, k: int, out_fmt: str, *,
         if lut_group is None:
             raise PerfError(f"{dtype} is a LUT format: lut_group (the run recipe's lut.group) is required")
         g = 1 << lut_group
+        if as_measured:                     # the kernel the emitter would build: whole groups, within the tables
+            for table, sel, span, axis in (("B", 0, n, "N"), ("A", 1, m, "M"), ("C", 2, m, "M")):
+                if span % g:
+                    raise PerfError(f"{axis}={span} is not a multiple of 2**G = {g} (lut.group {lut_group})")
+                if recipe.lut is not None and span >> lut_group > recipe.lut.tables[sel]:
+                    raise PerfError(f"{table} table: {axis}={span} at G={lut_group} needs {span >> lut_group} "
+                                    f"LUTs, and {recipe.name} holds {recipe.lut.tables[sel]} (mx.lut.numEntries)")
         args += ["--lut", "--lut-a", str(g), str(k), "--lut-w", str(k), str(g), "--lut-c", str(g), str(n)]
     if as_measured:
         if tiles or dma_bw or spad_kb:
@@ -286,7 +295,7 @@ def line(perf: dict) -> str:
 def main() -> int:
     import argparse
     import json as _json
-    from config.recipe import RecipeError, load_hardware, load_run
+    from config.recipe import RecipeError, check, load_hardware, load_run
     ap = argparse.ArgumentParser(
         description="Predicted GEMM timeline on a hardware recipe's machine (perf model)")
     ap.add_argument("--hw", "--config", dest="hw", default="baseline", help="hardware recipe name or .json path")
@@ -307,6 +316,7 @@ def main() -> int:
     stage = {"stage": 0, "m": a.m, "k": a.k, "n": a.n, "out_dtype": a.out_fmt}
     try:
         hw, run = load_hardware(a.hw), load_run(a.run)
+        check(hw, run, "perplexity")        # the format, reducer and LUT unit agree; not the kernel path's limits
         opts = {"lut_group": run.lut.group if run.lut else None}
         if a.ideal:
             opts.update(tiles=tuple(a.tiles) if a.tiles else None, dma_bw=a.dma_bw,

@@ -58,6 +58,14 @@ def main() -> int:
         check("a LUT format without lut_group is refused (no default G)", False, "accepted")
     except PerfError as exc:
         check("a LUT format without lut_group is refused (no default G)", "lut_group" in str(exc))
+    for n, why in ((60, "a partial 2**G group"), (4096, "more LUTs than mx.lut.numEntries")):
+        try:
+            perf_args(load("lut_fp8e5m2"), "fp8_e5m2", 64, n, 64, "bf16", lut_group=3)
+            check(f"as measured, N={n} at G=3 is refused ({why}), as the emitter does", False, "accepted")
+        except PerfError as exc:
+            check(f"as measured, N={n} at G=3 is refused ({why}), as the emitter does", True, str(exc))
+    check("--ideal models N=4096 at G=3 (a production GEMM, not the emitted kernel)",
+          "--lut" in perf_args(load("lut_fp8e5m2"), "fp8_e5m2", 64, 4096, 64, "bf16", lut_group=3, as_measured=False))
     en = perf_args(load("wide_acc"), "fp8_e4m3", 64, 64, 64, "bf16", energy=True)
     check("--energy carries the recipe's ladder", en[en.index("--acc-rows") + 1] == "16x8,8")
     try:

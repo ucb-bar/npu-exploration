@@ -273,14 +273,28 @@ def build(recipe, *, force: bool = False, gxx: str | None = None, quiet: bool = 
     return so
 
 
+def program(recipe) -> str:
+    """sha256 of what spike would run for this recipe: the patched gemmini.cc (the recipe's name, which only
+    labels an #error message, masked) and the other pinned sources. Two recipes with equal programs are the
+    same spike model, whatever else differs between them (``mx.lut``, ``implementation``, ...): it is the
+    patched source itself, so a field spike starts reading moves it with no list to keep in step."""
+    up = upstream_dir()
+    text, _ = patch((up / "gemmini.cc").read_text(encoding="utf-8"), recipe)
+    text = text.replace(f'#error "recipe {recipe.name} has', '#error "recipe has')
+    return hashlib.sha256(f"{sources_fingerprint(up)}\n{text}".encode()).hexdigest()[:16]
+
+
 def resolve(recipe, *, quiet: bool = True) -> Path | None:
     """The .so to run this recipe on, or None to use the stock model.
 
-    A recipe whose hardware matches the stock build needs nothing built: the shipped
-    model already IS that machine.
+    A recipe whose spike program is baseline's needs nothing built: the shipped model already IS that
+    machine. Equal ``build_id``s decide it without reading any source; otherwise the patched programs do,
+    so a build that differs from baseline only where spike never looks (a LUT build's ``mx.lut``) runs on
+    the stock model instead of building a byte-identical one.
     """
     from config.recipe import load_hardware
-    if recipe.build_id() == load_hardware("baseline").build_id():
+    base = load_hardware("baseline")
+    if recipe.build_id() == base.build_id() or program(recipe) == program(base):
         return None
     return build(recipe, quiet=quiet)
 
@@ -313,8 +327,9 @@ def main() -> int:
     for n in names:
         try:
             r = load_hardware(n)
-            if r.build_id() == load_hardware("baseline").build_id():
-                print(f"[stock     ] {n}: hardware identical to baseline, no build needed")
+            base = load_hardware("baseline")
+            if r.build_id() == base.build_id() or program(r) == program(base):
+                print(f"[stock     ] {n}: the same spike program as baseline, no build needed")
                 continue
             build(r, force=a.force, gxx=a.gxx)
         except (RecipeError, BuildError) as exc:

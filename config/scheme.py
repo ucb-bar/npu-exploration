@@ -33,7 +33,9 @@ per Arithmetic); an accumulator list whose length is not the mesh dimension. A c
 (``is_codebook``) runs through the chip's tables: ``mxq.block.lut``, the rule ``compiler/codebook.py``
 also calls, so both operands (A: 2**G tokens per table, B: 2**G output channels per table) see the 16
 entries the chip would. A layer's output is not requantized through a C table here (no chained stage),
-and the chip's table capacity is enforced on the kernel path only; ``lut_record`` says so in the record.
+and the chip's table capacity is enforced on the kernel path (and perf's as-measured model) only;
+``lut_record`` says so in the record. Here a token or channel count that is not a multiple of 2**G gets one
+last table over the leftover rows (mxq.lut), so any layer runs; the chip's loader takes whole groups only.
 """
 from __future__ import annotations
 

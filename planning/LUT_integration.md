@@ -486,8 +486,8 @@ Refused on both the kernel and the perplexity path:
 - `raddrWidth` ≠ 4, `numBits` ≠ 16 × `rdataWidth`, non-zero code widths;
 - `calibration` missing when a table is `"calibrated"`, or written when none is.
 
-Kernel path only: a stage whose `m >> G` or `n >> G` exceeds `numEntries` for that table (spike would accept up to
-2048; the RTL holds 64).
+Kernel path and perf's as-measured model only: a stage whose `m` or `n` is not a multiple of 2^G, or whose
+`m >> G` or `n >> G` exceeds `numEntries` for that table (spike would accept up to 2048; the RTL holds 64).
 
 ## Hard-coded values and overrides removed
 

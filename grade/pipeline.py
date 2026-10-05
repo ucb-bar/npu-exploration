@@ -46,6 +46,8 @@ REPO = Path(__file__).resolve().parents[1]
 
 from compiler.lower import MatmulStage, command_buffer, lower, refuse_graph_dtype  # noqa: F401
 SPEC_INPUT = "x"
+#: the MX_LIBGEMMINI this module last set, so a later stock-model recipe can take it back
+_LIBGEMMINI_SET: str | None = None
 
 # THE SEAM CONSTANTS ARE GONE, deliberately (merlin_glue_port_plan.md D3, Step 1).
 #
@@ -241,10 +243,16 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
                 so = resolve_build(recipe)
             except BuildError as exc:
                 raise RuntimeError(f"no spike model for recipe {recipe.name!r}: {exc}") from exc
+            global _LIBGEMMINI_SET
             if so is not None:
-                os.environ["MX_LIBGEMMINI"] = str(so)
+                os.environ["MX_LIBGEMMINI"] = _LIBGEMMINI_SET = str(so)
                 tel.log("build", f"recipe model {recipe.build_id()} -> {so}")
             else:
+                # An earlier recipe in this process may have pointed the runner at its own build; a user's
+                # MX_LIBGEMMINI stays.
+                if _LIBGEMMINI_SET is not None and os.environ.get("MX_LIBGEMMINI") == _LIBGEMMINI_SET:
+                    del os.environ["MX_LIBGEMMINI"]
+                _LIBGEMMINI_SET = None
                 tel.log("build", f"recipe {recipe.name!r} matches the stock build; "
                                  "using the shipped libgemmini.so")
         tel.log("toolchain", f"gcc={mx.runner.gcc_path()}  spike={mx.runner.spike_path()}")
