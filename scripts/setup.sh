@@ -106,7 +106,10 @@ have_mxq_branch() { git -C "$REPO/MXQuant" rev-parse --verify -q "origin/$MXQUAN
 have_toolchain()  { [ -x "$RISCV_DIR/bin/riscv64-unknown-elf-gcc" ] \
                     && [ -x "$ROOT/.conda-env/bin/dtc" ] && [ -x "$CONDA_GXX" ]; }
 have_spike()      { [ -x "$RISCV_DIR/bin/spike" ] && [ -f "$RISCV_DIR/include/riscv/mmu.h" ]; }
+# gemmini_perf.cc and vpu_ref.h: the timing model and VPU reference gemmini.cc needs since gemmini-mx-cleanup c6a73bc.
 have_gemmini()    { [ -f "$LIBGEMMINI_DIR/gemmini.cc" ] && [ -f "$LIBGEMMINI_DIR/mx_fp_math.h" ] \
+                    && [ -f "$LIBGEMMINI_DIR/gemmini_perf.cc" ] \
+                    && [ -f "$GEMMINI_DIR/software/gemmini-rocc-tests/include/vpu_ref.h" ] \
                     && [ -d "$GEMMINI_DIR/software/gemmini-rocc-tests/bareMetalC" ]; }
 have_merlin()     { [ -e "$REPO/merlin/merlin/python" ]; }
 have_mxq()        { [ -f "$REPO/microscaling-quant/mxq/__init__.py" ]; }
@@ -114,11 +117,9 @@ have_ppa()        { [ -f "${MX_PPA_ROOT:-$PPA_DIR/ppa}/compose_gemmini.py" ]; }
 have_libgemmini() {
     local so="$LIBGEMMINI_DIR/libgemmini.so"
     [ -f "$so" ] || return 1
-    local s
-    for s in "$LIBGEMMINI_DIR/gemmini.cc" "$LIBGEMMINI_DIR/mx_fp_math.h"; do
-        [ -f "$s" ] && [ "$s" -nt "$so" ] && return 1
-    done
-    return 0
+    # stale if any source is newer: gemmini.cc, its headers, the timing model (perf/)
+    [ -z "$(cd "$LIBGEMMINI_DIR" && find gemmini.cc gemmini.h gemmini_params.h mx_fp_math.h gemmini_perf.h \
+              gemmini_perf.cc perf -newer libgemmini.so 2>/dev/null | head -1)" ]
 }
 
 # ---- phases --------------------------------------------------------------------------
@@ -210,7 +211,8 @@ phase_gemmini() {
     say gemmini "init submodules: software/libgemmini software/gemmini-rocc-tests (recursive)"
     git -C "$GEMMINI_DIR" submodule update --init --recursive \
         software/libgemmini software/gemmini-rocc-tests
-    have_gemmini || die gemmini "clone finished but expected sources are missing under $GEMMINI_DIR"
+    have_gemmini || die gemmini "sources missing under $GEMMINI_DIR (an existing clone older than \
+gemmini-mx-cleanup c6a73bc lacks the timing model: git -C $GEMMINI_DIR checkout origin/$GEMMINI_REF, then re-run)"
     say gemmini "hardware sources pinned at $(git -C "$GEMMINI_DIR" rev-parse --short HEAD) ($GEMMINI_REF)"
 }
 
@@ -223,9 +225,11 @@ phase_libgemmini() {
     local gxx="${MX_HOST_GXX:-$CONDA_GXX}"
     [ -x "$gxx" ] || die libgemmini "no compiler at $gxx (set MX_HOST_GXX to override)"
     say libgemmini "building stock libgemmini.so with $gxx"
-    # Same compile line models/spike/build_spike.py uses for per-recipe builds.
+    # Same compile line models/spike/build_spike.py uses for per-recipe builds: gemmini.cc, the timing
+    # model's gemmini_perf.cc and every perf/ source (the libgemmini Makefile's file list).
     (cd "$LIBGEMMINI_DIR" && "$gxx" -L "$RISCV_DIR/lib" -Wl,-rpath,"$RISCV_DIR/lib" -shared \
-        -o libgemmini.so -std=c++17 -I "$RISCV_DIR/include" -I . -fPIC -O3 gemmini.cc)
+        -o libgemmini.so -std=c++17 -I "$RISCV_DIR/include" -I . -fPIC -O3 \
+        gemmini.cc gemmini_perf.cc $(find perf -name '*.cc' | sort))
     have_libgemmini || die libgemmini "build produced no fresh libgemmini.so"
 }
 

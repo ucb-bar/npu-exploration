@@ -40,8 +40,17 @@ SOURCES = ("gemmini.cc", "gemmini.h", "gemmini_params.h", "mx_fp_math.h", "gemmi
 PERF_DIR = "perf"
 
 
+#: What this checkout's model needs from the chipyard tree, named when a source is missing.
+NEEDS = "libgemmini with the timing model (gemmini_perf.*, perf/) and gemmini-rocc-tests with include/vpu_ref.h: gemmini-mx-cleanup c6a73bc or later pins both (libgemmini 713e706, gemmini-rocc-tests 230eae2)"
+
+
 def source_files(up: Path) -> list[str]:
     """SOURCES plus every file of the timing model (perf/), as paths relative to the libgemmini dir."""
+    missing = [f for f in SOURCES if not (up / f).is_file()]
+    if not (up.parent / "gemmini-rocc-tests" / "include" / "vpu_ref.h").is_file():
+        missing.append("../gemmini-rocc-tests/include/vpu_ref.h")
+    if missing:
+        raise BuildError(f"{up} lacks {', '.join(missing)}; the spike model needs {NEEDS}")
     perf = sorted(str(p.relative_to(up)) for p in (up / PERF_DIR).rglob("*") if p.is_file())
     return list(SOURCES) + perf
 
