@@ -7,6 +7,7 @@ document next to the claim they correct, rather than the claim being quietly del
 | file | what it covers |
 |---|---|
 | `merlin_glue_port_plan.md` | **the live one** — the port itself, every step's gate |
+| `perf_model_plan.md` | the timing model inside libgemmini: func / perf / both modes, VPU, host CPU estimate |
 | `npu_exploration_bridge_plan.md` | how this repo bridges the model side and the compiler side |
 | `chain_seam_hw_notes.md` | the hardware facts a chained matmul depends on: scale layouts, the resident seam, what the MX loop path does and does not honour |
 | `llama_layer_hw_plan.md` | the real TinyLlama decoder layer — capture, both kernels, the error decomposition, and the small-D variant for RTL |

@@ -7,7 +7,7 @@ libgemmini's MX precision ladder is compile-time: ``prod_e``/``prod_m``, the per
 possible way -- silently, with the mxquant model honouring the recipe, the device ignoring
 it, and the report blaming the hardware for a mismatch we caused.
 
-We never edit the submodule. The four sources are copied into
+We never edit the submodule. The sources (SOURCES) are copied into
 ``out/builds/<build_id>/src`` and patched there; spike is pointed at the result
 through the ``MX_LIBGEMMINI`` override the runner already honours
 (``runner.py:84`` -> ``--extlib=``).
@@ -34,8 +34,16 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 BUILD_ROOT = REPO / "out" / "builds"
 
-#: The four files that make up the model.
-SOURCES = ("gemmini.cc", "gemmini.h", "gemmini_params.h", "mx_fp_math.h")
+#: The files that make up the model (gemmini_perf.* is the timing model, planning/perf_model_plan.md).
+SOURCES = ("gemmini.cc", "gemmini.h", "gemmini_params.h", "mx_fp_math.h", "gemmini_perf.h", "gemmini_perf.cc")
+#: The timing model's own directory: every file in it is part of the model.
+PERF_DIR = "perf"
+
+
+def source_files(up: Path) -> list[str]:
+    """SOURCES plus every file of the timing model (perf/), as paths relative to the libgemmini dir."""
+    perf = sorted(str(p.relative_to(up)) for p in (up / PERF_DIR).rglob("*") if p.is_file())
+    return list(SOURCES) + perf
 
 class BuildError(RuntimeError):
     pass
@@ -99,7 +107,7 @@ def upstream_dir() -> Path:
 
 
 def sources_fingerprint(up: Path) -> str:
-    """sha256 over all four pinned sources, not just gemmini.cc.
+    """sha256 over all pinned sources, not just gemmini.cc.
 
     The build cache is keyed on ``build_id``, which hashes the RECIPE only -- by
     design, so an fp8-vs-fp4 sweep shares a build. That leaves the other half of the
@@ -107,7 +115,7 @@ def sources_fingerprint(up: Path) -> str:
     a different machine wearing the same build_id. This fingerprint is that half.
     """
     h = hashlib.sha256()
-    for f in SOURCES:
+    for f in source_files(up):
         h.update(f.encode())
         h.update((up / f).read_bytes())
     return h.hexdigest()[:16]
@@ -224,8 +232,13 @@ def build(recipe, *, force: bool = False, gxx: str | None = None, quiet: bool = 
 
     srcdir = out / "src"
     srcdir.mkdir(parents=True, exist_ok=True)
-    for f in SOURCES:
+    for f in source_files(up):
+        (srcdir / f).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(up / f, srcdir / f)
+    # gemmini.cc includes "../gemmini-rocc-tests/include/vpu_ref.h" relative to itself: give the copy the same neighbour
+    tests = srcdir.parent / "gemmini-rocc-tests"
+    if not tests.exists():
+        tests.symlink_to(up.parent / "gemmini-rocc-tests")
 
     text = (srcdir / "gemmini.cc").read_text(encoding="utf-8")
     patched, changes = patch(text, recipe)
@@ -234,7 +247,8 @@ def build(recipe, *, force: bool = False, gxx: str | None = None, quiet: bool = 
     riscv = os.environ.get("RISCV") or str(chipyard_root() / ".conda-env/riscv-tools")
     cmd = [gxx, "-L", f"{riscv}/lib", f"-Wl,-rpath,{riscv}/lib", "-shared",
            "-o", str(so), "-std=c++17", "-I", f"{riscv}/include", "-I", str(srcdir),
-           f"-DGEMMINI_DIM={recipe.dim}", "-fPIC", "-O3", str(srcdir / "gemmini.cc")]
+           f"-DGEMMINI_DIM={recipe.dim}", "-fPIC", "-O3", str(srcdir / "gemmini.cc"), str(srcdir / "gemmini_perf.cc"),
+           *(str(srcdir / f) for f in source_files(up) if f.startswith(PERF_DIR + "/") and f.endswith(".cc"))]
     if not quiet:
         print(f"[build     ] {bid} ({recipe.name})")
         for c in changes:
