@@ -119,7 +119,7 @@ def chain_refusal(fmt: "MxFormat") -> str | None:
     The requantizer normalizes its output to ``[2**out_pmax, 2**(out_pmax+1))``. The next stage
     reads those values through a codebook, and the hardware's nearest-entry finder compares in a
     fixed-point domain whose width mask makes large magnitudes ALIAS onto small ones
-    (``compiler/codebook._fixed_point``). If the requant range starts ABOVE the largest value the finder can
+    (``mxq.lut.formats``). If the requant range starts ABOVE the largest value the finder can
     represent faithfully, every element aliases and the chain returns noise. That is exactly what
     the codebook formats used to do:
 
@@ -161,11 +161,6 @@ E8M0_BIAS = 127
 
 #: The output-only pseudo-format: the raw bf16 accumulator readout, no requantization.
 BF16_FMT_CODE = 3
-
-#: Codebook granularity ``G``: one 16-entry LUT per ``2**G`` rows of A / columns of B
-#: (``gemmini.cc:1392`` ``lut_idx = (i*TM + m) >> G``). Every shipped LUT test uses 1, and it is
-#: also what ``gemmini_mxquant_config_mvout``'s last argument carries.
-LUT_GRANULARITY = 1
 
 #: A codebook is 16 entries of ``entry_bits``, LE-packed into 32-bit words.
 def lut_words(entry_bits: int) -> int:

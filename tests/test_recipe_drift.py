@@ -109,6 +109,77 @@ def parse_scala(p: Path) -> dict:
             "prod": prod, "acc": acc}
 
 
+#: hardware recipe -> the GemminiMxFPConfigs entry whose LUT unit its mx.lut mirrors (ConfigsFP.scala).
+LUT_CONFIG = {"baseline": "standaloneMxFPConfig", "flat_acc4": "standaloneMxFPConfig",
+              "narrow_prod": "standaloneMxFPConfig", "wide_acc": "standaloneMxFPConfig",
+              "lut_fp8e4m3": "allMxFPConfig", "lut_fp8e5m2": "e5m2MxFPConfig", "lut_fp6e2m3": "e2m3OnlyMxFPConfig"}
+_LUT_ORDER = ("numBits", "numEntries", "rdataWidth", "raddrWidth", "lutUpdateRegularityWidth", "projFormat",
+              "actCodeWidth", "weiCodeWidth")
+
+
+def _scala_value(v: str):
+    v = v.strip()
+    m = re.fullmatch(r"Seq\(([^)]*)\)", v)
+    if m:
+        return [int(x) for x in m.group(1).split(",")]
+    return int(v) if re.fullmatch(r"-?\d+", v) else v
+
+
+def _split_args(text: str) -> list[str]:
+    """Top-level comma split of a Scala argument list (Seq(...) keeps its commas)."""
+    out, depth, cur = [], 0, ""
+    for ch in text:
+        depth += ch == "("
+        depth -= ch == ")"
+        if ch == "," and depth == 0:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    return [a for a in (out + [cur]) if a.strip()]
+
+
+def parse_lut_configs(configs_fp: Path, fragments: Path) -> dict:
+    """``{config: GemminiLUTConfig as a dict}`` for each config in LUT_CONFIG: the case class defaults
+    (MxConfigFragments.scala) overridden by the config's own ``lut = Some(GemminiLUTConfig(...))``,
+    or the config it ``.copy``s when it sets none."""
+    frag = fragments.read_text(encoding="utf-8")
+    body = frag[frag.index("case class GemminiLUTConfig("):]
+    body = body[body.index("(") + 1:body.index(") {")]
+    defaults = {}
+    for line in body.splitlines():
+        m = re.match(r"\s*(\w+):\s*[\w\[\]]+\s*=\s*(.+?),?\s*(//.*)?$", line)
+        if m:
+            defaults[m.group(1)] = _scala_value(m.group(2).rstrip(","))
+    text = configs_fp.read_text(encoding="utf-8")
+
+    def config(name: str) -> dict:
+        start = text.index(f"val {name} = ")
+        nxt = re.search(r"\n  val \w+ = ", text[start + 1:])
+        block = text[start:start + 1 + nxt.start()] if nxt else text[start:]
+        m = re.search(r"lut = Some\(GemminiLUTConfig\(", block)
+        if not m:
+            parent = re.match(rf"val {name} = (\w+)\.copy", block).group(1)
+            return config(parent)
+        i, depth = m.end(), 1
+        j = i
+        while depth:
+            depth += block[j] == "("
+            depth -= block[j] == ")"
+            j += 1
+        out, pos = dict(defaults), 0
+        for arg in _split_args(block[i:j - 1]):
+            if "=" in arg and not arg.strip().startswith("Seq"):
+                k, v = arg.split("=", 1)
+                out[k.strip()] = _scala_value(v)
+            else:
+                out[_LUT_ORDER[pos]] = _scala_value(arg)
+                pos += 1
+        return out
+
+    return {c: config(c) for c in set(LUT_CONFIG.values())}
+
+
 def parse_define(p: Path, name: str) -> int | None:
     """``#define NAME <int>``; or, since libgemmini 9f10afe, ``#define DIM GEMMINI_DIM`` with the
     default ``#define GEMMINI_DIM <int>`` under an ``#ifndef`` (build_spike passes -DGEMMINI_DIM)."""
@@ -161,6 +232,17 @@ def main() -> int:
               tuple(zip(r.acc_e, r.acc_m)))
     else:
         print(f"  skip  ConfigsFP.scala not found at {scala}")
+
+    print("\nevery hardware recipe's mx.lut vs the GemminiLUTConfig it mirrors (ConfigsFP.scala)")
+    frags = scala.parent / "MxConfigFragments.scala"
+    if scala.exists() and frags.exists():
+        luts = parse_lut_configs(scala, frags)
+        for name, cfg in LUT_CONFIG.items():
+            want = luts[cfg]
+            got = load_hardware(name).raw["mx"]["lut"]
+            check(f"{name}.mx.lut == {cfg}", {k: want[k] for k in _LUT_ORDER}, {k: got[k] for k in _LUT_ORDER})
+    else:
+        print(f"  skip  ConfigsFP.scala / MxConfigFragments.scala not found under {scala.parent}")
 
     print("\nbaseline.json vs the two gemmini_params.h (spike's and the compiler's)")
     check("libgemmini DIM", parse_define(lg / "gemmini_params.h", "DIM"), r.dim)

@@ -5,8 +5,10 @@ flush, block size, scratchpad, clock and utilization. Every field except ``name`
 and ``provenance`` is hashed into ``build_id``, which keys the spike build, the perplexity cache and
 every record. ``config/run/<name>.json`` is how that machine is driven: operand format, rounding,
 scale floor, reducer and the grading tolerance, and, for a LUT format, how its LUTs are made
-(``lut``: source, group, pick); ``run_id`` hashes it the same way. A run recipe never triggers a build.
-The hardware recipe says whether the LUT unit exists (``mx.enable_lut``); the run recipe says how it is used.
+(``lut``); ``run_id`` hashes it the same way. A run recipe never triggers a build.
+The hardware recipe says what LUT unit was built (``mx.lut``, the RTL's GemminiLUTConfig); the run recipe
+says how it is used (``lut``). Every LUT setting is written in one of the two files: the code holds no
+default for any of them (planning/LUT_integration.md).
 
 Every key is read by something; an unknown key is refused by name. ``check(hw, run, path)`` refuses
 the combinations a path cannot follow (the kernel path runs on spike and the chip's requantizer, the
@@ -17,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -33,7 +34,7 @@ _HW_TOP = {"name", "description", "provenance", "array", "types", "mx", "accumul
 _HW_SECTIONS = {
     "array": {"meshRows", "meshColumns", "tileRows", "tileColumns"},
     "types": {"meshProdPrecisionList", "meshAccPrecisionList", "prodFloor"},
-    "mx": {"scaleSize", "scaleSizeOut", "enable_lut"},
+    "mx": {"scaleSize", "scaleSizeOut", "enable_lut", "lut"},
     "accumulator": {"acc_read_full_width", "acc_read_small_width"},
     "scratchpad": {"banks", "rows"},
     "implementation": {"clock_ns", "utilization"},
@@ -43,8 +44,31 @@ _RUN_KEYS = {"name", "description", "operand_fmt", "rounding", "scale_floor", "r
              "allow_lossy_chain", "fp32_tol", "lut"}
 #: Optional run keys: absent means today's behaviour, and leaves run_id unchanged.
 _RUN_OPTIONAL = {"description", "lut"}
-_LUT_KEYS = {"source", "group", "pick"}
-LUT_PICKS = ("host", "hardware")
+
+#: mx.lut: the RTL's GemminiLUTConfig field names (MxConfigFragments.scala:48), so one JSON describes both.
+_HW_LUT_KEYS = {"projFormat", "rdataWidth", "raddrWidth", "numEntries", "numBits", "lutUpdateRegularityWidth",
+                "actCodeWidth", "weiCodeWidth"}
+#: The LUT formats each projection's requantizer can index: the nearest-entry finders QuantLut builds for
+#: it (QuantLut.scala:105-155, gemmini 04d7502). A fact of the RTL, looked up by mx.lut.projFormat.
+LUT_SERVES = {
+    "LutFP6E3M2": ("fp6_e3m2",),
+    "LutFP6E2M3": ("fp6_e2m3",),
+    "LutFP8E5M2": ("fp8_e5m2", "fp6_e3m2"),
+    "LutFP8E4M3": ("fp8_e4m3_quad", "fp8_e5m2", "fp6_e3m2", "fp6_e2m3"),
+}
+_FP8_PROJECTIONS = ("LutFP8E4M3", "LutFP8E5M2")     # GemminiLUTConfig.isFp8Proj: requires rdataWidth == 8
+
+#: The run recipe's lut block. Every key is required; each accepts the values the compiler implements
+#: today. The others the plan names (top16, calibrated, given tables, finder pick) are refused by name.
+_LUT_KEYS = {"group", "weights", "activations", "outputs", "pick", "fit"}
+_FIT_KEYS = {"method", "init", "max_iters"}
+LUT_CHOICES = {
+    "weights": ("data",),           # B tables: k-means over the weights' own codes
+    "activations": ("data",),       # A tables: k-means over each input's own codes, on the host
+    "outputs": ("estimate",),       # C tables: k-means over an fp32 run of this input (compiler/lower.py)
+    "pick": ("host",),              # A and B indices: the host's nearest entry by value
+}
+FIT_CHOICES = {"method": ("kmeans",), "init": ("quantile",)}
 
 #: What the kernel path can follow. Each is a fact of spike, the emitters or the chip's own
 #: requantizer, not a preference: a recipe asking for anything else is refused by check().
@@ -53,7 +77,6 @@ KERNEL_BLOCK = 32           # mx_host.h MX_BLOCK, compiler/formats.BLOCK, spike'
 KERNEL_SCRATCHPAD = (4, 4096)   # libgemmini gemmini_params.h BANK_NUM, BANK_ROWS at DIM 16
 KERNEL_ROUNDING = "rne"     # the requantizer (gemmini.cc) and mx_host.h round to nearest even
 KERNEL_SCALE_FLOOR = 2.0 ** -23     # the fp8 requantizer floors the block max at FLT_EPSILON
-KERNEL_LUT_GROUP = 1        # one LUT per 2**G rows of A / columns of B: compiler/formats.LUT_GRANULARITY, every shipped test
 
 
 class RecipeError(ValueError):
@@ -93,6 +116,23 @@ class MxFloatSpec:
 
 
 @dataclass(frozen=True)
+class LutUnit:
+    """``mx.lut``: the LUT unit as built (GemminiLUTConfig). Field for field the RTL's own."""
+    projection: str             # projFormat: which finders the requantizer has (LUT_SERVES)
+    entry_bits: int             # rdataWidth: bits per LUT entry
+    index_bits: int             # raddrWidth: log2 entries per LUT
+    tables: tuple[int, ...]     # numEntries: LUTs each table holds, by MX_LOAD_LUT sel (0 B, 1 A, 2 C)
+    word_bits: tuple[int, ...]  # numBits: one LUT's write word
+    group_bits: int             # lutUpdateRegularityWidth: the width of the G register
+    act_code_bits: int          # actCodeWidth: 0 = rdataWidth (asymmetric builds set it)
+    wei_code_bits: int          # weiCodeWidth: 0 = rdataWidth
+
+    @property
+    def serves(self) -> tuple[str, ...]:
+        return LUT_SERVES[self.projection]
+
+
+@dataclass(frozen=True)
 class Hardware:
     """A validated hardware recipe."""
     name: str
@@ -104,7 +144,8 @@ class Hardware:
     prod_floor: int | None      # types.prodFloor: a product below 2^prodFloor is zero; None = no flush
     block: int                  # mx.scaleSize      -> gemmini.cc GROUP
     block_out: int              # mx.scaleSizeOut   -> gemmini.cc GROUP_OUT
-    enable_lut: bool
+    enable_lut: bool            # mx.enable_lut: a copy of the RTL field, recorded; nothing decides from it
+    lut: LutUnit | None         # mx.lut: the LUT unit, or None for a build without one
     banks: int                  # scratchpad.banks  -> the emitters' bank_num
     rows: int                   # scratchpad.rows   -> the emitters' bank_rows
     clock_ns: float             # implementation.clock_ns    -> ppa, perf
@@ -168,21 +209,32 @@ class Hardware:
 
 
 @dataclass(frozen=True)
+class Fit:
+    """How one table's 16 entries are fitted to its group's codes (compiler/codebook.build_codebooks)."""
+    method: str                 # "kmeans": weighted 1-D k-means over the distinct codes
+    init: str                   # "quantile": seeds spread by mass
+    max_iters: int              # Lloyd passes at most
+
+
+@dataclass(frozen=True)
 class Lut:
-    """How a LUT format's LUTs (16 entries, one per 2**group columns, 4-bit indices) are made.
+    """How a LUT format's tables are made: the run recipe's ``lut`` block, every field written.
 
-    source  "data": built from each operand's own values (the compiler's k-means rule), or a path to a
-            .json of given LUTs (e.g. reviewed ones), resolved next to the run recipe
-    group   G: one LUT per 2**G rows of A / columns of B, the argument gemmini_mxquant_config_mvout carries
-    pick    who picks an activation's index in the perplexity path: "host" (nearest by value) or
-            "hardware" (the device's fixed-point finder). The kernel path does not read it: the host picks
-            what it sends and spike's finder picks every chained output.
+    group        G: one LUT per 2**G rows of A, columns of B, rows of C (gemmini_mxquant_config_mvout)
+    weights      where B tables come from
+    activations  where A tables come from (inputs the host quantizes)
+    outputs      where C tables come from (outputs the chip requantizes, in a chain)
+    pick         who picks A and B indices
+    fit          how a table is fitted
 
-    Read by nothing yet: the LUT work (compiler, models/mxquant, mxq.nn.torchao) consumes it.
+    The values each accepts are ``LUT_CHOICES`` / ``FIT_CHOICES``: what the compiler implements.
     """
-    source: str = "data"
-    group: int = KERNEL_LUT_GROUP
-    pick: str = "host"
+    group: int
+    weights: str
+    activations: str
+    outputs: str
+    pick: str
+    fit: Fit
 
 
 @dataclass(frozen=True)
@@ -208,7 +260,9 @@ class Run:
         return _digest(self.fields())
 
     def describe(self) -> str:
-        lut = "" if self.lut is None else f"  lut {self.lut.source} G={self.lut.group} pick {self.lut.pick}"
+        lut = "" if self.lut is None else (
+            f"  lut G={self.lut.group} B {self.lut.weights} A {self.lut.activations} C {self.lut.outputs}"
+            f" pick {self.lut.pick} {self.lut.fit.method}/{self.lut.fit.init}x{self.lut.fit.max_iters}")
         return (f"{self.name}  {self.operand_fmt}  {self.rounding}  floor {self.scale_floor:g}  "
                 f"reduce {self.reduce}{lut}")
 
@@ -281,6 +335,10 @@ def parse_hardware(raw: dict, *, path: Path | None = None) -> Hardware:
     for k in ("clock_ns", "utilization"):
         if k not in impl:
             raise RecipeError(f"implementation.{k} is required")
+    for k in ("enable_lut", "lut"):
+        if k not in mx:
+            raise RecipeError(f"mx.{k} is required (mx.lut: the LUT unit as built, the RTL's GemminiLUTConfig, "
+                              "or null for none)")
     return Hardware(
         name=raw.get("name") or (path.stem if path else "unnamed"),
         path=path or Path("<inline>"),
@@ -291,7 +349,8 @@ def parse_hardware(raw: dict, *, path: Path | None = None) -> Hardware:
         prod_floor=None if floor is None else int(floor),
         block=int(mx.get("scaleSize", 32)),
         block_out=int(mx.get("scaleSizeOut", mx.get("scaleSize", 32))),
-        enable_lut=bool(mx.get("enable_lut", False)),
+        enable_lut=_bool(mx["enable_lut"], "mx.enable_lut"),
+        lut=_parse_lut_unit(mx["lut"]),
         banks=int(spad["banks"]),
         rows=int(spad["rows"]),
         clock_ns=float(impl["clock_ns"]),
@@ -319,9 +378,53 @@ def parse_run(raw: dict, *, path: Path | None = None) -> Run:
                lut=_parse_lut(raw.get("lut"), path), description=raw.get("description", ""), path=path)
 
 
+def _bool(v, where: str) -> bool:
+    if not isinstance(v, bool):
+        raise RecipeError(f"{where} {v!r}: true or false")
+    return v
+
+
+def _int(v, where: str, lo: int = 0) -> int:
+    if not isinstance(v, int) or isinstance(v, bool) or v < lo:
+        raise RecipeError(f"{where} {v!r}: an integer >= {lo}")
+    return v
+
+
+def _parse_lut_unit(obj) -> LutUnit | None:
+    """``mx.lut``: every GemminiLUTConfig field written, held to the RTL's own ``require``s."""
+    if obj is None:
+        return None
+    if not isinstance(obj, dict):
+        raise RecipeError("mx.lut: an object (GemminiLUTConfig's fields) or null")
+    _check_keys(obj, _HW_LUT_KEYS, "mx.lut")
+    missing = sorted(_HW_LUT_KEYS - set(obj))
+    if missing:
+        raise RecipeError(f"mx.lut: {', '.join(missing)} required")
+    proj = obj["projFormat"]
+    if proj not in LUT_SERVES:
+        raise RecipeError(f"mx.lut.projFormat {proj!r}; choose from {', '.join(LUT_SERVES)}")
+    entry = _int(obj["rdataWidth"], "mx.lut.rdataWidth", 1)
+    index = _int(obj["raddrWidth"], "mx.lut.raddrWidth", 1)
+    lists = {}
+    for k in ("numEntries", "numBits"):
+        v = obj[k]
+        if not isinstance(v, list) or len(v) != 3:
+            raise RecipeError(f"mx.lut.{k} {v!r}: three integers, one per table (B, A, C)")
+        lists[k] = tuple(_int(x, f"mx.lut.{k}", 1) for x in v)
+    if proj in _FP8_PROJECTIONS and entry != 8:
+        raise RecipeError(f"mx.lut: {proj} requires rdataWidth 8, got {entry} (MxConfigFragments.scala:66)")
+    if any(b != (1 << index) * entry for b in lists["numBits"]):
+        raise RecipeError(f"mx.lut.numBits {list(lists['numBits'])}: each must be 2**raddrWidth * rdataWidth = "
+                          f"{(1 << index) * entry} (MxConfigFragments.scala:70)")
+    return LutUnit(projection=proj, entry_bits=entry, index_bits=index, tables=lists["numEntries"],
+                   word_bits=lists["numBits"],
+                   group_bits=_int(obj["lutUpdateRegularityWidth"], "mx.lut.lutUpdateRegularityWidth", 1),
+                   act_code_bits=_int(obj["actCodeWidth"], "mx.lut.actCodeWidth"),
+                   wei_code_bits=_int(obj["weiCodeWidth"], "mx.lut.weiCodeWidth"))
+
+
 def _parse_lut(obj, path: Path | None) -> Lut | None:
-    """The run recipe's ``lut`` block: all three keys written, each checked. A file source must exist; its
-    entries are checked when the LUT work loads it."""
+    """The run recipe's ``lut`` block: every key written, each one of the values the compiler implements."""
     if obj is None:
         return None
     if not isinstance(obj, dict):
@@ -330,20 +433,23 @@ def _parse_lut(obj, path: Path | None) -> Lut | None:
     missing = sorted(_LUT_KEYS - set(obj))
     if missing:
         raise RecipeError(f"lut: {', '.join(missing)} required")
-    source, group, pick = obj["source"], obj["group"], obj["pick"]
-    if not isinstance(source, str) or not source:
-        raise RecipeError(f"lut.source {source!r}: \"data\" or a path to a .json of LUTs")
-    if source != "data":
-        f = Path(source)
-        if not f.is_absolute() and path is not None:
-            f = path.parent / f
-        if f.suffix != ".json" or not f.exists():
-            raise RecipeError(f"lut.source {source!r}: no such .json (looked at {f}); or \"data\"")
-    if not isinstance(group, int) or isinstance(group, bool) or group < 0:
-        raise RecipeError(f"lut.group {group!r}: a non-negative integer G (one LUT per 2**G columns)")
-    if pick not in LUT_PICKS:
-        raise RecipeError(f"lut.pick {pick!r}; choose from {', '.join(LUT_PICKS)}")
-    return Lut(source=source, group=group, pick=pick)
+    for k, choices in LUT_CHOICES.items():
+        if obj[k] not in choices:
+            raise RecipeError(f"lut.{k} {obj[k]!r}: implemented today: {', '.join(choices)} "
+                              "(planning/LUT_integration.md lists the rest)")
+    fit = obj["fit"]
+    if not isinstance(fit, dict):
+        raise RecipeError(f"lut.fit: an object with {', '.join(sorted(_FIT_KEYS))}")
+    _check_keys(fit, _FIT_KEYS, "lut.fit")
+    missing = sorted(_FIT_KEYS - set(fit))
+    if missing:
+        raise RecipeError(f"lut.fit: {', '.join(missing)} required")
+    for k, choices in FIT_CHOICES.items():
+        if fit[k] not in choices:
+            raise RecipeError(f"lut.fit.{k} {fit[k]!r}: implemented today: {', '.join(choices)}")
+    return Lut(group=_int(obj["group"], "lut.group"), weights=obj["weights"], activations=obj["activations"],
+               outputs=obj["outputs"], pick=obj["pick"],
+               fit=Fit(method=fit["method"], init=fit["init"], max_iters=_int(fit["max_iters"], "lut.fit.max_iters", 1)))
 
 
 def check(hw: Hardware, run: Run, path: str) -> None:
@@ -357,6 +463,8 @@ def check(hw: Hardware, run: Run, path: str) -> None:
     if run.lut is not None and not is_lut:
         raise RecipeError(f"run {run.name}: a lut block for {run.operand_fmt}, which is not a LUT format "
                           "(the LUT formats are fp8_e4m3_quad, fp8_e5m2, fp6_e3m2, fp6_e2m3)")
+    if is_lut:
+        _check_lut(hw, run)
     if path == "perplexity":
         return
     if path != "kernel":
@@ -375,16 +483,53 @@ def check(hw: Hardware, run: Run, path: str) -> None:
         refusals.append(f"scale_floor {run.scale_floor:g}: the chip's requantizer floors the block max at 2^-23")
     if run.reduce != "hardware":
         refusals.append(f"reduce {run.reduce}: the kernel path grades the chip, whose reducer is the recipe's ladder")
-    if run.lut is not None and run.lut.group != KERNEL_LUT_GROUP:
-        refusals.append(f"lut.group {run.lut.group}: the compiler and every shipped LUT test use G = {KERNEL_LUT_GROUP}")
-    if is_lut and not hw.enable_lut:
-        # A warning, not a refusal, until it is settled whether the stock chip has the LUT unit: every
-        # shipped hardware recipe says enable_lut false, and the four LUT formats have always been graded on it.
-        warnings.warn(f"{hw.name}: mx.enable_lut is false, but {run.operand_fmt} is a LUT format; graded "
-                      "anyway (open: is this flag stale, or does this chip have no LUT unit?)", stacklevel=2)
     if refusals:
         raise RecipeError(f"{hw.name} + run {run.name} on the kernel path: " + "; ".join(refusals)
                           + " (the perplexity path, python -m models.mxquant, runs these)")
+
+
+def _check_lut(hw: Hardware, run: Run) -> None:
+    """A LUT format on both paths: the build must have a LUT unit that serves it, the run must say how."""
+    fmt, unit = run.operand_fmt, hw.lut
+    if run.lut is None:
+        raise RecipeError(f"run {run.name}: {fmt} is a LUT format, so the run recipe needs a lut block "
+                          f"(config/run/{fmt}.json is the template)")
+    if unit is None:
+        raise RecipeError(f"{hw.name}: mx.lut is null, a build without a LUT unit, so it cannot run {fmt}")
+    if fmt not in unit.serves:
+        raise RecipeError(f"{hw.name}: its {unit.projection} LUT unit serves {', '.join(unit.serves)}, not {fmt} "
+                          "(QuantLut.scala's finders); config/hardware/ has a build for each LUT format")
+    from compiler import formats
+    if unit.index_bits != formats.get(fmt, where="check").bits:
+        raise RecipeError(f"{hw.name}: mx.lut.raddrWidth {unit.index_bits}, but {fmt} sends "
+                          f"{formats.get(fmt, where='check').bits}-bit indices")
+    width = formats.get(fmt, where="check").entry_bits
+    if width != unit.entry_bits:
+        raise RecipeError(f"{hw.name}: {fmt} on {unit.entry_bits}-bit LUT entries ({unit.projection}): the compiler "
+                          f"and mxq.lut hold {width}-bit {fmt} entries, and wider entries are not modelled")
+    if unit.act_code_bits or unit.wei_code_bits:
+        raise RecipeError(f"{hw.name}: mx.lut.actCodeWidth/weiCodeWidth set (an asymmetric LUT build), "
+                          "which no model follows yet")
+    if run.lut.group >= 1 << unit.group_bits:
+        raise RecipeError(f"run {run.name}: lut.group {run.lut.group} does not fit the "
+                          f"{unit.group_bits}-bit G register (mx.lut.lutUpdateRegularityWidth)")
+
+
+def lut_settings(hw: Hardware, run: Run):
+    """The compiler's codebook settings (``compiler.codebook.Settings``) from the two recipes, or None for a
+    direct format. ``check`` has already held them to the build."""
+    if run.lut is None:
+        return None
+    from compiler.codebook import Settings
+    return Settings(group=run.lut.group, max_iters=run.lut.fit.max_iters)
+
+
+def emitter_params(hw: Hardware, run: Run) -> dict:
+    """``cb["params"]``: the scratchpad plan, and for a LUT format G and each table's capacity."""
+    params = hw.geometry()
+    if run.lut is not None:
+        params |= {"lut_group": run.lut.group, "lut_tables": list(hw.lut.tables)}
+    return params
 
 
 def _parse_list(types: dict, key: str, expect: int) -> tuple[MxFloatSpec, ...]:

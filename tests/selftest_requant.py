@@ -37,6 +37,7 @@ sys.path.insert(0, str(REPO))
 from compiler import formats, wire                  # noqa: E402
 from compiler import codebook                       # noqa: E402
 from compiler.operands import requantize_chained    # noqa: E402
+from tests.fixtures import luts                     # noqa: E402
 
 # The chipyard tree ($MERLIN_CHIPYARD) is the canonical source of the header; the old
 # sibling software/ layout stays as a fallback for checkouts that used it.
@@ -131,13 +132,16 @@ def main() -> int:
         return 0
 
     rng = np.random.default_rng(0)
-    g = formats.LUT_GRANULARITY
     failures = 0
     # A spread of magnitudes on purpose: the divergences this test was built to catch live at the
     # edges -- values that round to zero (signed zero), and values that sit exactly on a tie.
     for scale in (0.25, 4.0, 64.0):
         for dtype in FMT_ID:
             f = formats.get(dtype, where="selftest_requant")
+            # G from the format's run recipe; the direct path's oracle reads an unused book block,
+            # sized by the first LUT format's G.
+            lut = luts.settings(dtype if dtype in LUT_FMTS else LUT_FMTS[0])
+            g = lut.group
             M, N = 64, 64
             C = (rng.standard_normal((M, N)) * scale).astype(np.float32)
             # The direct path has no codebook; the oracle still reads a book block, so send zeros.
@@ -164,7 +168,7 @@ def main() -> int:
             # is the book entry the oracle's index names -- or, for the direct path, the decode of
             # the oracle's own element code.
             if dtype in LUT_FMTS:
-                P, _ = requantize_chained(C, dtype=dtype, books=codebook.pack_codebooks(vals, fmt=f))
+                P, _ = requantize_chained(C, dtype=dtype, books=codebook.pack_codebooks(vals, fmt=f), lut=lut)
                 want = np.take_along_axis(vals[np.arange(M) >> g], oix.astype(np.intp), axis=1)
             else:
                 P, _ = requantize_chained(C, dtype=dtype)

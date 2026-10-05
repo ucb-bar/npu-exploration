@@ -282,14 +282,16 @@ def line(ppa: dict) -> str:
 def main() -> int:
     import argparse
     import json as _json
-    from config.recipe import RecipeError, load_hardware, load_run
+    from config.recipe import RecipeError, check, load_hardware, load_run
     ap = argparse.ArgumentParser(description="Silicon cost of a hardware recipe (PPA model)")
     ap.add_argument("--hw", "--config", dest="hw", default="baseline", help="hardware recipe name or .json path")
     ap.add_argument("--run", default="default", help="run recipe name or .json path (the operand format)")
     ap.add_argument("--json", action="store_true", help="machine-readable output only")
     a = ap.parse_args()
     try:
-        res = run_ppa(load_hardware(a.hw), load_run(a.run).operand_fmt)
+        hw, run = load_hardware(a.hw), load_run(a.run)
+        check(hw, run, "perplexity")        # the format, reducer and LUT unit agree; not the kernel path's limits
+        res = run_ppa(hw, run.operand_fmt)
     except (PpaError, RecipeError) as exc:
         print(f"ppa: {exc}", file=sys.stderr)
         return 2

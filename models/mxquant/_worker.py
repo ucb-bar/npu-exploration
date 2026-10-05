@@ -101,7 +101,7 @@ def main() -> int:
         "run_id": None if run is None else run.run_id(),
         "dtype": None if run is None else run.operand_fmt,
         "format": None if run is None else S.mxq_format(run.operand_fmt),
-        "codebook": "not modelled" if run is not None and S.is_codebook(run.operand_fmt) else None,
+        "codebook": None if run is None else S.lut_record(run),
         "rounding_mode": None if run is None else run.rounding,
         "scale_floor": None if run is None else run.scale_floor,
         "reduce": None if run is None else run.reduce,

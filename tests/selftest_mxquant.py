@@ -31,6 +31,8 @@ sys.path.insert(0, str(REPO))
 
 import numpy as np  # noqa: E402
 
+from tests.fixtures import luts  # noqa: E402  -- a LUT format's codebook settings, from its two recipes
+
 FAILURES: list[str] = []
 FORMATS = ("fp8_e4m3", "fp8_e4m3_quad", "fp8_e5m2", "fp6_e3m2", "fp6_e2m3", "fp4_e2m1")
 KERNELS = ("linear", "mlp2", "mlp3", "attention")
@@ -50,7 +52,7 @@ def same(a, b) -> bool:
 def edges_for(pipeline, spec, dtype):
     """Exactly what grade/pipeline.run hands the model, built by the same lowering."""
     from compiler.lower import lower
-    return lower(spec, dtype, allow_lossy_chain=True).edges
+    return lower(spec, dtype, allow_lossy_chain=True, lut=luts.settings(dtype)).edges
 
 
 def main() -> int:
@@ -90,11 +92,11 @@ def main() -> int:
                     print(f"  skip  {kname}/{dtype}: lowering refused ({type(exc).__name__}: {str(exc)[:70]})")
                     continue
                 try:
-                    old = legacy.simulate(spec, rtl_exact=True, dtype=dtype, edges=edges)
+                    old = legacy.simulate(spec, rtl_exact=True, dtype=dtype, edges=edges, lut=luts.settings(dtype))
                 except legacy.MxQuantUnavailable as exc:
                     old = None
                 try:
-                    new = mxquant.run(spec, base, dtype=dtype, edges=edges, shipped=False)
+                    new = mxquant.run(spec, base, dtype=dtype, edges=edges, shipped=False, lut=luts.settings(dtype))
                 except mxquant.Unavailable as exc:
                     new = None
                 if old is None or new is None:
@@ -167,8 +169,9 @@ def main() -> int:
     for key, want in rec["records"].items():
         kname, dtype, rname = key.split("/")
         sp = build(kname)
-        out = mxquant.run(sp, recipes[rname], dtype=dtype, edges=lower(sp, dtype, allow_lossy_chain=True).edges,
-                          shipped=False)
+        lut = luts.settings(dtype)
+        out = mxquant.run(sp, recipes[rname], dtype=dtype, edges=lower(sp, dtype, allow_lossy_chain=True, lut=lut).edges,
+                          shipped=False, lut=lut)
         n_all += 1
         if h(out["y"]) == want["y"] and all(h(out["stages"][s]) == hh for s, hh in want["stages"].items()):
             n_ok += 1
@@ -193,7 +196,7 @@ def main() -> int:
 
     def diff(dtype, C):
         P0, X0 = requantize_chained(C, dtype=dtype, books=None)
-        P1, X1 = K._requant(C, dtype, None)
+        P1, X1 = K._requant(C, dtype, None, None)
         return int((P0.numpy() != P1.numpy()).sum()), int((X0.numpy() != X1.numpy()).sum()), P0.numel()
     for name, C in cases():
         dp, dx, n = diff("fp8_e4m3", C)
@@ -207,7 +210,7 @@ def main() -> int:
             continue
         C = torch.from_numpy(C).to(torch.bfloat16).float().numpy()
         Pd, Xd = M4.matrix_mx_requantize(torch.from_numpy(C.copy()), "fp4:e2m1")
-        P1, X1 = K._requant(C, "fp4_e2m1", None)
+        P1, X1 = K._requant(C, "fp4_e2m1", None, None)
         dp, dx = int((Pd.t() != P1).sum()), int((Xd.t() != X1).sum())
         check(f"fp4_e2m1 {name}: mxq via E3M1 == device requantizer", dp == 0 and dx == 0, f"P {dp}/{P1.numel()} X {dx}")
     one = torch.from_numpy(rng.standard_normal((64, 64)).astype(np.float32) * 3).to(torch.bfloat16).float().numpy()

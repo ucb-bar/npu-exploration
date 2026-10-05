@@ -1,6 +1,6 @@
 {
-  "name": "wide_acc",
-  "description": "Ablation in the other direction: every accumulator column as wide as the last one (8e7m). Bounds how much the narrow ladder costs, and so whether baseline's widening schedule is well chosen.",
+  "name": "lut_fp6e2m3",
+  "description": "Baseline with an FP6 E2M3 LUT unit, 6-bit entries; its requantizer has the E2M3 finder only (QuantLut.scala:139-145). Everything else is baseline's; the RTL config may differ in fields these recipes do not describe.",
   "array": {
     "meshRows": 16,
     "meshColumns": 16,
@@ -124,106 +124,106 @@
     ],
     "meshAccPrecisionList": [
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 5,
         "count": 4,
         "isRecoded": true,
         "pad": false
       },
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 5,
         "count": 4,
         "isRecoded": true,
         "pad": false
       },
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 5,
         "count": 4,
         "isRecoded": true,
         "pad": false
       },
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 5,
         "count": 4,
         "isRecoded": true,
         "pad": false
       },
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 5,
         "count": 4,
         "isRecoded": true,
         "pad": false
       },
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 5,
         "count": 4,
         "isRecoded": true,
         "pad": false
       },
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 5,
         "count": 4,
         "isRecoded": true,
         "pad": false
       },
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 5,
         "count": 4,
         "isRecoded": true,
         "pad": false
       },
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 6,
         "count": 4,
         "isRecoded": true,
         "pad": false
       },
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 6,
         "count": 4,
         "isRecoded": true,
         "pad": false
       },
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 7,
         "count": 4,
         "isRecoded": true,
         "pad": false
       },
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 7,
         "count": 4,
         "isRecoded": true,
         "pad": false
       },
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 7,
         "count": 4,
         "isRecoded": true,
         "pad": false
       },
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 7,
         "count": 4,
         "isRecoded": true,
         "pad": false
       },
       {
-        "expWidth": 8,
-        "sigWidth": 8,
+        "expWidth": 4,
+        "sigWidth": 7,
         "count": 4,
         "isRecoded": true,
         "pad": false
@@ -243,7 +243,7 @@
     "scaleSizeOut": 32,
     "enable_lut": true,
     "lut": {
-      "projFormat": "LutFP6E3M2",
+      "projFormat": "LutFP6E2M3",
       "rdataWidth": 6,
       "raddrWidth": 4,
       "numEntries": [64, 64, 64],
@@ -262,8 +262,10 @@
     "utilization": 0.965
   },
   "provenance": {
-    "lut": "standaloneMxFPConfig: lut = Some(GemminiLUTConfig()), the defaults in MxConfigFragments.scala:48-58 (LutFP6E3M2, 6-bit entries, 64 LUTs per table). enable_lut is GemminiArrayConfig's default true and is read by no RTL module",
-    "note": "Derived from baseline by flattening meshAccPrecisionList upward.",
+    "lut": "e2m3OnlyMxFPConfig, ConfigsFP.scala:407-413: lut = Some(GemminiLUTConfig(... rdataWidth = 6, projFormat = LutFP6E2M3))",
+    "rtl": "generators/gemmini/src/main/scala/gemmini/ConfigsFP.scala:222,268,270-273 (GemminiMxFPConfigs.defaultMxFPConfig, inherited unchanged by standaloneMxFPConfig)",
+    "spike": "generators/gemmini/software/libgemmini/gemmini.cc:1145-1148",
+    "note": "MxFloat(expWidth, sigWidth, ...) counts the implicit bit, so acc_m == sigWidth-1. All 16 entries of both lists map term-for-term onto the C literals.",
     "prodFloor": "MxFPMul PROD_FLOOR = -16 (rtl_exact/rtl_datapath.py:139, mxq MXGEMMINI prod_floor)",
     "scratchpad": "libgemmini gemmini_params.h BANK_NUM 4, BANK_ROWS 4096 at DIM 16 (was mxgemm_emit.DEFAULT_GEOMETRY)",
     "implementation": "the PPA model's tapeout invocation: --clock-ns 2.0 --util 0.965 (was models/ppa/ppa.py constants)"

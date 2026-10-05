@@ -76,7 +76,8 @@ def main() -> int:
     # formats.chain_refusal refuses nothing today (a live invariant, not an oversight), so the
     # accepted-lossy-chain warning has no case to fire on; the hook must at least be inert.
     warned = []
-    m2 = lower(build("mlp2"), "fp6_e3m2", warn=warned.append)
+    from tests.fixtures import luts
+    m2 = lower(build("mlp2"), "fp6_e3m2", warn=warned.append, lut=luts.settings("fp6_e3m2"))
     check("codebook chain lowers (LUT books travel on every bundle), no warning today",
           m2.kind == "fused" and all("c_lut" in b for b in m2.cb["mx_operands"]) and warned == [])
 

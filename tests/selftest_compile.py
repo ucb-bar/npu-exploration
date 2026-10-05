@@ -57,7 +57,9 @@ def main() -> int:
     wire_paths()
     import compile_kernel as ck
     from backend import runner
-    from config.recipe import Run, load_hardware
+    import dataclasses
+    from config.recipe import load_hardware
+    from tests.fixtures import luts
     from grade import pipeline
     from kernels.registry import build
     from kernels.spec import HostStage, KernelSpec, Stage
@@ -68,11 +70,8 @@ def main() -> int:
 
     print("[3] refusals, before any build ------------------------------------")
     check("shape violation -> exit 2", ck.main(["--kernel", "linear", "--m", "60", "--out", "/nonexistent/x"]) == 2)
-    with tempfile.TemporaryDirectory() as td:
-        e5 = Path(td) / "e5m2.json"
-        e5.write_text(json.dumps({"name": "e5m2", **Run(operand_fmt="fp8_e5m2").fields()}))
-        check("graph kernel in fp8_e5m2 -> exit 2",
-              ck.main(["--kernel", "attention", "--run", str(e5), "--out", "/nonexistent/x"]) == 2)
+    check("graph kernel in fp8_e5m2 -> exit 2",
+          ck.main(["--kernel", "attention", "--hw", "lut_fp8e5m2", "--run", "fp8_e5m2", "--out", "/nonexistent/x"]) == 2)
     check("graph kernel in fp4_e2m1 -> exit 2",
           ck.main(["--kernel", "attention", "--run", "fp4_e2m1", "--out", "/nonexistent/x"]) == 2)
     check("--dtype is refused (the run recipe's operand_fmt now) -> exit 2",
@@ -122,13 +121,14 @@ def main() -> int:
         spec = build(k)
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            run = Run(operand_fmt=d, allow_lossy_chain=True)
-            pipeline.run(spec, recipe=base, run_recipe=run, build_only=True, models=("spike",),
+            hw, run = luts.recipes(d)
+            run = dataclasses.replace(run, allow_lossy_chain=True)
+            pipeline.run(spec, recipe=hw, run_recipe=run, build_only=True, models=("spike",),
                          workdir=td / "pipe", telemetry=quiet)
             ref = next((td / "pipe").glob("*/main.c")).read_bytes()
             srcs = {}
             for target in ("spike", "mx_rocket"):
-                man = ck.compile(spec, base, run, target=target, out=td / target, tel=quiet)
+                man = ck.compile(spec, hw, run, target=target, out=td / target, tel=quiet)
                 srcs[target] = (td / target / "main.c").read_bytes()
                 check(f"{k} {d} {target}: ELF built, files listed",
                       (td / target / "mx_gemmini_rocket.elf").exists()

@@ -15,10 +15,11 @@ One subprocess per GPU (``_worker.py``, on mxq's ``experiments/llm_ppl.py``), al
 GPU, so the caller never initialises CUDA. Unavailable without a GPU or the transformers / datasets /
 accelerate packages: ``evaluate`` raises.
 
-Every operand format runs, on its full element grid. The four codebook formats are sent through a 16-entry
-table per row pair on the hardware (``compiler/codebook.py``); mxq has no codebooks, so for those the record says
-``codebook: not modelled`` -- the number is the format's cost, as MXQuant's end-to-end measured it, not the
-compressed wire's. Recipes mxq cannot run (non-uniform product lists) are refused before any GPU work.
+Every operand format runs. The four codebook (LUT) formats run through the chip's 16-entry tables, one per 2**G
+tokens of A and per 2**G output channels of B (``mxq.block.lut``, the rule ``compiler/codebook.py`` calls; G and
+the fit from the run recipe's ``lut``); the record's ``codebook`` says what was and was not modelled (no C table:
+a layer's output is not requantized). Recipes mxq cannot run (non-uniform product lists) are refused before any
+GPU work.
 """
 from __future__ import annotations
 
@@ -76,7 +77,7 @@ def _settings(w: _workloads.Workload, recipe, run) -> dict:
         d.update(recipe=recipe.name, build_id=recipe.build_id(), format=_scheme.mxq_format(run.operand_fmt),
                  rules=w.rules, rounding_mode=run.rounding, scale_floor=float(run.scale_floor))
         if _scheme.is_codebook(run.operand_fmt):
-            d["codebook"] = "not modelled"
+            d["codebook"] = _scheme.lut_record(run)
         if run.reduce != "hardware":
             d["reduce"] = run.reduce
     return d
@@ -115,7 +116,7 @@ def evaluate(workload, recipe, run: _recipe.Run, *, gpus: str | None = None, com
         "rules": w.rules,
         "recipe": recipe.name, "build_id": recipe.build_id(), "run": run.name, "run_id": run.run_id(),
         "dtype": run.operand_fmt, "format": _scheme.mxq_format(run.operand_fmt),
-        "codebook": "not modelled" if _scheme.is_codebook(run.operand_fmt) else None,
+        "codebook": _scheme.lut_record(run),
         "rounding_mode": run.rounding, "scale_floor": run.scale_floor, "reduce": run.reduce, "compiled": compiled,
         "scheme": q["scheme"],
         "layers_quantized": sum(1 for row in q["layers"] if row[4]), "layers_total": len(q["layers"]),
@@ -127,7 +128,7 @@ def evaluate(workload, recipe, run: _recipe.Run, *, gpus: str | None = None, com
 
 def line(m: dict) -> str:
     """The PPL line."""
-    note = "  [codebook not modelled]" if m.get("codebook") else ""
+    note = f"  [LUT G={m['codebook']['group']}]" if isinstance(m.get("codebook"), dict) else ""
     if m.get("reduce") not in (None, "hardware"):
         note = f"  reduce {m['reduce']}" + note
     return (f"PPL      {m['perplexity']:.4f}   bf16 {m['bf16_perplexity']:.4f}  ({m['delta']:+.4f})   "

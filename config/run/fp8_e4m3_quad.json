@@ -1,0 +1,22 @@
+{
+  "name": "fp8_e4m3_quad",
+  "description": "Default with fp8 E4M3 operands sent as 4-bit indices into 8-bit LUTs (the quad arm). The LUTs are made as the compiler always has: one per 2 rows of A / columns of B / rows of C (G = 1), B and A fitted by k-means to their own codes, a chained stage's C fitted to an fp32 estimate of its output, indices picked by value on the host.",
+  "operand_fmt": "fp8_e4m3_quad",
+  "rounding": "rne",
+  "scale_floor": 1.1920928955078125e-07,
+  "reduce": "hardware",
+  "allow_lossy_chain": false,
+  "fp32_tol": 0.15,
+  "lut": {
+    "group": 1,
+    "weights": "data",
+    "activations": "data",
+    "outputs": "estimate",
+    "pick": "host",
+    "fit": {
+      "method": "kmeans",
+      "init": "quantile",
+      "max_iters": 50
+    }
+  }
+}

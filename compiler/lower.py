@@ -134,21 +134,22 @@ def refuse_graph_dtype(low, name: str, dtype: str) -> None:
 
 
 def lower(spec, dtype: str = DEFAULT_DTYPE, *, per_stage: bool = False,
-          allow_lossy_chain: bool = False, warn=None) -> Lowering:
-    """Lower ``spec`` in ``dtype``. ``warn(text)`` receives the one accepted-lossy-chain warning."""
+          allow_lossy_chain: bool = False, warn=None, lut=None) -> Lowering:
+    """Lower ``spec`` in ``dtype``. ``warn(text)`` receives the one accepted-lossy-chain warning. A LUT
+    format needs ``lut``, the run's codebook settings (``config.recipe.lut_settings``)."""
     wire_paths()
     if spec.is_chain and not per_stage:
-        cb, meta, edges = _fused(spec, dtype, allow_lossy_chain=allow_lossy_chain, warn=warn)
+        cb, meta, edges = _fused(spec, dtype, allow_lossy_chain=allow_lossy_chain, warn=warn, lut=lut)
         return Lowering("fused", meta, edges, cb)
     if (not spec.is_chain and not per_stage
             and all(st.on_mesh or st.emittable for st in spec.stages)):
-        cb, meta, edges = _graph(spec, dtype)
+        cb, meta, edges = _graph(spec, dtype, lut)
         return Lowering("graph", meta, edges, cb)
     meta, edges = _per_stage(spec)
     return Lowering("per_stage", meta, edges, None)
 
 
-def _fused(spec, dtype: str, *, allow_lossy_chain: bool, warn) -> tuple[dict, list[dict], dict]:
+def _fused(spec, dtype: str, *, allow_lossy_chain: bool, warn, lut) -> tuple[dict, list[dict], dict]:
     """Lower a WHOLE matmul chain to one command buffer.
 
     Only stage 0 supplies an A operand. Every later stage's A is the previous stage's requantizer
@@ -215,11 +216,11 @@ def _fused(spec, dtype: str, *, allow_lossy_chain: bool, warn) -> tuple[dict, li
         # answers that question, and it is verified against the shipped baremetal headers
         # (tests/selftest_quantizer.py).
         b_codes, b_scales, b_lut = quantize_operand(
-            st.weight.numpy().astype(np.float32), side="b", dtype=dtype)
+            st.weight.numpy().astype(np.float32), side="b", dtype=dtype, lut=lut)
         bundle: dict = {"b_codes": b_codes, "b_scales": b_scales}
         if i == 0:
             a_codes, a_scales, a_lut = quantize_operand(
-                spec.x.numpy().astype(np.float32), side="a", dtype=dtype)
+                spec.x.numpy().astype(np.float32), side="a", dtype=dtype, lut=lut)
             bundle |= {"a_codes": a_codes, "a_scales": a_scales}
         if b_lut is not None:
             # A book: stage 0 quantizes X itself; a chained stage inherits the previous stage's C.
@@ -236,7 +237,7 @@ def _fused(spec, dtype: str, *, allow_lossy_chain: bool, warn) -> tuple[dict, li
                 # hardware feeds it +-32, and every value saturates onto the top entry.
                 P = operands.normalized(est, fmt=f.mxq, axis="row", pmax_shift=f.out_pmax)
                 c_book = codebook.pack_codebooks(
-                    codebook.build_codebooks(P, axis="row", fmt=f), fmt=f)
+                    codebook.build_codebooks(P, axis="row", fmt=f, lut=lut), fmt=f)
             bundle |= {"a_lut": a_book, "b_lut": b_lut, "c_lut": c_book}
             prev_c_book = c_book
         bundles.append(bundle)
@@ -262,7 +263,7 @@ def _fused(spec, dtype: str, *, allow_lossy_chain: bool, warn) -> tuple[dict, li
     return command_buffer(ms, bundles, operand_fmt=dtype), meta, edges
 
 
-def _graph(spec, dtype: str) -> tuple[dict, list[dict], dict]:
+def _graph(spec, dtype: str, lut) -> tuple[dict, list[dict], dict]:
     """Lower a NON-CHAIN kernel to one command buffer carrying its graph on a side channel.
 
     The chain command buffer cannot express attention (three live values, computed B operands, a
@@ -274,7 +275,7 @@ def _graph(spec, dtype: str) -> tuple[dict, list[dict], dict]:
     from compiler import graph
 
     g = graph.from_spec(spec)
-    ops = graph.operand_bundles(g, dtype=dtype)
+    ops = graph.operand_bundles(g, dtype=dtype, lut=lut)
     cb = {
         "commands": [],                       # no chain: the graph IS the program
         "tensors": {},

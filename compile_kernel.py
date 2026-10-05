@@ -60,7 +60,7 @@ def compile(spec, recipe, run=None, *, target: str = "spike", out: Path, tel=Non
     wire_paths()
     import numpy as np
     import backend as mx
-    from config.recipe import RecipeError, check, load_run
+    from config.recipe import RecipeError, check, emitter_params, load_run, lut_settings
     from models import mxquant, mxq_commit
 
     if target not in TARGETS:
@@ -76,8 +76,9 @@ def compile(spec, recipe, run=None, *, target: str = "spike", out: Path, tel=Non
     if errs:
         raise ValueError(f"{spec.name}: {len(errs)} shape violation(s):\n  " + "\n  ".join(errs))
 
+    lut = lut_settings(recipe, run)
     low = lower(spec, dtype, allow_lossy_chain=run.allow_lossy_chain,
-                warn=lambda m: tel.log("warning", m))
+                warn=lambda m: tel.log("warning", m), lut=lut)
     if low.kind == "per_stage":
         host = [st.name for st in spec.stages if not st.on_mesh and not st.emittable]
         raise ValueError(
@@ -86,7 +87,7 @@ def compile(spec, recipe, run=None, *, target: str = "spike", out: Path, tel=Non
             "ELF per matmul, each fed by the previous run. run_kernel.py drives that path.")
     refuse_graph_dtype(low, spec.name, dtype)
     cb = low.cb
-    cb["params"] = recipe.geometry()                 # the emitters' scratchpad plan, from the recipe
+    cb["params"] = emitter_params(recipe, run)      # the emitters' scratchpad and LUT plan, from the recipes
     if low.kind == "graph":
         n_mesh = sum(r["where"] == "mesh" for r in low.stages)
         tel.log("lower", f"{len(low.stages)} step(s) -> ONE command buffer via the GRAPH path "
@@ -98,7 +99,7 @@ def compile(spec, recipe, run=None, *, target: str = "spike", out: Path, tel=Non
 
     # The expected bits come before the build: a kernel the model cannot follow is refused whole.
     try:
-        ref = mxquant.run(spec, recipe, dtype=dtype, edges=low.edges, shipped=False)
+        ref = mxquant.run(spec, recipe, dtype=dtype, edges=low.edges, shipped=False, lut=lut)
     except (mxquant.Unavailable, RecipeError) as exc:
         raise ValueError(f"no expected bits for {spec.name} on {recipe.name}: {exc}") from exc
 

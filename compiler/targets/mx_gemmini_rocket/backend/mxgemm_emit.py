@@ -49,6 +49,14 @@ BF16_PER_WORD = 4
 # [RTL] geometry defaults (gemmini_params.h DIM/BANK_NUM/BANK_ROWS). Overridable per buffer via
 # cb["params"] so a re-elaborated mesh needs no code edit.
 DEFAULT_GEOMETRY = {"dim": 16, "bank_num": 4, "bank_rows": 4096, "spad_dest": 128, "addr_len": 32}
+#: The LUT plan a LUT format needs in cb["params"], with NO default: both come from the two recipes
+#: (config.recipe.emitter_params). lut_group is G; lut_tables is how many LUTs each table holds, by
+#: MX_LOAD_LUT sel (0 B, 1 A, 2 C) -- mx.lut.numEntries, 64 on the RTL (spike would take 2048).
+LUT_PARAMS = ("lut_group", "lut_tables")
+#: The G argument of gemmini_mxquant_config_mvout when the program loads no LUT. Not a LUT setting: spike
+#: reads G only on a LUT decode or the finder (gemmini.cc:1194, 1437, 1517), so it is unread here; 1 is the
+#: value every direct-format program has always carried, which keeps them byte-identical.
+NO_LUT_G = 1
 
 #: [RTL] LOOP_WS rs2 bit 10 -- deposit the requantized output in the BLOCK-TILED operand-A layout
 #: instead of flat row-major, so the next stage reads it in place as its A operand. Spike:
@@ -103,8 +111,10 @@ class MxGemmPlan:
     #: previous stage's `spad_dest` when :attr:`chained_in`.
     a_spad: int = 0
     #: Codebook granularity: one 16-entry LUT per 2**lut_g rows/columns. Also the last argument to
-    #: gemmini_mxquant_config_mvout.
-    lut_g: int = _fmt.LUT_GRANULARITY
+    #: gemmini_mxquant_config_mvout. None for a direct format, which loads no LUT.
+    lut_g: int | None = None
+    #: LUTs each table holds, by MX_LOAD_LUT sel (0 B, 1 A, 2 C). None for a direct format.
+    lut_tables: tuple[int, int, int] | None = None
 
     @property
     def fmt_a(self):
@@ -275,6 +285,7 @@ def plan_chain(cb: dict[str, Any]) -> list[MxGemmPlan]:
     tensors = cb.get("tensors") or {}
     geom = dict(DEFAULT_GEOMETRY)
     geom.update({k: v for k, v in (cb.get("params") or {}).items() if k in DEFAULT_GEOMETRY})
+    lut = {k: v for k, v in (cb.get("params") or {}).items() if k in LUT_PARAMS}
 
     # Shape/dtype of everything nameable, growing as commits produce intermediates.
     shape: dict[str, tuple[int, int]] = {
@@ -300,7 +311,7 @@ def plan_chain(cb: dict[str, Any]) -> list[MxGemmPlan]:
                                   f"got {o['src']!r}")
             lhs, weight = pending.pop(o["src"])
             plans.append(_plan_stage(len(plans), lhs, weight, o["dst"],
-                                     cmd.get("attributes") or {}, shape, dtype, plans, geom))
+                                     cmd.get("attributes") or {}, shape, dtype, plans, geom, lut))
         elif op == "EVICT":
             res_src.pop(o.get("handle"), None)
         else:
@@ -336,7 +347,7 @@ def plan_chain(cb: dict[str, Any]) -> list[MxGemmPlan]:
 
 def _plan_stage(i: int, lhs: str, weight: str, out: str, attrs: dict[str, Any],
                 shape: dict[str, tuple[int, int]], dtype: dict[str, str],
-                prior: list[MxGemmPlan], geom: dict[str, int]) -> MxGemmPlan:
+                prior: list[MxGemmPlan], geom: dict[str, int], lut: dict) -> MxGemmPlan:
     """One stage's plan, registering its output shape/dtype for the stage that consumes it."""
     for name in (lhs, weight):
         if name not in shape:
@@ -366,13 +377,23 @@ def _plan_stage(i: int, lhs: str, weight: str, out: str, attrs: dict[str, Any],
             f"output dtype {out_dtype!r} is neither 'bf16' nor a microscaling format "
             f"({sorted(_fmt.ALIASES)})")
 
+    act_fmt = _dtype_to_fmt(dtype[lhs], f"lhs {lhs!r}")
+    wgt_fmt = _dtype_to_fmt(dtype[weight], f"weight {weight!r}")
+    lut_plan = {}
+    if _fmt.FORMATS[act_fmt].lut or _fmt.FORMATS[wgt_fmt].lut:
+        missing = [k for k in LUT_PARAMS if k not in lut]
+        if missing:
+            raise MxEmitError(
+                f"stage {i} is LUT-indexed but cb['params'] has no {', '.join(missing)}: G and the "
+                "table capacities come from the two recipes (config.recipe.emitter_params)")
+        lut_plan = {"lut_g": int(lut["lut_group"]), "lut_tables": tuple(int(t) for t in lut["lut_tables"])}
     plan = MxGemmPlan(
         m=m, n=n, k=k_a,
-        act_fmt=_dtype_to_fmt(dtype[lhs], f"lhs {lhs!r}"),
-        wgt_fmt=_dtype_to_fmt(dtype[weight], f"weight {weight!r}"),
+        act_fmt=act_fmt,
+        wgt_fmt=wgt_fmt,
         out_fmt=out_fmt,
         lhs=lhs, weight=weight, out=out,
-        **geom)
+        **geom, **lut_plan)
     _validate(plan)
     shape[out], dtype[out] = (m, n), out_dtype
     return plan
@@ -457,6 +478,15 @@ def _validate(p: MxGemmPlan) -> None:
         raise MxEmitError(
             f"N={p.n} must be a multiple of {BLOCK_SCALE_GROUP} on the requant path — the "
             "requantizer emits one E8M0 code per 32 output columns")
+    if p.lut_g is not None:
+        # gemmini_mx_load_lut_dt loads m>>G / n>>G LUTs into each table; the build holds lut_tables.
+        for table, sel, span, axis in (("B", 0, p.n, "N"), ("A", 1, p.m, "M"), ("C", 2, p.m, "M")):
+            if span % (1 << p.lut_g):
+                raise MxEmitError(f"{axis}={span} is not a multiple of 2**G = {1 << p.lut_g} (lut.group {p.lut_g})")
+            if span >> p.lut_g > p.lut_tables[sel]:
+                raise MxEmitError(
+                    f"{table} table: {axis}={span} at G={p.lut_g} needs {span >> p.lut_g} LUTs, and this build "
+                    f"holds {p.lut_tables[sel]} (mx.lut.numEntries); a larger G or a smaller tile fits")
 
 
 def _mx_operands(cb: dict[str, Any], plans: list[MxGemmPlan]) -> list[dict[str, Any]]:
@@ -884,7 +914,7 @@ def _emit_mesh(p: MxGemmPlan, nm: _Names, tr: Transport) -> list[str]:
             "     window as the next stage's A-scales -- no DRAM round trip, no host transpose. */",
         ] if p.chained_out else []),
         f"  {cfg}((uint64_t){nm.out_scales}, {p.tiles_i}, {p.tiles_j}, "
-        f"{p.tiles_k}, 0, 0, {p.lut_g});",
+        f"{p.tiles_k}, 0, 0, {NO_LUT_G if p.lut_g is None else p.lut_g});",
         "",
         "  /* The MX matmul: LOOP_WS_CONFIG_BOUNDS + LOOP_WS_CONFIG_SPAD_AB + LOOP_WS.",
         "     The SPAD_AB command is what marks the following LOOP_WS as the MX variant. */",

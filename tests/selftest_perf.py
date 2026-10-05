@@ -19,7 +19,11 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from models.perf.perf import PerfError, perf_args, perf_model_path, run_perf, spad_kb  # noqa: E402
-from config.recipe import load_hardware as load, parse_hardware  # noqa: E402
+from config.recipe import load_hardware as load, load_run, parse_hardware  # noqa: E402
+
+#: G for a LUT format: its run recipe's lut.group (config/run/<fmt>.json), never a constant here.
+def G(fmt: str) -> int:
+    return load_run(fmt).lut.group
 
 CHECKS = []
 
@@ -40,7 +44,7 @@ def main() -> int:
     check("--act/--wei = the format's token", (got["--act"], got["--wei"]) == ("fp8", "fp8"))
     check("a direct format runs without the LUT", "--lut" not in args)
     for fmt, tok in (("fp8_e5m2", "fp8e5m2"), ("fp6_e2m3", "fp6e2m3"), ("fp6_e3m2", "fp6"), ("fp8_e4m3_quad", "fp8")):
-        a6 = perf_args(r, fmt, 128, 64, 256, "bf16")
+        a6 = perf_args(r, fmt, 128, 64, 256, "bf16", lut_group=G(fmt))
         g6 = dict(zip(a6[::2], a6[1::2]))
         i = a6.index("--lut-a")
         check(f"{fmt}: --act {tok}, --lut, one LUT per 2 rows of A / cols of W / rows of C, only needed tables",
@@ -49,6 +53,19 @@ def main() -> int:
               " ".join(a6[i:i + 9]))
     g2 = perf_args(r, "fp6_e3m2", 128, 64, 256, "bf16", lut_group=2)
     check("lut_group 2 -> LUTs of 4 rows", g2[g2.index("--lut-a") + 1] == "4")
+    try:
+        perf_args(r, "fp6_e3m2", 128, 64, 256, "bf16")
+        check("a LUT format without lut_group is refused (no default G)", False, "accepted")
+    except PerfError as exc:
+        check("a LUT format without lut_group is refused (no default G)", "lut_group" in str(exc))
+    for n, why in ((60, "a partial 2**G group"), (4096, "more LUTs than mx.lut.numEntries")):
+        try:
+            perf_args(load("lut_fp8e5m2"), "fp8_e5m2", 64, n, 64, "bf16", lut_group=3)
+            check(f"as measured, N={n} at G=3 is refused ({why}), as the emitter does", False, "accepted")
+        except PerfError as exc:
+            check(f"as measured, N={n} at G=3 is refused ({why}), as the emitter does", True, str(exc))
+    check("--ideal models N=4096 at G=3 (a production GEMM, not the emitted kernel)",
+          "--lut" in perf_args(load("lut_fp8e5m2"), "fp8_e5m2", 64, 4096, 64, "bf16", lut_group=3, as_measured=False))
     en = perf_args(load("wide_acc"), "fp8_e4m3", 64, 64, 64, "bf16", energy=True)
     check("--energy carries the recipe's ladder", en[en.index("--acc-rows") + 1] == "16x8,8")
     try:
@@ -94,10 +111,13 @@ def main() -> int:
         import numpy as np
         from compiler.operands import quantize_operand
         M, K, N = 64, 128, 32
-        lut = run_perf(r, "fp6_e3m2", [{"stage": 0, "m": M, "k": K, "n": N, "out_dtype": "bf16"}], energy=False)
+        lut = run_perf(r, "fp6_e3m2", [{"stage": 0, "m": M, "k": K, "n": N, "out_dtype": "bf16"}], energy=False,
+                       lut_group=G("fp6_e3m2"))
         rng = np.random.default_rng(0)
-        _, _, a_books = quantize_operand(rng.standard_normal((M, K)).astype(np.float32), side="a", dtype="fp6_e3m2")
-        _, _, b_books = quantize_operand(rng.standard_normal((K, N)).astype(np.float32), side="b", dtype="fp6_e3m2")
+        from tests.fixtures import luts
+        st6 = luts.settings("fp6_e3m2")
+        _, _, a_books = quantize_operand(rng.standard_normal((M, K)).astype(np.float32), side="a", dtype="fp6_e3m2", lut=st6)
+        _, _, b_books = quantize_operand(rng.standard_normal((K, N)).astype(np.float32), side="b", dtype="fp6_e3m2", lut=st6)
         want = a_books.shape[0] + b_books.shape[0]
         got_t = lut["stages"][0].get("lut_tables")
         check(f"fp6 {M}x{K}x{N}: the model's LUT tables == the compiler's LUT groups ({want})", got_t == want,
@@ -128,7 +148,7 @@ def main() -> int:
         print("B: memory energy beside the timeline (never in it)")
         from models.ppa.ppa import ppa_root
         stage = {"stage": 0, "m": 128, "k": 128, "n": 128, "out_dtype": "bf16"}
-        real = run_perf(r, "fp6_e3m2", [stage])
+        real = run_perf(r, "fp6_e3m2", [stage], lut_group=G("fp6_e3m2"))
         check("real workspace: memory unavailable, and says why",
               real["memory"]["available"] is False and "SRAM compiler tables" in real["memory"]["why"])
         check("the stage states its PE mode and ops/PE/cycle (fp6 LUT: mode 4, 4)",
@@ -140,7 +160,7 @@ def main() -> int:
         old_root = os.environ.get("MX_PPA_ROOT")
         os.environ["MX_PPA_ROOT"] = str(fx)
         try:
-            syn = run_perf(r, "fp6_e3m2", [stage])
+            syn = run_perf(r, "fp6_e3m2", [stage], lut_group=G("fp6_e3m2"))
         finally:
             if old_root is None:
                 os.environ.pop("MX_PPA_ROOT", None)
