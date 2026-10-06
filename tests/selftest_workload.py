@@ -183,6 +183,12 @@ def main() -> int:
     st = W._settings(w, base, dflt)
     check("key includes the mxq commit", models.mxq_commit() and st["mxq_commit"] == models.mxq_commit())
     check("a direct format carries no codebook note", "codebook" not in st)
+    check("no vector block adds no key field", "vector" not in st)
+    vrun = load_run("default_bf16_vector")
+    check("key changes with the vector block, and records it",
+          k0 != W.key("tinyllama", base, vrun) and W._settings(w, base, vrun)["vector"] == {"softmax": "bf16", "rmsnorm": "bf16"})
+    check("key changes with the core rule lists",
+          len({k0, W.key("tinyllama", base, dflt, rules="mxquant_layers_core"), W.key("tinyllama", base, dflt, rules="all_linear_core")}) == 3)
     st6 = W._settings(w, base, load_run("fp6_e3m2"))
     check("a codebook format runs through its tables and says how",
           st6.get("codebook") == scheme.lut_record(load_run("fp6_e3m2")) and st6["codebook"]["group"] == 1

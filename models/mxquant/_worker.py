@@ -63,18 +63,20 @@ def main() -> int:
     run = None if recipe is None else load_run(args.run)
     sch = None if recipe is None else S.scheme(recipe, run, compiled=not args.no_compiled)
     rule_list = None if sch is None else R.build(args.rules, sch)
+    vector = None if run is None else S.vector(run)
 
     if args.dry_run and sch is None:
         print("no recipe: the bf16 model, nothing patched")
         return 0
     model = load_model(args.model_id, args.seqlen)
-    table = []
+    table, cores, norms = [], [], []
     if rule_list is not None:
-        handle = patch(model, rule_list, chunk=args.chunk, dry_run=args.dry_run)
-        table = handle.table
+        handle = patch(model, rule_list, chunk=args.chunk, dry_run=args.dry_run, vector=vector)
+        table, cores, norms = handle.table, handle.cores, handle.norms
         if args.dry_run:
             print(handle)
-            print(f"\n{sum(1 for r in table if r[4])} of {len(table)} linear layers get {sch.name}")
+            print(f"\n{sum(1 for r in table if r[4])} of {len(table)} linear layers get {sch.name}; "
+                  f"{sum(1 for c in cores if c[2])} of {len(cores)} attention cores run in mxq")
             return 0
     if args.out is None:
         ap.error("--out is required unless --dry-run")
@@ -108,8 +110,13 @@ def main() -> int:
         "compiled": None if sch is None else not args.no_compiled,
         "mxq_commit": models.mxq_commit(),
         "scheme": None if sch is None else describe(sch),
-        "rule_list": None if rule_list is None else [[describe(sel), None if s is None else s.name] for sel, s in rule_list],
+        "rule_list": None if rule_list is None else [[describe(sel), None if s is None else
+                                                      [x.name for x in s] if isinstance(s, tuple) else s.name]
+                                                     for sel, s in rule_list],
         "layers": table,
+        "cores": cores,
+        "vector": vector,
+        "rmsnorms": norms,
         "per_sample": per_sample,
         "seconds": time.time() - t0,
     }

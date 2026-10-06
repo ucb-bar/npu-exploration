@@ -82,6 +82,8 @@ def _settings(w: _workloads.Workload, recipe, run) -> dict:
             d["reduce"] = run.reduce
         if run.scale != "mxgemmini":
             d["scale"] = run.scale
+        if run.vector is not None:                  # absent: no field, so every earlier key stands
+            d["vector"] = _scheme.vector(run)
     return d
 
 
@@ -121,6 +123,7 @@ def evaluate(workload, recipe, run: _recipe.Run, *, gpus: str | None = None, com
         "codebook": _scheme.lut_record(run),
         "rounding_mode": run.rounding, "scale_floor": run.scale_floor, "reduce": run.reduce, "scale": run.scale,
         "compiled": compiled,
+        "vector": _scheme.vector(run),
         "scheme": q["scheme"],
         "layers_quantized": sum(1 for row in q["layers"] if row[4]), "layers_total": len(q["layers"]),
         "seconds": q["seconds"], "gpus": gpus, "mxq_commit": q["mxq_commit"], **environment(),
@@ -136,6 +139,8 @@ def line(m: dict) -> str:
         note = f"  reduce {m['reduce']}" + note
     if m.get("scale") not in (None, "mxgemmini"):
         note = f"  scale {m['scale']}" + note
+    if m.get("vector"):
+        note += "  [vector " + " ".join(f"{op} {p or 'hf'}" for op, p in m["vector"].items()) + "]"
     return (f"PPL      {m['perplexity']:.4f}   bf16 {m['bf16_perplexity']:.4f}  ({m['delta']:+.4f})   "
             f"{m.get('workload', m['model_id'].rsplit('/', 1)[-1])} {m['dtype'] if m.get('dtype') else ''}  "
             f"{m['nsamples'] or 'all'}x{m['seqlen']}{'' if m.get('seed', 0) is not None else ' in order'}   "

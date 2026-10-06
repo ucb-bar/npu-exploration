@@ -1,0 +1,14 @@
+{
+  "name": "default_bf16_vector",
+  "description": "Default, with the vector ops between the matmuls in bf16: attention's scale, mask and softmax, and every RMSNorm, each step rounded to bf16 (mxq.nn.patch vector). Perplexity path only.",
+  "operand_fmt": "fp8_e4m3",
+  "rounding": "rne",
+  "scale_floor": 1.1920928955078125e-07,
+  "reduce": "hardware",
+  "allow_lossy_chain": false,
+  "fp32_tol": 0.15,
+  "vector": {
+    "softmax": "bf16",
+    "rmsnorm": "bf16"
+  }
+}

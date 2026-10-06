@@ -74,6 +74,7 @@ All of these are in `build_id` except the labels (`name`, `description`, `proven
 | `reduce` | how codes are multiplied: `hardware` (the recipe's array), `exact`, `bf16_tiles` | `hardware` |
 | `allow_lossy_chain` | run a chain whose codebook cannot be chosen exactly | `false` |
 | `fp32_tol` | kernel pass threshold on relative Frobenius error against fp32 | 0.15 |
+| `vector` (optional, perplexity path) | the precision of the vector ops between the matmuls, every op written: `softmax` (attention's scale, mask and softmax, in `mxq.nn.attend`) and `rmsnorm` (every RMSNorm), each `null` (as transformers computes it: fp32 inside, bf16 out) or `"bf16"` (every step rounded to bf16). Passed to `mxq.nn.patch(vector=...)`. With softmax set, an attention module no core rule chose runs mxq's exact core (no quantization) so its softmax can be rounded; the `*_core` rule lists quantize the core too. Refused on the kernel path. Absent: no change, and the `run_id` and perplexity cache key stay as they were | absent; `config/run/default_bf16_vector.json` sets both |
 | `lut` (LUT formats) | how a LUT format's tables are made, every key written: `group` (G: one LUT per 2**G rows of A, columns of B, rows of C), `weights` (B tables: `data`), `activations` (A tables: `data`), `outputs` (a chain's C tables: `estimate`, fitted to an fp32 run of the input), `pick` (A and B indices: `host`, nearest by value), `fit` (`{"method": "kmeans", "init": "quantile", "max_iters"}`). Each accepts what the compiler implements today; the plan's other values are refused by name. Refused for a direct format. A LUT format without it runs LUT off, quantized straight to its grid, on the perplexity path (`fp6_e3m2_direct`) and is refused on the kernel path, whose requantizer needs the LUT; a recipe without it keeps its `run_id` | `config/run/<format>.json` for the four LUT formats |
 
 `name` and `description` are labels and stay out of `run_id`. The hardware recipe says what LUT unit was
@@ -110,6 +111,7 @@ holds these constants and `baseline.json` equal to libgemmini, the Chisel source
 | `mxq_format(dtype)` | mxq's format name (`MXFP8_E4M3`, `MXFP4`, ...) | `run.operand_fmt` |
 | `quantizer(hw, run)` | `block.mxgemmini.quantize` with block size, rounding and scale floor passed explicitly | `mx.scaleSize`, `run.rounding`, `run.scale_floor` |
 | `mxgemmini(hw)` | `MXGEMMINI(prod_e, prod_m, prod_floor)` | product list, `types.prodFloor` |
+| `vector(run)` | `mxq.nn.patch`'s `vector`: `None` or `{"softmax": None \| "bf16", "rmsnorm": None \| "bf16"}` | `run.vector` |
 | `datapath(hw)` | `(mxgemmini(hw), [(e, m) per lane], window = dim)` | plus the ladder and `dim` |
 | `shipped_datapath(hw)` | the same on `MXQUANT(prod_e, prod_m)`, the as-shipped definition | same |
 | `scheme(hw, run)` | an mxq `Scheme`: the quantizer for A and B, and the reducer `run.reduce` names | all of the above |
