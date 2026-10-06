@@ -29,19 +29,21 @@ for _b in "$RISCV/bin/spike" "$RISCV/bin/riscv64-unknown-elf-gcc" "$_cy/.conda-e
 done
 
 # libgemmini.so is the spike functional model of the MX datapath. Its Makefile
-# lists ONLY gemmini.cc as a prerequisite, so edits to mx_fp_math.h do not
+# lists only the .cc files as prerequisites, so edits to mx_fp_math.h do not
 # trigger a rebuild -- and a stale model fails as an unhandled trap
 # (tohost = 1337), not as a clear error. Warn loudly when it is out of date.
 _lg="$_cy/generators/gemmini/software/libgemmini"
 if [ -f "$_lg/libgemmini.so" ]; then
-    for _src in "$_lg/gemmini.cc" "$_lg/mx_fp_math.h"; do
+    for _src in "$_lg/gemmini.cc" "$_lg/mx_fp_math.h" "$_lg/gemmini_perf.cc" $(find "$_lg/perf" -name '*.[ch]*' 2>/dev/null); do
         if [ -f "$_src" ] && [ "$_src" -nt "$_lg/libgemmini.so" ]; then
             echo "env.sh: WARNING libgemmini.so is STALE (older than $(basename "$_src"))." >&2
-            echo "        rebuild:  (cd $_lg && make)" >&2
+            echo "        rebuild:  bash scripts/setup.sh --phase libgemmini   (the toolchain's g++; the" >&2
+            echo "        Makefile's plain g++ can link a newer libstdc++ than spike loads)" >&2
+            break
         fi
     done
 else
-    echo "env.sh: WARNING libgemmini.so not built -- (cd $_lg && make)" >&2
+    echo "env.sh: WARNING libgemmini.so not built -- bash scripts/setup.sh --phase libgemmini" >&2
 fi
 unset _cy _b _lg _src _here
 

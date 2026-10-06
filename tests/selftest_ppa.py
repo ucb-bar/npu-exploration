@@ -21,7 +21,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from models.ppa.ppa import CALIBRATION_LUT, FORMATS, PpaError, ppa_args, ppa_root, run_ppa, uses_lut  # noqa: E402
+from models.ppa.ppa import CALIBRATION, CALIBRATION_LUT, FORMATS, PpaError, ppa_args, ppa_root, run_ppa, uses_lut  # noqa: E402
 from config.recipe import load_hardware as load, parse_hardware  # noqa: E402
 
 CHECKS = []
@@ -47,13 +47,30 @@ def main() -> int:
     check("--util = implementation.utilization", got["--util"] == "0.965", got["--util"])
     check("--clock-ns = implementation.clock_ns", got["--clock-ns"] == "2.0", got["--clock-ns"])
     check("an fp4 run stimulates fp4", dict(zip(*[iter(ppa_args(r, "fp4_e2m1"))] * 2))["--stim"] == "fp4")
-    quad = dict(zip(*[iter(ppa_args(r, "fp8_e4m3_quad"))] * 2))
+    print("the recipe's LUT unit picks the machine priced; the run's format only the stimulus")
+    lut8 = load("lut_fp8e4m3")
+    a6 = ppa_args(r, "fp6_e3m2")
+    check("baseline (LutFP6E3M2) running fp6_e3m2: the tapeout machine, 4 products",
+          " ".join(CALIBRATION) in " ".join(a6) and dict(zip(a6[::2], a6[1::2]))["--products"] == "4", " ".join(a6))
+    a8 = ppa_args(lut8, "fp8_e4m3")
+    check("lut_fp8e4m3 (LutFP8E4M3) running direct fp8_e4m3: still the MxAll machine",
+          " ".join(CALIBRATION_LUT) in " ".join(a8) and "--products" not in a8, " ".join(a8))
+    import copy
+    raw0 = copy.deepcopy(r.raw)
+    raw0["mx"]["lut"] = None
+    for hw, unit in ((load("lut_fp8e5m2"), "LutFP8E5M2"), (load("lut_fp6e2m3"), "LutFP6E2M3"),
+                     (parse_hardware(raw0), "no LUT unit")):
+        try:
+            ppa_args(hw, "fp8_e4m3")
+            check(f"{unit}: not measured by the workspace -> PpaError (callers skip)", False, "accepted")
+        except PpaError as exc:
+            check(f"{unit}: not measured by the workspace -> PpaError (callers skip)", unit in str(exc), str(exc)[:100])
+    quad = dict(zip(*[iter(ppa_args(lut8, "fp8_e4m3_quad"))] * 2))
     check("quad: fp8qn on the LUT PE, 4 products",
           (quad["--stim"], quad["--fmtset"], quad["--calib"], quad["--blocks-variant"], quad["--lut"], quad["--products"])
           == ("fp8qn", "mxgemmini-all", "all", "all", "fp8", "4"), str(quad))
     check("LUT formats are exactly config.scheme's codebook formats",
           sorted(f for f in FORMATS if uses_lut(f)) == ["fp6_e2m3", "fp6_e3m2", "fp8_e4m3_quad", "fp8_e5m2"])
-    import copy
     raw = copy.deepcopy(r.raw)
     raw["implementation"].update(clock_ns=1.25, utilization=0.8)
     fast = dict(zip(*[iter(ppa_args(parse_hardware(raw)))] * 2))
@@ -79,9 +96,19 @@ def main() -> int:
             check(f"{fmt}: stim and products are pair_modes.spec's ({sp['stim']}, {sp['products']})",
                   (sp["stim"], sp["products"]) == (stim, prods), f"ours {stim}, {prods}")
             check(f"{fmt}: {stim} is a stimulus the model parses", drv.STIM_RE.match(stim) is not None)
-        rq = run_ppa(r, "fp8_e4m3_quad")
+        rq = run_ppa(lut8, "fp8_e4m3_quad")
         check("quad priced on the bigger LUT PE (area > baseline fp8)", rq["area_um2"] > run_ppa(r)["area_um2"] * 1.2,
               f"{rq['area_um2']/1e3:.1f}k")
+        check("one build, one area: lut_fp8e4m3 running fp8_e4m3 has the quad run's area",
+              run_ppa(lut8, "fp8_e4m3")["area_um2"] == rq["area_um2"])
+        check("one build, one area: baseline running fp6_e3m2 has baseline fp8's area",
+              run_ppa(r, "fp6_e3m2")["area_um2"] == run_ppa(r)["area_um2"])
+        try:
+            run_ppa(lut8, "fp6_e2m3")
+            check("a format the workspace never measured on that mesh -> PpaError (callers skip)", False, "accepted")
+        except PpaError as exc:
+            check("a format the workspace never measured on that mesh -> PpaError (callers skip)",
+                  "no measurement" in str(exc), str(exc)[:100])
         res = run_ppa(r)
         blk = sum(b["area_um2"] for b in res["blocks"].values())
         check("total area == sum of blocks (rounding)", abs(res["area_um2"] - blk) < 500,
