@@ -29,6 +29,9 @@
 #define ATTN_EXPECT "attn_flash_expect.h"
 #endif
 #include ATTN_HEADER
+#ifndef ATTN_HEADS
+#define ATTN_HEADS 1   // query heads packed as rows (GQA: they share K/V)
+#endif
 #ifndef BK
 #define BK 64
 #endif
@@ -46,8 +49,12 @@
 int main() { printf("skipped: needs the VPU config (MX_ROCKET) or Spike\n"); return 0; }
 #else
 
+// optional fused VPU ops (the VPU must be built with VpuParams(expSub / expSum)); both bit-identical to the plain passes
 #ifndef ATTN_EXPSUB
-#define ATTN_EXPSUB 1   // 0: softmax's subtract and exp as two VPU passes (before the fused op)
+#define ATTN_EXPSUB 0   // 1: softmax's subtract and exp in one pass (EXPSUB)
+#endif
+#ifndef ATTN_EXPSUM
+#define ATTN_EXPSUM 0   // 1: EXPSUB that also writes the row sums (EXPSUM): no separate RSUM pass
 #endif
 #define DIM 16
 #undef BANK_ROWS
@@ -126,10 +133,15 @@ typedef char flash_shape_ok[(BK % 32 == 0 && (SQ * BK / 32) % 32 == 0 && NB >= 2
 // bank 1: K, P), and the VPU's (S, O_j, O, stats) in banks 2-3. The VPU read port always wins its bank, so sharing a
 // bank starves the mesh's reads. S0 / O_0 in bank 2 and S1 / O_1 + O + stats in bank 3: softmax(j+1)'s writes never
 // meet QK(j+2)'s S(j) or PV(j)'s O_j stores.
+#ifndef ATTN_ST_LOW_REQ
+#define ATTN_ST_LOW_REQ 1
+#endif
 #ifndef ATTN_SPLIT
 #define ATTN_SPLIT (ROWS8(SQ, D) + V_BUFS * ROWS8(BK, D) <= BANK_ROWS && \
                     K_BUFS * ROWS8(D, BK) + 2 * ROWS8(SQ, BK) <= BANK_ROWS && \
-                    ROWS16(SQ, BK) + 2 * ROWS16(SQ, D) + ST_ROWS * SQ <= BANK_ROWS)
+                    ROWS16(SQ, BK) + 2 * ROWS16(SQ, D) <= BANK_ROWS && \
+                    (ROWS16(SQ, BK) + 2 * ROWS16(SQ, D) + ST_ROWS * SQ <= BANK_ROWS || \
+                     ATTN_ST_LOW_REQ && ROWS8(SQ, D) + V_BUFS * ROWS8(BK, D) + ST_ROWS * SQ <= BANK_ROWS))   // stats in bank 3 or 0
 #endif
 #define SP_Q     0
 #if ATTN_SPLIT
@@ -162,12 +174,19 @@ typedef char flash_shape_ok[(BK % 32 == 0 && (SQ * BK / 32) % 32 == 0 && NB >= 2
 #endif
 // ST_LOW (split layout): the per-row stats (7 x SQ rows, touched only by small VPU ops) live in bank 0 after V, so
 // the two VPUs' softmax passes over S(j+1) and S(j+2) (banks 3 / 2) never read a common bank and run side by side
-#ifndef ATTN_ST_LOW_REQ
-#define ATTN_ST_LOW_REQ 1
+// ST_BANK2 (split layout): the stats in bank 2 after S0 / O_0 instead, so banks 0-1 hold only the mesh's operands: the
+// VPU's stats reads and writes (SQ rows each) no longer refuse Q / V reads. EXPSUM over S0 then reads its broadcast max
+// from the same bank (one extra cycle per logical row).
+#ifndef ATTN_ST_BANK2
+#define ATTN_ST_BANK2 0
 #endif
-#define ATTN_ST_LOW (ATTN_SPLIT && !ATTN_O_LOW && ATTN_ST_LOW_REQ && \
+#define ATTN_ST_B2 (ATTN_SPLIT && !ATTN_O_LOW && ATTN_ST_BANK2 && ROWS16(SQ, BK) + ROWS16(SQ, D) + ST_ROWS * SQ <= BANK_ROWS)
+typedef char flash_st_bank2_ok[(!ATTN_ST_BANK2 || (ATTN_ST_B2 && !ATTN_CAUSAL)) ? 1 : -1];   // fits; mask not placed
+#define ATTN_ST_LOW (ATTN_SPLIT && !ATTN_O_LOW && !ATTN_ST_B2 && ATTN_ST_LOW_REQ && \
                      ROWS8(SQ, D) + V_BUFS * ROWS8(BK, D) + ST_ROWS * SQ <= BANK_ROWS)
-#if ATTN_ST_LOW
+#if ATTN_ST_B2
+#define ST       (2 * BANK_ROWS + ROWS16(SQ, BK) + ROWS16(SQ, D))   // bank 2, after S0 and O_0's slot
+#elif ATTN_ST_LOW
 #define ST       (SP_V + V_BUFS * ROWS8(BK, D))       // per-row stats in bank 0 (SQ rows each)
 #else
 #define ST       (SP_O + ROWS16(SQ, D))                // per-row stats after O (SQ rows each)
@@ -270,16 +289,16 @@ static void softmax_block(int j) {
     gemmini_vpu_binary(VPU_SUB, ST_AJ(j), m_old, m, SQ);
     gemmini_vpu_unary(VPU_EXP, ST_AJ(j), ST_AJ(j), SQ);
   }
-#if ATTN_EXPSUB
+#if ATTN_EXPSUM
+  gemmini_vpu_expsum(S, S, m, j == 0 ? ST_L : ST_LT, rows, rlen);   // exp(S - m) and its row sums in one pass
+#elif ATTN_EXPSUB
   gemmini_vpu_bcast(VPU_EXPSUB, S, S, m, rows, rlen);   // exp(S - m) in one pass
 #else
   gemmini_vpu_bcast(VPU_SUB, S, S, m, rows, rlen);
   gemmini_vpu_unary(VPU_EXP, S, S, rows);
 #endif
-  if (j == 0) {
-    gemmini_vpu_reduce(VPU_RSUM, ST_L, S, rows, rlen);
-  } else {
-    gemmini_vpu_reduce(VPU_RSUM, ST_LT, S, rows, rlen);
+  if (!ATTN_EXPSUM) gemmini_vpu_reduce(VPU_RSUM, j == 0 ? ST_L : ST_LT, S, rows, rlen);
+  if (j > 0) {
     gemmini_vpu_binary(VPU_MUL, ST_L, ST_L, ST_AJ(j), SQ);
     gemmini_vpu_binary(VPU_ADD, ST_L, ST_L, ST_LT, SQ);
   }
@@ -410,8 +429,10 @@ int main() {
   printf("mask: %s\n", ATTN_CAUSAL ? "causal (queries are the last Sq keys)" : "none (every key precedes every query)");
   printf("mesh order: %s\n", ATTN_QK_FIRST ? "QK(j+2) before PV(j)" : "PV(j) before QK(j+2)");
   printf("vector order: %s\n", ATTN_VPU_EARLY ? ATTN_UPD_LATE ? "softmax(j+1) before PV(j); loads, update(j-1), SR(j+1) after it" : "softmax(j+1) before PV(j); loads, update(j), SR(j+1) after it" : "softmax(j+1) after PV(j), update(j) last");
-  printf("softmax: %s\n", ATTN_EXPSUB ? "fused EXPSUB (exp(S - m) in one pass)" : "SUB then EXP");
+  printf("softmax: %s\n", ATTN_EXPSUM ? "fused EXPSUM (exp(S - m) and its row sums in one pass)" :
+         ATTN_EXPSUB ? "fused EXPSUB (exp(S - m) in one pass), then RSUM" : "SUB, EXP, RSUM");
   printf("spad layout: %s\n", !ATTN_SPLIT ? "packed" : ATTN_O_LOW ? "bank split, O + stats in bank 0 (S / O_j in banks 2-3)" :
+         ATTN_ST_B2 ? "bank split, stats in bank 2 (banks 0-1 only mesh operands)" :
          ATTN_ST_LOW ? "bank split, stats in bank 0 (S / O_j / O in banks 2-3)" : "bank split (mesh operands banks 0-1, VPU buffers banks 2-3)");
   gemmini_flush(0);
   const uint8_t *q_sc = &Q_SCALES[0][0];
@@ -460,15 +481,21 @@ int main() {
   if (ATTN_SERIAL)
     printf("check O hash: serial %016llx, pipelined %016llx (%s)\n", (unsigned long long)h_ser,
            (unsigned long long)h_pip, h_ser == h_pip ? "equal" : "DIFFER");
+  if (ATTN_HEADS > 1)   // per packed head: equals that head run alone with the same key blocks (rows are independent)
+    for (int h = 0; h < ATTN_HEADS; h++)
+      printf("O hash head %d: %016llx\n", h, (unsigned long long)fnv(&O_hw[h * (SQ / ATTN_HEADS)][0], sizeof(O_hw) / ATTN_HEADS));
   printf("check O hash vs Spike: %s (%016llx)\n", h_pip == EXP_FLASH_HASH_O ? "match" : "MISMATCH", (unsigned long long)h_pip);
   fail |= h_pip != EXP_FLASH_HASH_O;
-  float num = 0, den = 0;   // accuracy over the first 16 rows (O_REF_F: fp64 dense attention)
-  for (int i = 0; i < 16 * D; i++) {
-    float r; memcpy(&r, &((const uint32_t *)O_REF_F_F32)[i], 4);
-    const float o = bf(((const uint16_t *)O_hw)[i]);
-    num += (o - r) * (o - r); den += r * r;
+  for (int h = 0; h < ATTN_HEADS; h++) {   // accuracy over each packed head's first 16 rows (O_REF_F: fp64 attention)
+    float num = 0, den = 0;
+    const int r0 = h * (SQ / ATTN_HEADS) * D;
+    for (int i = r0; i < r0 + 16 * D; i++) {
+      float r; memcpy(&r, &((const uint32_t *)O_REF_F_F32)[i], 4);
+      const float o = bf(((const uint16_t *)O_hw)[i]);
+      num += (o - r) * (o - r); den += r * r;
+    }
+    printf("accuracy O head %d (16 rows): rel_fro %d ppm vs fp64 attention\n", h, (int)(sqrtf(num / den) * 1e6f));
   }
-  printf("accuracy O (16 rows): rel_fro %d ppm vs fp64 attention\n", (int)(sqrtf(num / den) * 1e6f));
 
   const uint64_t mesh = 2ULL * SQ * SK * D / (DIM * DIM);
   if (ATTN_SERIAL) {

@@ -17,6 +17,11 @@ the error of VPU softmax + P requant + PV) and O_REF_F (fp64 attention on the de
 
 --capture: Q = the capture's LAST sq tokens, K/V = its first sk tokens (sq + sk <= seq), d = the head dim. Every key
 precedes every query, so no causal mask is needed: 64 new tokens attending to a 2048-token KV cache.
+--capture a.npz b.npz ...: GQA head packing. Captures of query heads sharing one kv head (same K/V, checked) stack
+their queries as extra rows: Sq = sq x heads (rows h*sq.. are head h). Softmax is per row, so this is exact.
+
+    ../../../.venv/bin/python3 gen_attn_vpu.py --capture ../../../out/layer_capture/attn_qkv_layer5_h{0,1}_s2112.npz \
+        --sq 64 --sk 2048 --tag _llama_2h --no-s-golden
 --causal: Q = the last sq of the sk key tokens (chunked prefill: the chunk attends to the cache and to itself), with
 the causal mask (key position > query position -> -inf) on the last sq keys; emits MASK_BF16 [sq][sq] (0 / -inf).
 
@@ -55,23 +60,33 @@ def main() -> int:
     ap.add_argument("--d", type=int, default=64)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--tag", default="")
-    ap.add_argument("--capture", type=Path, default=None, help="npz from capture_attn_qkv.py (real Q/K/V)")
+    ap.add_argument("--capture", type=Path, nargs="+", default=None,
+                    help="npz from capture_attn_qkv.py (real Q/K/V); several = query heads of one kv head, packed")
     ap.add_argument("--no-s-golden", action="store_true", help="omit S_GOLDEN (dense-kernel check only)")
     ap.add_argument("--causal", action="store_true", help="queries are the last sq keys; causal mask on them")
     a = ap.parse_args()
     Sq, Sk, d = a.sq, a.sk, a.d
     src = f"random N(0,1), seed {a.seed}"
+    H = 1
     if a.capture is not None:
-        z = np.load(a.capture)
+        zs = [np.load(c) for c in a.capture]
+        z, H = zs[0], len(zs)
+        assert not (a.causal and H > 1), "causal head packing needs a per-head mask (not implemented)"
+        for o in zs[1:]:
+            assert int(o["kv_head"]) == int(z["kv_head"]) and np.array_equal(o["K"], z["K"]) and np.array_equal(o["V"], z["V"]), \
+                "packed heads must share one kv head"
         T = int(z["seq"]); d = int(z["Q"].shape[1])
         q0 = Sk - Sq if a.causal else T - Sq
         assert a.causal and Sk <= T or Sq + Sk <= T, f"capture has {T} tokens, need sq + sk = {Sq + Sk}"
-        src = (f"TinyLlama layer {int(z['layer'])} head {int(z['head'])} (kv head {int(z['kv_head'])}), "
+        heads = ",".join(str(int(o["head"])) for o in zs)
+        src = (f"TinyLlama layer {int(z['layer'])} head{'s' if H > 1 else ''} {heads} (kv head {int(z['kv_head'])}), "
                f"queries = tokens {q0}..{q0 + Sq - 1}, keys/values = tokens 0..{Sk - 1}" + (", causal" if a.causal else ""))
     # tile shape only; the dense kernel additionally needs Sq*Sk/32 <= 2048 (one SPAD_REQUANT), flash per block
     assert Sq % 16 == 0 and Sk % 32 == 0 and d % 32 == 0
     if a.capture is not None:
-        Q = np.ascontiguousarray(z["Q"][q0:q0 + Sq]); K = np.ascontiguousarray(z["K"][:Sk]); V = np.ascontiguousarray(z["V"][:Sk])
+        Q = np.ascontiguousarray(np.vstack([o["Q"][q0:q0 + Sq] for o in zs]))   # head h -> rows h*Sq ..
+        K = np.ascontiguousarray(z["K"][:Sk]); V = np.ascontiguousarray(z["V"][:Sk])
+        Sq *= H
     else:
         rng = np.random.default_rng(a.seed)
         Q = rng.standard_normal((Sq, d)).astype(np.float32)
@@ -117,6 +132,7 @@ def main() -> int:
 #define ATTN_SK {Sk}
 #define ATTN_D  {d}
 #define ATTN_CAUSAL {int(a.causal)}
+#define ATTN_HEADS  {H}   // packed query heads sharing K/V (rows h*ATTN_SQ/ATTN_HEADS ..)
 
 static const uint8_t Q_IN[ATTN_SQ][ATTN_D] __attribute__((aligned(64))) = {{
 {r(q_codes, 2)}

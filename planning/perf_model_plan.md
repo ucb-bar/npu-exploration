@@ -295,3 +295,134 @@ HEAD, perf == both cycles unchanged by the move, recipe build OK.
 **Final validation (user, 2026-10-05): `attn_flash_llama_vb` is THE validation test and the user's most important
 one.** Never used for calibration; the model must get as close to it as possible from constants measured on other
 tests. Its error is reported separately, as the headline number.
+
+## 13. Calibration log
+
+### 13.1 Write path (2026-10-05), from `matmul_tiled_fp8_128x128` FSDB + commit trace
+Script: `waveform-debug/mxgemmini_debug_scripts/perf_write_ack.py` (Put/ack pairing by TileLink source).
+* **Commit trace vs FSDB clock: FSDB cycle = commit-trace cycle + 509** for this run (aligned on the ~14-cycle counter
+  reads: log 60425/60438/60452 ↔ FSDB busy pulses 60934/60947/60961). An earlier read of the FSDB with the log's
+  cycle numbers mislocated the mvout phase and briefly suggested a 500-cycle store startup and a fence that does not
+  wait; both were artifacts of the 509-cycle offset. The fence does wait for `io.busy`.
+* The StreamWriter issues **one 64-byte Put (byte-masked) per 64 B line a row touches** — the model's existing rule.
+  The VCS binary's `C_hw` was 8 B off a 16 B boundary, so 5 Puts per 4 rows: 2560 Puts for 2048 rows.
+* **The L2 accepts a Put every 2nd cycle** (2411 of 2559 issue gaps are 2; `a_ready` low 2675 cycles) →
+  new `mem.put_cycles = 2`.
+* **Put → ack: median 44** (p10 21, p90 74, max 110; first touch of a line 46 vs re-touch 44: no cold penalty);
+  ~25 Puts in flight, under the 32 cap → `mem.write_ack_latency = 44`.
+* Phase = 294 setup + 2560 × 2.05 + 66 tail = 5610 (VCS). Setup is mostly counter reads: **a RoCC instruction
+  with rd stalls the core ~10 cycles** → new `host.rocc_resp_cycles = 4` (after the command is taken; xd read from
+  the instruction in the RoCC wrapper, `gemmini.cc` unchanged).
+* **Binary mismatch:** the ISA ELFs were rebuilt 2026-10-03; VCS kept only `.dump`. Current ELF has `C_hw`
+  16-aligned → 2048 Puts; VCS-equivalent for it ≈ 294 + 2048 × 2.05 + 66 ≈ 4560.
+
+| 128×128 phase | VCS | model before | model now |
+|---|---|---|---|
+| load | 5110 | 5320 | 5509 (+7.8 %, load path not calibrated yet) |
+| compute | 10839 | 10469 | 10649 (−1.8 %) |
+| mvout | 5610 (≈4560 for the current binary) | 2753 | 4318 (−5.3 % vs 4560) |
+
+### 13.2 Load path + native DRAM loop (2026-10-05)
+**Exact-binary set** (current ELF disassembly == the VCS `.dump`): `llama_mlp_tiny_native_ua`, `llama_mlp_tiny_db`,
+`llama_mlp_small`, `matmul_tiled_fp8_128x128_dramloop`, `mx_mem_bw`; the other `dramloop_*` differ only by a swapped
+register pair in host check code (same layout). The others (e.g. `llama_mlp_tiny_native`, `*_attention_*_native`,
+`mx_bench_matmul`) were rebuilt after their VCS run.
+
+**Native loop (`gemmini_loop_ws_mx`) now modelled exactly per the RTL:** LOOP_WS_CONFIG_SCALES/STRIDES; LdS
+unroller (top priority, gated 2-D MX_LOAD_SCALES A then B into half = slot, A skipped when A = NULL and the slot
+holds the same slice; reuse record invalidated by any non-loop command, LoopMatmul.scala:1503-1554); the loop's
+managed CONFIG_SCALE_MEM first in Ex (waits drain + scale_ready, claims its halves); StC as 2 chunks per
+(i, j-group). Scale loader: four half states FREE/LOADED/INUSE, gated head-of-line blocking, landed/ready per half
+(Controller.scala:596-721); raw CONFIG_SCALE_MEM decodes act/wgt half + wait/managed/reuse bits.
+
+**Measured (FSDB via NPI; scripts `waveform-debug/mxgemmini_debug_scripts/perf_tl_latency.py`, `perf_rtl_events.py`):**
+* DRAM channel: one 64 B line per 8 cycles. Unloaded DRAM latency is small (L2 DRAM-side median 23 in the MLP
+  down loop); the ~200-250 seen in `dramloop` is queueing (32 reads in flight × 8 cycles). `mem.dram_latency` 200 → 20.
+* L2 hit 12 (`mx_mem_bw` B_warm_16B); scale-loader client hit ~10, **scale Gets are 8 B** (64 Gets / 512 B), and the
+  scale loader is **not on the DMA's crossbar port** (own client; shares L2/DRAM) → `mem.client_hit_latency`,
+  `scale.get_bytes`, separate `client_bus` port.
+* Writes: PutFull (whole line) accepted every cycle, ack mean 115 (dramloop C); PutPartial every 2nd cycle, ack 46.
+* A TileLink client holds a request until the bus accepts it (reader/writer now wait for the grant).
+* A store to DRAM is back-pressured by its write queues: released when all but `st.write_slack` (8) Puts are on the
+  bus; ~13-cycle command → first Put pipeline (`st.pipe_latency` 12), hidden by the slack in steady state.
+* L2: a request to a line whose fill is outstanding takes its own L2 pass after the fill.
+
+**Replay mode** (`tools/rtl_replay.py` + `GEMMINI_PERF_REPLAY`): the VCS commit trace gives the retire cycle of every
+Gemmini command / fence / rdcycle; the model uses those as arrival times (no host model in the comparison) and
+reports, per fence that follows Gemmini work, RTL retire vs model idle. Fences are matched by the number of Gemmini
+commands before them (spike and the RTL run differ in boot/printf fences). The FSDB cycle = commit-trace cycle + ~508.
+
+**Found, not yet modelled — the CPU's caches.** (1) Data the CPU just wrote (e.g. `h_codes` before the MLP down loop)
+is warm in the L2 / owned by the L1: RTL reads hit, the model's lines are cold (MLP down loop +191 cycles of 1255).
+(2) Writes to lines the L1 owns are slower (`mx_mem_bw` mvout: `out_buf` is CPU-zeroed .bss; model −27 %).
+(3) The CPU's own I/D-cache misses (45-50 cycles each) — hidden by replay mode. Needs spike's memtracer
+(observe host stores) — a speed cost, decision pending with the user.
+
+| test (perf mode, exact binary) | VCS | model | |
+|---|---|---|---|
+| dramloop compute | 11899 | 11560 | −2.8 % |
+| dramloop_nc / nc4 / nc_2d loops | 10655 / 10727 / 10630 | 10415 / 10550 / 10415 | −2.3 / −1.7 / −2.0 % |
+| dramloop_kt loops | 13254 | 12592 | −5.0 % |
+| dramloop_ls / ls4 / nc_wait loops | 10649 / 10900 / 10536 | 13334 / 11550 / 11084 | **+25.2** / +6.0 / +5.2 % (loop-managed scales: open) |
+| 128x128 mvout (≈4560 for the current binary) | 5610 | 4331 | ≈ −5 % |
+| mx_mem_bw A cold / A warm / B warm | 2179 / 1076 / 1080 | 2105 / 1069 / 1069 | −3.4 / −0.7 / −1.0 % |
+| mx_mem_bw B cold 16 B / scale cold / scale warm / mvout | 3373 / 171 / 85 / 2917 | 2735 / 260 / 113 / 2128 | −19 / +52 / +33 / −27 % |
+| MLP native (replay): G,U loops end / Y loop end | — | +89 / +191 cycles | of 2088 / 1255 |
+
+### 13.3 CPU-store tracking + scale loader + regression tool (2026-10-05)
+**Decision (user): host-memory tracking ON by default, with a switch** (`GEMMINI_PERF_SET="mem.host_tracking=0"`).
+Spike's memtracer, registered from the extension's `reset(processor_t&)` (before boot code runs; `gemmini.h`
+2-line override), traces **stores only** — loads/fetches keep spike's fast TLB path. Stores issued while a
+Gemmini command executes (the functional model's own writes in `both`) are ignored. Model: the CPU's L1
+(`mem.host_l1_kib` 16, LRU) owns lines it wrote; the inclusive L2 holds them (dirty). A Gemmini access to an
+L1-owned line pays `mem.probe_cycles` / `mem.probe_bus_cycles` (placeholders, uncalibrated) and takes it out of the L1.
+**Cost: llama_layer_full 2.10 → 2.38 s (+13 %), llama_model_l2 8.21 → 8.39 s (+2 %).**
+Effect (MLP native, replay): down loop +191 → −9 cycles; G,U loops +89 → −239 (now early: open).
+
+**Other fixes in this round (all from FSDB evidence):**
+* Scale loader: Gets are line-sized (largest aligned ≤ 64 B): 8 requests for mx_mem_bw's 512 B (FSDB: valid high
+  8 cycles). The test's "reqs=64" counts 8-byte words; an earlier reading of it as 64 Gets was wrong.
+  → `dramloop_ls` +25 % → −1 %, `ls4` +6 → +0.5 %, `nc_wait` +5 → −1 %.
+* The fence waits for Gemmini's busy signal (RS completions, Put acks, scale/LUT loads, requant spad writes), not
+  for L2/DRAM background work: `model_t::busy_until()`.
+* L2: dirty lines (Gemmini or CPU writes) cost a DRAM slot when evicted; a partial write to an absent line costs a
+  DRAM fill slot in the background (the Put is not delayed: first-touch ack 46 vs 44).
+* Store backpressure counts Puts (`st.write_slack` = 8 Puts still waiting for the bus), not cycles.
+
+**Regression tool:** `python3 tools/perf_regress.py [--set ...] [--only ...]` — every exact-binary test, model vs
+VCS per phase, plus MLP replay fences; whole suite ~1.5 s.
+
+Current (perf mode): dramloop compute −2.8 %; nc/nc4/nc_2d/ls/ls4/nc_wait loops −2.3/−1.7/−2.0/−1.0/+0.5/−1.1 %;
+kt −7.6 %; 128x128 compute −1.7 %, mvout ≈ −5 % vs the binary-adjusted VCS; mx_mem_bw A cold/warm, B warm,
+scale warm within 3.4 %; scale cold −38 %, B cold 16 B −19 %, mvout_16B −27 % (open). Phases dominated by
+host instructions (e.g. 55-cycle scale phases, the fenced MLP tests) need the host model or replay.
+
+### 13.4 LoopMatmul load arbitration (2026-10-05)
+* **A/B arbiter (WeightedArbiter static weight, LoopMatmul.scala:1170-1184):** B's very first load goes first
+  (`inB_k == 0 && inB_j == 0`), then B whenever A's k is ahead, else A. When the A and B unrollers serve different
+  loops, the one on the head loop is **forced** — and an idle unroller keeps the id of the loop it served last.
+  So in `dramloop_kt` (4 K-tile loops, all A in half 0) loop 2's B loads waited ~2100 cycles: A pointed at the
+  head loop (forced), and loop 2's A was `ld_blocked` (newer loop's A rows overlap the head's until the head has
+  issued all its computes, :1387). An A = NULL loop still "starts" its LdA unroller with zero commands, so the
+  unroller passes through it (`unroller_loop()`). dramloop_kt −7.6 % → −1.6 %; replay −1161 → −157 cycles.
+* **Lone preload** (`mesh.lone_preload_cycles` 5): new weights reaching an idle mesh are their own request.
+  Real (dramloop FSDB: requests 5 cycles apart) but small.
+* **Open — end-of-loop mesh stalls:** in the plain dramloop (replay −260 = −2.2 %) the RTL mesh pauses 128 / 89 / 89
+  cycles once the C stores start (~cycle 9500 of the phase); the model's mesh runs on. A store/mesh interaction on
+  the accumulator not yet modelled. MLP G,U loops: replay −240 (store timing: RTL first Put 1330 vs model 991).
+
+### 13.5 Store/mesh interaction: the RS's coarse accumulator ranges (2026-10-05)
+**Found (dramloop FSDB):** at the end of the loop the mesh idles ~110 cycles at a time while the C stores run.
+LoopMatmul emits only stores; `ex_utilization` is pinned at its limit 16 while the ExecuteController's queue is empty
+and the accumulator is not written: 16 ex commands sit in the RS waiting on the stores. Cause: the RS's address
+ranges are coarser than the data — a preload's C range is `c_rows` (DIM) rows and an mvout's is
+`(blocks-1)*DIM + rows` (ReservationStation.scala:250-299), but a single-throughput C tile occupies DIM/4
+accumulator rows. So a store's range reaches into the next row-block's tiles, and the preloads writing them wait
+(WAR) for the store. The model now uses the RTL's ranges, not the exact ones.
+
+Effect: 128x128 compute −1.6 → −0.3 %; dramloop_nc / nc_2d / ls / nc_wait loops → −1.9 / −1.6 / −0.6 / −0.7 %;
+MLP native replay G,U −240 → −147 cycles, Y +6 → +1; mlp_tiny_db G,U phase −26 → −13 %. Plain dramloop: the
+stalls now appear (last tile 9977 vs RTL 9926); replay −2.6 %, the rest is the store tail.
+
+**Open (small): L2 write throughput.** RTL Put spacing at the end of dramloop is ~7 cycles (acks slow down as the L2
+write path fills: p90 242 vs mean 115); the model's fixed ack latency gives bursts. Worth ~1-2 % here.
