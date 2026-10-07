@@ -12,6 +12,8 @@ numbers, and a perplexity is tied to the ``build_id`` that VERDICT was proved ag
     ----------------------------------------  ------------------------------------------------------
     run.operand_fmt, hw mx.scaleSize          block.mxgemmini.quantize(fmt, block_size,
     run.rounding, run.scale_floor                 rounding_mode, scale_floor)
+    run.scale "ocp"                               block.ocp.quantize(fmt, block_size, rounding_mode) instead:
+                                                  the block max at the format max, not in [1, 2)
     hw types.meshProdPrecisionList            matmul.MXGEMMINI(prod_e, prod_m, prod_floor)   one product format
     hw types.prodFloor
     hw types.meshAccPrecisionList             schedule = [(expWidth, sigWidth - 1)] x dim
@@ -86,6 +88,9 @@ def quantizer(hw: Hardware, run: Run):
         return partial(block.lut.quantize, fmt=mxq_format(run.operand_fmt), axis=0, block_size=hw.block,
                        rounding_mode=run.rounding, scale_floor=run.scale_floor, group=run.lut.group,
                        max_iters=run.lut.fit.max_iters)
+    if run.scale == "ocp":                  # OCP placement: block max at the format max; no scale floor there
+        return partial(block.ocp.quantize, fmt=mxq_format(run.operand_fmt), axis=0, block_size=hw.block,
+                       rounding_mode={"rne": "even", "ties_away": "nearest"}[run.rounding])
     return partial(block.mxgemmini.quantize, fmt=mxq_format(run.operand_fmt), axis=0, block_size=hw.block,
                    rounding_mode=run.rounding, scale_floor=run.scale_floor)
 

@@ -134,6 +134,25 @@ def main() -> int:
         check("LUT off fp6 is refused on the kernel path (the chip's requantizer needs the LUT)", False, "accepted")
     except RecipeError as exc:
         check("LUT off fp6 is refused on the kernel path (the chip's requantizer needs the LUT)", "lut block" in str(exc))
+    from dataclasses import replace
+    ocp_run = replace(load_run("fp4_e2m1"), scale="ocp")
+    s_ocp = scheme.scheme(base, ocp_run)
+    check("scale ocp quantizes through mxq.block.ocp (block max at the format max), rne -> even",
+          s_ocp.a.func.__module__ == "mxq.block.ocp" and s_ocp.a.keywords["rounding_mode"] == "even"
+          and s_ocp.a.keywords["fmt"] == "MXFP4")
+    check("scale ocp changes run_id; scale mxgemmini (the default) keeps it",
+          ocp_run.run_id() != load_run("fp4_e2m1").run_id()
+          and replace(load_run("fp4_e2m1"), scale="mxgemmini").run_id() == load_run("fp4_e2m1").run_id())
+    try:
+        parse_run({**{k: v for k, v in vars(load_run("fp4_e2m1")).items() if k in ("name", "operand_fmt", "rounding", "scale_floor", "reduce", "allow_lossy_chain", "fp32_tol")}, "scale": "imx"})
+        check("an unknown scale is refused", False, "accepted")
+    except RecipeError as exc:
+        check("an unknown scale is refused", "scale" in str(exc))
+    try:
+        recipe_check(base, ocp_run, "kernel")
+        check("scale ocp is refused on the kernel path", False, "accepted")
+    except RecipeError as exc:
+        check("scale ocp is refused on the kernel path", "scale ocp" in str(exc))
     check("is_codebook knows the four table-indexed formats",
           [d for d in scheme.MXQ_FORMAT if scheme.is_codebook(d)] == ["fp8_e4m3_quad", "fp8_e5m2", "fp6_e3m2", "fp6_e2m3"])
     check("the run picks the format, the hardware the arithmetic",

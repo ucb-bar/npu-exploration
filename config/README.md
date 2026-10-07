@@ -70,6 +70,7 @@ All of these are in `build_id` except the labels (`name`, `description`, `proven
 | `operand_fmt` | MX operand format: `fp8_e4m3`, `fp8_e5m2`, `fp8_e4m3_quad`, `fp6_e3m2`, `fp6_e2m3`, `fp4_e2m1` | `fp8_e4m3` |
 | `rounding` | operand rounding: `rne` or `ties_away` | `rne` |
 | `scale_floor` | the block maximum is floored here before the scale is taken | 2^-23 |
+| `scale` (optional) | where the block scale puts the block maximum: `mxgemmini` (in [1, 2): the chip's requantizer, MXQuant, every record so far) or `ocp` (at the format maximum, OCP MX v1.0, `mxq.block.ocp`; perplexity path only, no `scale_floor`, no `lut`). Absent keeps `run_id` | `mxgemmini` |
 | `reduce` | how codes are multiplied: `hardware` (the recipe's array), `exact`, `bf16_tiles` | `hardware` |
 | `allow_lossy_chain` | run a chain whose codebook cannot be chosen exactly | `false` |
 | `fp32_tol` | kernel pass threshold on relative Frobenius error against fp32 | 0.15 |
