@@ -286,10 +286,13 @@ def run_perf(recipe, dtype: str, stages, *, as_measured: bool = True, energy: bo
 def line(perf: dict) -> str:
     """The PERF line run_kernel.py prints: the predicted timeline of this kernel on that machine."""
     e = perf.get("energy")
+    sp = perf.get("spike_cycles") or {}
+    tail = (f"   [spike's cycle model: {sp['cycles']}]" if sp.get("source") == "cycle model"
+            else f"   [spike functional count: {sp.get('cycles', perf.get('spike_functional_cycles'))}]")
     return (f"PERF     {perf['total_cycles_predicted']} cycles predicted   "
             f"{perf['total_us']:.1f} us   util {perf['utilization_pct_min']:.1f}%"
             + (f"   {e['uj_kernel']:.2f} uJ ({e['pj_per_op_achieved']:.1f} pJ/op achieved)" if e else "")
-            + f"   [spike functional count: {perf.get('spike_functional_cycles')}]")
+            + tail)
 
 
 def main() -> int:

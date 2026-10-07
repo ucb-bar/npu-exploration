@@ -262,6 +262,24 @@ def main() -> int:
     check("BANK_NUM", bank_num, r.banks)
     check("BANK_ROWS", int(rows.group(1)), r.rows)
 
+    print("\nbaseline.json vs libgemmini/perf/params/config.h (the cycle model's mx_rocket defaults)")
+    # The pipeline passes the recipe's geometry to the cycle model at run time (runner.TIMING_PARAMS), so a
+    # default here that drifts is caught by the record's `overridden` list, not by a wrong number. This
+    # check says whether the model's own picture of MxGemminiRocketConfig still is the baseline recipe.
+    cfg = (lg / "perf/params/config.h").read_text(encoding="utf-8")
+
+    def perf_default(section: str, name: str) -> int | None:
+        m = re.search(rf"X\({section},\s*{name},\s*([\d.]+),", cfg)
+        return int(float(m.group(1))) if m else None
+
+    check("config.h mesh.dim", perf_default("mesh", "dim"), r.dim)
+    check("config.h spad.banks", perf_default("spad", "banks"), r.banks)
+    check("config.h spad.bank_rows", perf_default("spad", "bank_rows"), r.rows)
+    check("config.h mx.block", perf_default("mx", "block"), r.block)
+    from compiler.targets.mx_gemmini_rocket.backend import runner as _runner
+    check("runner.TIMING_PARAMS names exist in config.h",
+          all(re.search(rf"X\({n.split('.')[0]},\s*{n.split('.')[1]},", cfg) for n in _runner.TIMING_PARAMS.values()), True)
+
     print("\nbaseline.json vs rtl_exact (the extracted hardware model)")
     import json
     rj = json.loads((REPO / "rtl_exact" / "mxgemmini_rtl.json").read_text(encoding="utf-8"))
