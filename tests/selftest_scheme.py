@@ -118,6 +118,41 @@ def main() -> int:
 
     s6 = scheme.scheme(base, load_run("fp6_e3m2"))
     check("an fp6 run builds a Scheme on the full MXFP6_E3M2 grid", s6.a.keywords["fmt"] == "MXFP6_E3M2")
+    from config.recipe import check as recipe_check
+    s6d = scheme.scheme(base, load_run("fp6_e3m2_direct"))
+    check("an fp6 run without a lut block quantizes straight to the MXFP6_E3M2 grid (LUT off)",
+          s6d.a.keywords["fmt"] == "MXFP6_E3M2" and s6d.a.func is scheme.scheme(base, load_run("fp4_e2m1")).a.func
+          and s6d.a.func is not s6.a.func and scheme.lut_record(load_run("fp6_e3m2_direct")) is None
+          and not scheme.uses_lut(load_run("fp6_e3m2_direct")) and scheme.uses_lut(load_run("fp6_e3m2")))
+    try:
+        recipe_check(base, load_run("fp6_e3m2_direct"), "perplexity")
+        check("LUT off fp6 passes the perplexity path's check", True)
+    except RecipeError as exc:
+        check("LUT off fp6 passes the perplexity path's check", False, str(exc)[:90])
+    try:
+        recipe_check(base, load_run("fp6_e3m2_direct"), "kernel")
+        check("LUT off fp6 is refused on the kernel path (the chip's requantizer needs the LUT)", False, "accepted")
+    except RecipeError as exc:
+        check("LUT off fp6 is refused on the kernel path (the chip's requantizer needs the LUT)", "lut block" in str(exc))
+    from dataclasses import replace
+    ocp_run = replace(load_run("fp4_e2m1"), scale="ocp")
+    s_ocp = scheme.scheme(base, ocp_run)
+    check("scale ocp quantizes through mxq.block.ocp (block max at the format max), rne -> even",
+          s_ocp.a.func.__module__ == "mxq.block.ocp" and s_ocp.a.keywords["rounding_mode"] == "even"
+          and s_ocp.a.keywords["fmt"] == "MXFP4")
+    check("scale ocp changes run_id; scale mxgemmini (the default) keeps it",
+          ocp_run.run_id() != load_run("fp4_e2m1").run_id()
+          and replace(load_run("fp4_e2m1"), scale="mxgemmini").run_id() == load_run("fp4_e2m1").run_id())
+    try:
+        parse_run({**{k: v for k, v in vars(load_run("fp4_e2m1")).items() if k in ("name", "operand_fmt", "rounding", "scale_floor", "reduce", "allow_lossy_chain", "fp32_tol")}, "scale": "imx"})
+        check("an unknown scale is refused", False, "accepted")
+    except RecipeError as exc:
+        check("an unknown scale is refused", "scale" in str(exc))
+    try:
+        recipe_check(base, ocp_run, "kernel")
+        check("scale ocp is refused on the kernel path", False, "accepted")
+    except RecipeError as exc:
+        check("scale ocp is refused on the kernel path", "scale ocp" in str(exc))
     check("is_codebook knows the four table-indexed formats",
           [d for d in scheme.MXQ_FORMAT if scheme.is_codebook(d)] == ["fp8_e4m3_quad", "fp8_e5m2", "fp6_e3m2", "fp6_e2m3"])
     check("the run picks the format, the hardware the arithmetic",
@@ -213,9 +248,13 @@ def main() -> int:
     refused_load("a lut block on a direct format is refused",
                  lambda: check_recipes(base, parse_run({**rraw, "lut": good}), "perplexity"), "not a LUT format")
     nolut = parse_run({k: v for k, v in lraw.items() if k != "lut"})
-    for path in ("kernel", "perplexity"):
-        refused_load(f"a LUT format without a lut block is refused ({path})",
-                     lambda: check_recipes(base, nolut, path), "needs a lut block")
+    refused_load("a LUT format without a lut block is refused on the kernel path (the requantizer needs the LUT)",
+                 lambda: check_recipes(base, nolut, "kernel"), "lut block")
+    try:
+        check_recipes(base, nolut, "perplexity")
+        check("a LUT format without a lut block runs LUT off on the perplexity path", True)
+    except RecipeError as exc:
+        check("a LUT format without a lut block runs LUT off on the perplexity path", False, str(exc)[:90])
 
     print("\n[5c] the hardware recipe's mx.lut -----------------------------------")
     check("baseline's LUT unit is the stock one (LutFP6E3M2, 6-bit, 64 per table, 16-bit G)",

@@ -38,7 +38,7 @@ def main() -> int:
     ap.add_argument("--seqlen", type=int, default=None, help="override the workload's tokens per sample")
     ap.add_argument("--seed", type=int, default=None, help="override the workload's seed")
     ap.add_argument("--sequential", action="store_true", help="the first nsamples in order instead of seeded ones")
-    ap.add_argument("--rules", default=None, help="override which linear layers: mxquant_layers | all_linear | linears_no_head")
+    ap.add_argument("--rules", default=None, help="override which linear layers: a name in models/mxquant/rules.py NAMES")
     ap.add_argument("--model-id", default=None, help="override the workload's HF model")
     ap.add_argument("--no-compiled", action="store_true", help="skip torch.compile (5-7x slower, same bits)")
     ap.add_argument("--force", action="store_true", help="measure again even if cached")

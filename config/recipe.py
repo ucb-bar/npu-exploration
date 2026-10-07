@@ -41,9 +41,12 @@ _HW_SECTIONS = {
 }
 _MXFLOAT = {"expWidth", "sigWidth", "count", "isRecoded", "pad"}
 _RUN_KEYS = {"name", "description", "operand_fmt", "rounding", "scale_floor", "reduce",
-             "allow_lossy_chain", "fp32_tol", "lut"}
+             "allow_lossy_chain", "fp32_tol", "lut", "scale"}
 #: Optional run keys: absent means today's behaviour, and leaves run_id unchanged.
-_RUN_OPTIONAL = {"description", "lut"}
+_RUN_OPTIONAL = {"description", "lut", "scale"}
+#: Where the block scale puts the block maximum: "mxgemmini" (in [1, 2): the chip's requantizer, MXQuant, every
+#: record so far) or "ocp" (at the format's maximum, OCP MX v1.0; mxq.block.ocp, perplexity path only).
+SCALES = ("mxgemmini", "ocp")
 
 #: mx.lut: the RTL's GemminiLUTConfig field names (MxConfigFragments.scala:48), so one JSON describes both.
 _HW_LUT_KEYS = {"projFormat", "rdataWidth", "raddrWidth", "numEntries", "numBits", "lutUpdateRegularityWidth",
@@ -248,13 +251,15 @@ class Run:
     allow_lossy_chain: bool = False
     fp32_tol: float = 0.15
     lut: Lut | None = None      # None: no lut block (the kernel path's LUTs are the compiler's; perplexity is full grid)
+    scale: str = "mxgemmini"    # SCALES; "mxgemmini" is absent from run_id so every recipe without it keeps its id
     description: str = ""
     path: Path | None = None
 
     def fields(self) -> dict:
         """Every field that changes a number. ``lut`` only when set, so a recipe without it keeps its run_id."""
         return {k: v for k, v in asdict(self).items()
-                if k not in _LABELS and k != "path" and not (k == "lut" and v is None)}
+                if k not in _LABELS and k != "path" and not (k == "lut" and v is None)
+                and not (k == "scale" and v == "mxgemmini")}
 
     def run_id(self) -> str:
         return _digest(self.fields())
@@ -263,8 +268,9 @@ class Run:
         lut = "" if self.lut is None else (
             f"  lut G={self.lut.group} B {self.lut.weights} A {self.lut.activations} C {self.lut.outputs}"
             f" pick {self.lut.pick} {self.lut.fit.method}/{self.lut.fit.init}x{self.lut.fit.max_iters}")
+        scale = "" if self.scale == "mxgemmini" else f"  scale {self.scale}"
         return (f"{self.name}  {self.operand_fmt}  {self.rounding}  floor {self.scale_floor:g}  "
-                f"reduce {self.reduce}{lut}")
+                f"reduce {self.reduce}{lut}{scale}")
 
 
 def _digest(obj) -> str:
@@ -372,10 +378,13 @@ def parse_run(raw: dict, *, path: Path | None = None) -> Run:
     if missing:
         raise RecipeError(f"run recipe: {', '.join(missing)} required (write every field; "
                           "config/run/default.json is the template)")
+    scale = str(raw.get("scale", "mxgemmini"))
+    if scale not in SCALES:
+        raise RecipeError(f"run recipe: scale {scale!r}; choose from {', '.join(SCALES)}")
     return Run(name=raw["name"], operand_fmt=str(raw["operand_fmt"]), rounding=str(raw["rounding"]),
                scale_floor=float(raw["scale_floor"]), reduce=str(raw["reduce"]),
                allow_lossy_chain=bool(raw["allow_lossy_chain"]), fp32_tol=float(raw["fp32_tol"]),
-               lut=_parse_lut(raw.get("lut"), path), description=raw.get("description", ""), path=path)
+               lut=_parse_lut(raw.get("lut"), path), scale=scale, description=raw.get("description", ""), path=path)
 
 
 def _bool(v, where: str) -> bool:
@@ -459,17 +468,23 @@ def check(hw: Hardware, run: Run, path: str) -> None:
     scheme.mxq_format(run.operand_fmt)
     if run.reduce not in scheme.REDUCERS:
         raise RecipeError(f"run {run.name}: reduce {run.reduce!r}; choose from {', '.join(scheme.REDUCERS)}")
-    is_lut = scheme.is_codebook(run.operand_fmt)
-    if run.lut is not None and not is_lut:
+    codebook = scheme.is_codebook(run.operand_fmt)
+    if run.lut is not None and not codebook:
         raise RecipeError(f"run {run.name}: a lut block for {run.operand_fmt}, which is not a LUT format "
                           "(the LUT formats are fp8_e4m3_quad, fp8_e5m2, fp6_e3m2, fp6_e2m3)")
-    if is_lut:
+    if run.lut is not None:
         _check_lut(hw, run)
+    if run.scale != "mxgemmini" and run.lut is not None:
+        raise RecipeError(f"run {run.name}: scale {run.scale} with a lut block; the chip's tables index codes "
+                          "placed the mxgemmini way")
     if path == "perplexity":
-        return
+        return                  # a codebook format without a lut block: quantized straight to its grid (LUT off)
     if path != "kernel":
         raise ValueError(f"path {path!r}: 'kernel' or 'perplexity'")
     refusals = []
+    if codebook and run.lut is None:
+        refusals.append(f"{run.operand_fmt} without a lut block: the chip's requantizer sends it through the LUT "
+                        f"(config/run/{run.operand_fmt}.json is the template)")
     if hw.dim != KERNEL_DIM:
         refusals.append(f"mesh {hw.dim}x{hw.dim}: the emitters and libgemmini are built for {KERNEL_DIM}")
     if hw.block != KERNEL_BLOCK:
@@ -479,6 +494,8 @@ def check(hw: Hardware, run: Run, path: str) -> None:
                         f"BANK_NUM {KERNEL_SCRATCHPAD[0]}, BANK_ROWS {KERNEL_SCRATCHPAD[1]}")
     if run.rounding != KERNEL_ROUNDING:
         refusals.append(f"rounding {run.rounding}: the chip's requantizer and mx_host.h round to nearest even")
+    if run.scale != "mxgemmini":
+        refusals.append(f"scale {run.scale}: the chip's requantizer places the block maximum in [1, 2)")
     if run.scale_floor != KERNEL_SCALE_FLOOR:
         refusals.append(f"scale_floor {run.scale_floor:g}: the chip's requantizer floors the block max at 2^-23")
     if run.reduce != "hardware":
