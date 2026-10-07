@@ -13,7 +13,7 @@ all five run by default; any comma list works.
 | `mxquant/` | which bits must the recipe's machine produce for this kernel? and, through `evaluate`, what does that arithmetic do to a language model? | kernel (or workload), recipe, operand format, edge map from the lowering | `y`, every intermediate, the as-shipped `y`; perplexity next to bf16 | `VERDICT PASS/FAIL hardware == mxquant` with spike, `MXQUANT … NO VERDICT` without | seconds |
 | `spike/` | what does the functional model of that machine produce, and how many cycles does the ELF take on it? | recipe (`build_spike.py` patches and builds `libgemmini.so` per `build_id`; the same library holds the cycle model, run beside the bits with `GEMMINI_MODE=both`) | the run itself lives in `grade/pipeline.py` for now; `metrics.timing` is the cycle model's record | — | seconds to build, seconds to run |
 | `ppa/` | what does the machine cost in silicon? | recipe | area, power, pJ/op | `PPA` | ms |
-| `perf/` | how long does this kernel take on that machine? | recipe, stage shapes | predicted cycles, utilisation, energy | `PERF` | ms |
+| `perf/` | how long does this kernel take on that machine, and what does it cost in energy? | recipe, stage shapes; after the run, spike's cycle model (`metrics.timing`) | measured cycles and utilisation on top (`merge_measured`), its own timeline under `estimate`, energy | `PERF` | ms |
 
 `__init__.py` is the registry (`NAMES`, `DEFAULT`, `select`) and the one place the
 `microscaling-quant/` submodule is put on `sys.path` (`paths()`), so every model imports `mxq` the
@@ -140,6 +140,26 @@ A per-stage run (one ELF per matmul) records one summary per stage under `per_st
 sum under `summary`. The number is not the one Amanda's perf model predicts for the same shapes (below):
 hers is an analytical timeline of a GEMM stage calibrated on the workspace's kernels, this one times the
 ELF our emitter wrote, host code included. Neither has yet been checked against RTL on these kernels.
+
+### The `perf` record: measured on top, the timeline under `estimate`
+
+`models/perf/perf.py: merge_measured` joins the two once spike has run. The top level of `metrics.perf`
+is the measurement: `cycles` (the ELF's window, the same number as `metrics.total_cycles`), `us` at the
+recipe's clock, `gops` (the kernel's ops over that window), `utilization_pct` (mesh busy cycles over the
+window), and per stage `cycles` / `us` where the ELF reports a stage window (fused chains do; a graph
+kernel reports one window). Amanda's timeline for the same shapes sits under `perf.estimate`
+(`total_cycles_predicted`, `total_us`, `utilization_pct_min`; per stage `cycles_predicted`, `us`, `gops`,
+`utilization_pct`, `phases`, `args`). What only her model gives stays at the top level: `energy`
+(computed on her timeline and utilization, which `energy.basis_cycles` names), `pe_mode` /
+`ops_per_pe_cycle`, `lut_loads` / `lut_tables`, `memory`. `perf.model` names both sources. Without a
+spike run the measured fields are `None` and `cycles_source` says so; `python -m models.perf.perf` alone
+prints the estimate. The `PERF` line reads `PERF 3766 cycles (spike cycle model) 7.5 us mesh util 27.2%
+| estimate 8875 cycles, 4.78 uJ (18.4 pJ/op, on the estimate)`.
+
+With MxGemmini-workspace at d5e82e7 or later, `perf_model --energy` gives no energy on this machine: its
+own `compose_gemmini` call passes no `--system`, and the workspace's default (`rocket`) now wants the PDK
+SRAM table. The record then carries `model.estimate.energy_note` with compose's reason, and the `PERF`
+line has no energy. `models/ppa` is unaffected (it passes `--system radiance`).
 
 ## How ppa and perf are driven
 
