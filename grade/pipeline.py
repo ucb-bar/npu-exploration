@@ -709,15 +709,18 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
     # models/perf/perf.py for why it is not comparable to spike's functional count).
     if "perf" in models:
         try:
-            perf = metrics["perf"] = pending["perf"].result()
-            perf["spike_cycles"] = {"cycles": metrics.get("total_cycles"),
-                                    "source": "cycle model" if timing_req is not None else "instruction counter"}
-            e = perf.get("energy")
-            tel.log("perf", f"{perf['total_cycles_predicted']} cycles predicted "
-                            f"({perf['total_us']:.1f} us, util {perf['utilization_pct_min']:.1f}%"
-                            + (f", {e['uj_kernel']:.2f} uJ" if e else "") + ")  "
-                            + (f"[spike's cycle model: {metrics.get('total_cycles')}]" if timing_req is not None
-                               else "[spike's count is a functional op counter, not a timeline]"))
+            from models.perf.perf import merge_measured
+            perf = metrics["perf"] = merge_measured(pending["perf"].result(), metrics.get("timing"),
+                                                    clock_ns=recipe.clock_ns)
+            e, est = perf.get("energy"), perf["estimate"]
+            tel.log("perf", (f"{perf['cycles']} cycles measured ({perf['us']:.1f} us, mesh util "
+                             f"{perf['utilization_pct']:.1f}%)" if perf.get("cycles") is not None
+                             else "no measured cycles (spike did not run)")
+                            + f"  | perf_model estimate {est['total_cycles_predicted']} cycles "
+                              f"({est['total_us']:.1f} us, util {est['utilization_pct_min']:.1f}%)"
+                            + (f", {e['uj_kernel']:.2f} uJ on the estimate" if e else "")
+                            + (f"  [{perf['model']['estimate']['energy_note']}]"
+                               if perf["model"]["estimate"].get("energy_note") else ""))
         except Exception as exc:
             tel.log("perf", f"UNAVAILABLE -- {exc}")
     pool.shutdown(wait=False)
