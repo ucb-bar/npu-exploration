@@ -45,8 +45,11 @@ _RUN_KEYS = {"name", "description", "operand_fmt", "rounding", "scale_floor", "r
 #: Optional run keys: absent means today's behaviour, and leaves run_id unchanged.
 _RUN_OPTIONAL = {"description", "lut", "scale"}
 #: Where the block scale puts the block maximum: "mxgemmini" (in [1, 2): the chip's requantizer, MXQuant, every
-#: record so far) or "ocp" (at the format's maximum, OCP MX v1.0; mxq.block.ocp, perplexity path only).
-SCALES = ("mxgemmini", "ocp")
+#: record so far); "ocp" (in the format's top binade, OCP MX v1.0: a block max is clipped at the format maximum);
+#: "ocp_below_top" (one binade below the top: never clips, the top binade unused); "ocp_no_clip" (ocp, except
+#: the blocks that would clip go one binade down). The ocp ones run through mxq.block.ocp (placement top /
+#: below_top / no_clip), perplexity path only.
+SCALES = ("mxgemmini", "ocp", "ocp_below_top", "ocp_no_clip")
 
 #: mx.lut: the RTL's GemminiLUTConfig field names (MxConfigFragments.scala:48), so one JSON describes both.
 _HW_LUT_KEYS = {"projFormat", "rdataWidth", "raddrWidth", "numEntries", "numBits", "lutUpdateRegularityWidth",

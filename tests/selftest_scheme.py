@@ -140,6 +140,13 @@ def main() -> int:
     check("scale ocp quantizes through mxq.block.ocp (block max at the format max), rne -> even",
           s_ocp.a.func.__module__ == "mxq.block.ocp" and s_ocp.a.keywords["rounding_mode"] == "even"
           and s_ocp.a.keywords["fmt"] == "MXFP4")
+    check("scale ocp places the block max at the top (placement top)", s_ocp.a.keywords["placement"] == "top")
+    for sc, pl in (("ocp_below_top", "below_top"), ("ocp_no_clip", "no_clip")):
+        s_r = scheme.scheme(base, replace(load_run("fp4_e2m1"), scale=sc))
+        check(f"scale {sc} quantizes through mxq.block.ocp with placement {pl}, and has its own run_id",
+              s_r.a.func.__module__ == "mxq.block.ocp" and s_r.a.keywords["placement"] == pl
+              and s_r.a.keywords["rounding_mode"] == "even"
+              and replace(load_run("fp4_e2m1"), scale=sc).run_id() not in (ocp_run.run_id(), load_run("fp4_e2m1").run_id()))
     check("scale ocp changes run_id; scale mxgemmini (the default) keeps it",
           ocp_run.run_id() != load_run("fp4_e2m1").run_id()
           and replace(load_run("fp4_e2m1"), scale="mxgemmini").run_id() == load_run("fp4_e2m1").run_id())
