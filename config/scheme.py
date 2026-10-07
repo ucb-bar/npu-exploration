@@ -29,12 +29,13 @@ Deliberately ignored, because none of them changes a matmul's value: ``array.til
 ``implementation``.
 
 Refused (``RecipeError``): a per-lane product list that is not uniform (mxq has one product format
-per Arithmetic); an accumulator list whose length is not the mesh dimension. A codebook (LUT) format
-(``is_codebook``) runs through the chip's tables: ``mxq.block.lut``, the rule ``compiler/codebook.py``
+per Arithmetic); an accumulator list whose length is not the mesh dimension. A run with a ``lut`` block
+(``uses_lut``; only a codebook format, ``is_codebook``, may have one) runs through the chip's tables: ``mxq.block.lut``, the rule ``compiler/codebook.py``
 also calls, so both operands (A: 2**G tokens per table, B: 2**G output channels per table) see the 16
 entries the chip would. A layer's output is not requantized through a C table here (no chained stage),
 and the chip's table capacity is enforced on the kernel path (and perf's as-measured model) only;
-``lut_record`` says so in the record. Here a token or channel count that is not a multiple of 2**G gets one
+``lut_record`` says so in the record. A codebook format without a ``lut`` block is quantized straight to
+its grid (LUT off), perplexity path only. Here a token or channel count that is not a multiple of 2**G gets one
 last table over the leftover rows (mxq.lut), so any layer runs; the chip's loader takes whole groups only.
 """
 from __future__ import annotations
@@ -69,12 +70,19 @@ def is_codebook(dtype: str) -> bool:
     return dtype in CODEBOOK
 
 
+def uses_lut(run: Run) -> bool:
+    """Does this run send its operands through the chip's tables? Yes exactly when the run recipe has a ``lut``
+    block. A codebook format (``is_codebook``) without one is quantized straight to its element grid (LUT off):
+    the perplexity path can, since MXLinear quantizes in software; the chip's requantizer cannot, so the kernel
+    path refuses it (``config.recipe.check``)."""
+    return run.lut is not None
+
+
 def quantizer(hw: Hardware, run: Run):
     """``V -> (P, X)`` for one operand, blocks along axis 0 (K): the run's format, rounding and floor; a LUT
     format then through its tables (``run.lut``: one per 2**G columns of V)."""
     from mxq import block
-    if is_codebook(run.operand_fmt):
-        _need_lut(run)
+    if uses_lut(run):
         return partial(block.lut.quantize, fmt=mxq_format(run.operand_fmt), axis=0, block_size=hw.block,
                        rounding_mode=run.rounding, scale_floor=run.scale_floor, group=run.lut.group,
                        max_iters=run.lut.fit.max_iters)
@@ -84,22 +92,15 @@ def quantizer(hw: Hardware, run: Run):
 
 def rows(run: Run) -> int:
     """Token rows one activation quantizer call must keep together: 2**G for a LUT format, else 1."""
-    return 1 << run.lut.group if is_codebook(run.operand_fmt) else 1
+    return 1 << run.lut.group if uses_lut(run) else 1
 
 
 def lut_record(run: Run) -> dict | None:
     """What the record and cache key say about a LUT format's tables, or None for a direct format."""
-    if not is_codebook(run.operand_fmt):
+    if not uses_lut(run):
         return None
-    _need_lut(run)
     return {"group": run.lut.group, "max_iters": run.lut.fit.max_iters, "rule": "mxq.lut",
             "tables": "A and B; no C (a layer's output is not requantized); capacity not enforced"}
-
-
-def _need_lut(run: Run) -> None:
-    if run.lut is None:
-        raise RecipeError(f"run {run.name}: {run.operand_fmt} is a LUT format and needs a lut block "
-                          f"(config/run/{run.operand_fmt}.json is the template)")
 
 
 def product(recipe: Hardware) -> tuple[int, int]:
@@ -165,7 +166,7 @@ def mxq_config(hw: Hardware, run: Run, *, compiled: bool = False):
                      ladder=[list(e) for e in schedule(hw)], size=hw.dim, reduce=run.reduce, compiled=compiled,
                      name=hw.name if run.reduce == "hardware" else f"{hw.name}/{run.reduce}",
                      **({"lut": {"group": run.lut.group, "max_iters": run.lut.fit.max_iters}}
-                        if is_codebook(run.operand_fmt) else {}))
+                        if uses_lut(run) else {}))
 
 
 def scheme(recipe: Hardware, run: Run, *, compiled: bool = False):

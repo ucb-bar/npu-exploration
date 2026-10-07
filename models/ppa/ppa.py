@@ -69,19 +69,26 @@ FORMATS = {
 }
 
 
-def format_tokens(dtype: str) -> tuple[str, str, int, str]:
-    """A run recipe's operand format -> (pair_modes token, --stim, products, perf token). See FORMATS."""
+def format_tokens(dtype: str, lut: bool | None = None) -> tuple[str, str, int, str]:
+    """A run recipe's operand format -> (pair_modes token, --stim, products, perf token). See FORMATS.
+    With ``lut`` the other way from the chip's default for the format (a codebook format run LUT off), the stim
+    and products are what the workspace's pair_modes.spec gives for that PE mode, not the table's."""
     try:
-        return FORMATS[dtype]
+        tok, stim, products, perf = FORMATS[dtype]
     except KeyError:
         raise PpaError(f"operand format {dtype!r} has no PPA model tokens; known: {sorted(FORMATS)}") from None
+    if lut is not None and lut != uses_lut(dtype):
+        sp = _workspace_module("pair_modes").spec(tok, tok, lut)
+        stim, products = sp["stim"], sp["products"]
+    return tok, stim, products, perf
 
 
-def uses_lut(dtype: str) -> bool:
-    """Does this format reach the mesh through LUTs? The kernels compiled for it carry them. What hardware is
-    priced is the recipe's (MACHINES), not this."""
+def uses_lut(dtype: str, lut: bool | None = None) -> bool:
+    """Does this run reach the mesh through LUTs? ``lut`` is the run recipe's answer (``config.scheme.uses_lut``:
+    a lut block or not); without it, the chip's default for the format. What hardware is priced is the recipe's
+    (MACHINES), not this."""
     from config.scheme import is_codebook
-    return is_codebook(dtype)
+    return is_codebook(dtype) if lut is None else lut
 
 
 def operand_family(dtype: str) -> str:
@@ -117,7 +124,7 @@ def _run_length(pairs) -> str:
     return " ".join(f"{n}x{e},{s}" for n, (e, s) in groups)
 
 
-def ppa_args(recipe, dtype: str = "fp8_e4m3") -> list[str]:
+def ppa_args(recipe, dtype: str = "fp8_e4m3", lut: bool | None = None) -> list[str]:
     """Map a hardware recipe and a run's operand format onto compose_gemmini's CLI.
 
     The model speaks (expWidth, sigWidth); the recipe's properties speak
@@ -127,7 +134,7 @@ def ppa_args(recipe, dtype: str = "fp8_e4m3") -> list[str]:
     The machine priced is the recipe's LUT unit's (MACHINES); the format sets the stimulus, and a LUT format
     the pair_modes products, matching the workspace's README quad line.
     """
-    _, stim, products, _ = format_tokens(dtype)
+    _, stim, products, _ = format_tokens(dtype, lut)
     proj = recipe.lut.projection if recipe.lut is not None else None
     if proj not in MACHINES:
         raise PpaError(f"{recipe.name}: MxGemmini-workspace has no measurement of a machine with "
@@ -139,7 +146,7 @@ def ppa_args(recipe, dtype: str = "fp8_e4m3") -> list[str]:
             "--stim", stim,
             *MACHINES[proj],
             "--util", str(recipe.utilization), "--clock-ns", str(recipe.clock_ns)]
-    if uses_lut(dtype):
+    if uses_lut(dtype, lut):
         args += ["--products", str(products)]   # without a LUT the model's own default is the same number
     return args
 
@@ -194,11 +201,11 @@ def _workspace_head(root: Path) -> str | None:
         return None
 
 
-def run_ppa(recipe, dtype: str = "fp8_e4m3") -> dict:
-    """Area/power/energy for the machine this hardware recipe describes, fed ``dtype`` operands.
-    Raises PpaError."""
+def run_ppa(recipe, dtype: str = "fp8_e4m3", lut: bool | None = None) -> dict:
+    """Area/power/energy for the machine this hardware recipe describes, fed ``dtype`` operands, through the
+    LUTs or not (``lut``; default the chip's rule for the format). Raises PpaError."""
     root = ppa_root()
-    args = ppa_args(recipe, dtype)
+    args = ppa_args(recipe, dtype, lut)
     cmd = [sys.executable, str(root / "compose_gemmini.py"), *args]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=root)
@@ -218,12 +225,12 @@ def run_ppa(recipe, dtype: str = "fp8_e4m3") -> dict:
         "post_synthesis": True,
         "calibrated_dim": CALIBRATED_DIM,
         "calibrated": recipe.dim == CALIBRATED_DIM,
-        "lut": uses_lut(dtype),
+        "lut": uses_lut(dtype, lut),
         "lut_unit": recipe.lut.projection,
         "enable_lut": recipe.enable_lut,
         "workspace_head": _workspace_head(root),
     }
-    out["pe"] = pe_spec(dtype)
+    out["pe"] = pe_spec(dtype, lut)
     out["memory"] = memory_inventory(recipe)
     return out
 
@@ -247,11 +254,11 @@ def _workspace_module(name: str):
     return importlib.import_module(name)
 
 
-def pe_spec(dtype: str) -> dict:
+def pe_spec(dtype: str, lut: bool | None = None) -> dict:
     """The PE mode this format runs in, as the workspace's pair_modes.spec states it (activation = weight = dtype)."""
     tok = format_tokens(dtype)[0]
     try:
-        sp = _workspace_module("pair_modes").spec(tok, tok, uses_lut(dtype))
+        sp = _workspace_module("pair_modes").spec(tok, tok, uses_lut(dtype, lut))
     except Exception as exc:                                   # the workspace moved: report, do not fail ppa
         return {"available": False, "why": f"pair_modes.spec: {exc}"}
     return {"mode": sp["mode"], "ops_per_pe_cycle": sp["products"], "rtl_tested": sp["rtl_ok"] is not None,
@@ -309,7 +316,7 @@ def main() -> int:
     try:
         hw, run = load_hardware(a.hw), load_run(a.run)
         check(hw, run, "perplexity")        # the format, reducer and LUT unit agree; not the kernel path's limits
-        res = run_ppa(hw, run.operand_fmt)
+        res = run_ppa(hw, run.operand_fmt, lut=run.lut is not None)
     except (PpaError, RecipeError) as exc:
         print(f"ppa: {exc}", file=sys.stderr)
         return 2

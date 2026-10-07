@@ -96,6 +96,13 @@ def main() -> int:
             check(f"{fmt}: stim and products are pair_modes.spec's ({sp['stim']}, {sp['products']})",
                   (sp["stim"], sp["products"]) == (stim, prods), f"ours {stim}, {prods}")
             check(f"{fmt}: {stim} is a stimulus the model parses", drv.STIM_RE.match(stim) is not None)
+        direct = dict(zip(*[iter(ppa_args(r, "fp6_e3m2", lut=False))] * 2))
+        check("fp6_e3m2 LUT off: pair_modes' stim for that PE mode, no --products, the recipe's machine",
+              direct["--stim"] == pm.spec("e3m2", "e3m2", False)["stim"] and "--products" not in direct
+              and direct["--fmtset"] == "mxgemmini", str(direct))
+        check("fp6_e3m2 LUT off is priced as LUT on (same PE mode and stimulus)",
+              run_ppa(r, "fp6_e3m2", lut=False)["area_um2"] == run_ppa(r, "fp6_e3m2")["area_um2"]
+              and run_ppa(r, "fp6_e3m2", lut=False)["model"]["lut"] is False)
         rq = run_ppa(lut8, "fp8_e4m3_quad")
         check("quad priced on the bigger LUT PE (area > baseline fp8)", rq["area_um2"] > run_ppa(r)["area_um2"] * 1.2,
               f"{rq['area_um2']/1e3:.1f}k")

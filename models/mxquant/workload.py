@@ -76,7 +76,7 @@ def _settings(w: _workloads.Workload, recipe, run) -> dict:
     if recipe is not None:
         d.update(recipe=recipe.name, build_id=recipe.build_id(), format=_scheme.mxq_format(run.operand_fmt),
                  rules=w.rules, rounding_mode=run.rounding, scale_floor=float(run.scale_floor))
-        if _scheme.is_codebook(run.operand_fmt):
+        if _scheme.uses_lut(run):
             d["codebook"] = _scheme.lut_record(run)
         if run.reduce != "hardware":
             d["reduce"] = run.reduce

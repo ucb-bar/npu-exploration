@@ -1,0 +1,10 @@
+{
+  "name": "fp6_e3m2_direct",
+  "description": "Default with fp6 E3M2 operands quantized straight to the fp6 grid, no LUT (no lut block): what MXLinear does in software on the perplexity path. The chip's requantizer sends fp6 through the LUT, so the kernel path refuses this.",
+  "operand_fmt": "fp6_e3m2",
+  "rounding": "rne",
+  "scale_floor": 1.1920928955078125e-07,
+  "reduce": "hardware",
+  "allow_lossy_chain": false,
+  "fp32_tol": 0.15
+}

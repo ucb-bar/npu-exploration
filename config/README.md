@@ -73,12 +73,13 @@ All of these are in `build_id` except the labels (`name`, `description`, `proven
 | `reduce` | how codes are multiplied: `hardware` (the recipe's array), `exact`, `bf16_tiles` | `hardware` |
 | `allow_lossy_chain` | run a chain whose codebook cannot be chosen exactly | `false` |
 | `fp32_tol` | kernel pass threshold on relative Frobenius error against fp32 | 0.15 |
-| `lut` (LUT formats) | how a LUT format's tables are made, every key written: `group` (G: one LUT per 2**G rows of A, columns of B, rows of C), `weights` (B tables: `data`), `activations` (A tables: `data`), `outputs` (a chain's C tables: `estimate`, fitted to an fp32 run of the input), `pick` (A and B indices: `host`, nearest by value), `fit` (`{"method": "kmeans", "init": "quantile", "max_iters"}`). Each accepts what the compiler implements today; the plan's other values are refused by name. Required for a LUT format, refused for a direct one; a recipe without it keeps its `run_id` | `config/run/<format>.json` for the four LUT formats |
+| `lut` (LUT formats) | how a LUT format's tables are made, every key written: `group` (G: one LUT per 2**G rows of A, columns of B, rows of C), `weights` (B tables: `data`), `activations` (A tables: `data`), `outputs` (a chain's C tables: `estimate`, fitted to an fp32 run of the input), `pick` (A and B indices: `host`, nearest by value), `fit` (`{"method": "kmeans", "init": "quantile", "max_iters"}`). Each accepts what the compiler implements today; the plan's other values are refused by name. Refused for a direct format. A LUT format without it runs LUT off, quantized straight to its grid, on the perplexity path (`fp6_e3m2_direct`) and is refused on the kernel path, whose requantizer needs the LUT; a recipe without it keeps its `run_id` | `config/run/<format>.json` for the four LUT formats |
 
 `name` and `description` are labels and stay out of `run_id`. The hardware recipe says what LUT unit was
-built (`mx.lut`); the run recipe says how it is used (`lut`). On both paths `check` refuses a LUT format on a
-build with no LUT unit or one whose projection does not serve it, and a `lut` block on a direct format
-(fp8_e4m3, fp4_e2m1), and entries wider than the format's (fp6 on an 8-bit build: neither the compiler nor
+built (`mx.lut`); the run recipe says how it is used (`lut`), and `config.scheme.uses_lut` is whether it has one.
+`check` refuses a `lut` block on a build with no LUT unit or one whose projection does not serve the format, a
+`lut` block on a direct format (fp8_e4m3, fp4_e2m1), on the kernel path only a LUT format without a `lut` block
+(the perplexity path runs it LUT off), and entries wider than the format's (fp6 on an 8-bit build: neither the compiler nor
 mxq.lut models them); the emitter refuses a stage that needs more LUTs than a table holds. `config/hardware/` has a build for
 each LUT format: `baseline` (E3M2), `lut_fp6e2m3`, `lut_fp8e5m2`, `lut_fp8e4m3`. The perplexity cache key does not
 include `allow_lossy_chain` or `fp32_tol`, because the perplexity path never reads them.

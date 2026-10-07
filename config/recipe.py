@@ -459,17 +459,20 @@ def check(hw: Hardware, run: Run, path: str) -> None:
     scheme.mxq_format(run.operand_fmt)
     if run.reduce not in scheme.REDUCERS:
         raise RecipeError(f"run {run.name}: reduce {run.reduce!r}; choose from {', '.join(scheme.REDUCERS)}")
-    is_lut = scheme.is_codebook(run.operand_fmt)
-    if run.lut is not None and not is_lut:
+    codebook = scheme.is_codebook(run.operand_fmt)
+    if run.lut is not None and not codebook:
         raise RecipeError(f"run {run.name}: a lut block for {run.operand_fmt}, which is not a LUT format "
                           "(the LUT formats are fp8_e4m3_quad, fp8_e5m2, fp6_e3m2, fp6_e2m3)")
-    if is_lut:
+    if run.lut is not None:
         _check_lut(hw, run)
     if path == "perplexity":
-        return
+        return                  # a codebook format without a lut block: quantized straight to its grid (LUT off)
     if path != "kernel":
         raise ValueError(f"path {path!r}: 'kernel' or 'perplexity'")
     refusals = []
+    if codebook and run.lut is None:
+        refusals.append(f"{run.operand_fmt} without a lut block: the chip's requantizer sends it through the LUT "
+                        f"(config/run/{run.operand_fmt}.json is the template)")
     if hw.dim != KERNEL_DIM:
         refusals.append(f"mesh {hw.dim}x{hw.dim}: the emitters and libgemmini are built for {KERNEL_DIM}")
     if hw.block != KERNEL_BLOCK:
