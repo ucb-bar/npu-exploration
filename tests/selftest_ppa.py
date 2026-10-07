@@ -46,6 +46,8 @@ def main() -> int:
     check("fp8_e4m3 on the tapeout PE, no LUT", got["--fmtset"] == "mxgemmini" and "--lut" not in got)
     check("--util = implementation.utilization", got["--util"] == "0.965", got["--util"])
     check("--clock-ns = implementation.clock_ns", got["--clock-ns"] == "2.0", got["--clock-ns"])
+    check("--system radiance: the tapeout cluster's Scratchpad accounting (rocket needs the PDK QRT table)",
+          got.get("--system") == "radiance", str(got.get("--system")))
     check("an fp4 run stimulates fp4", dict(zip(*[iter(ppa_args(r, "fp4_e2m1"))] * 2))["--stim"] == "fp4")
     print("the recipe's LUT unit picks the machine priced; the run's format only the stimulus")
     lut8 = load("lut_fp8e4m3")

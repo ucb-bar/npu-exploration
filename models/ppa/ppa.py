@@ -55,6 +55,10 @@ MACHINES = {
     "LutFP8E4M3": CALIBRATION_LUT,
 }
 
+#: compose_gemmini --system: which SoC's memory accounting. "radiance" = the tapeout cluster, every number recorded
+#: before the workspace's 3d28713 (2026-10-06) and since; "rocket" needs the PDK QRT table (see ppa_args).
+SYSTEM = "radiance"
+
 #: run operand_fmt -> (pair_modes token, compose --stim, ops per PE per cycle, perf_model --act/--wei).
 #: The stim and products are what the workspace's pair_modes.spec(tok, tok, lut) gives for that format, LUT on
 #: exactly for the LUT formats (config.scheme.is_codebook); tests/selftest_ppa.py holds this table equal to it.
@@ -145,6 +149,10 @@ def ppa_args(recipe, dtype: str = "fp8_e4m3", lut: bool | None = None) -> list[s
             "--cols", str(recipe.dim),
             "--stim", stim,
             *MACHINES[proj],
+            # The tapeout cluster's accounting (SYSTEM): the Scratchpad block as measured, operand memory outside the
+            # Gemmini blocks. The workspace's default since its 3d28713 is the Rocket system, which adds the operand
+            # banks' SRAM macros from the PDK QRT table (tech/sram_qrt/qrt_table.csv), absent here.
+            "--system", SYSTEM,
             "--util", str(recipe.utilization), "--clock-ns", str(recipe.clock_ns)]
     if uses_lut(dtype, lut):
         args += ["--products", str(products)]   # without a LUT the model's own default is the same number
@@ -221,7 +229,7 @@ def run_ppa(recipe, dtype: str = "fp8_e4m3", lut: bool | None = None) -> dict:
         "source": "MxGemmini-workspace/ppa/compose_gemmini.py",
         "args": " ".join(args),
         "tech": TECH, "corner": CORNER,
-        "clock_ns": recipe.clock_ns, "util": recipe.utilization,
+        "clock_ns": recipe.clock_ns, "util": recipe.utilization, "system": SYSTEM,
         "post_synthesis": True,
         "calibrated_dim": CALIBRATED_DIM,
         "calibrated": recipe.dim == CALIBRATED_DIM,
