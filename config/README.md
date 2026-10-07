@@ -46,19 +46,19 @@ All of these are in `build_id` except the labels (`name`, `description`, `proven
 
 | field | meaning | read by |
 |---|---|---|
-| `array.meshRows`, `array.meshColumns` | the mesh dimension `dim`; must be equal | mxquant (window), spike (`-DGEMMINI_DIM`), ppa (`--cols`), perf (`--rows/--cols`), emitters |
+| `array.meshRows`, `array.meshColumns` | the mesh dimension `dim`; must be equal | mxquant (window), spike (`-DGEMMINI_DIM`; the cycle model's `mesh.dim`), ppa (`--cols`), perf (`--rows/--cols`), emitters |
 | `array.tileRows`, `array.tileColumns` | PEs per tile | nothing in Python |
 | `types.meshProdPrecisionList` | per-lane product precision; must be uniform (spike has one `prod_e/prod_m`) | mxquant, spike, ppa (`--prod`) |
 | `types.meshAccPrecisionList` | the accumulator ladder down the column, one entry per lane | mxquant, spike, ppa (`--rows`) |
 | `types.*[].expWidth`, `sigWidth` | exponent bits; significand bits including the implicit bit (mantissa = `sigWidth - 1`) | same |
 | `types.*[].count`, `isRecoded`, `pad` | passed through, not read | |
 | `types.prodFloor` | a product below 2^prodFloor is flushed to zero (MxFPMul: -16); `null` for no flush | mxquant |
-| `mx.scaleSize` | elements per E8M0 scale on the operands | mxquant, spike (`GROUP`) |
+| `mx.scaleSize` | elements per E8M0 scale on the operands | mxquant, spike (`GROUP`; the cycle model's `mx.block`) |
 | `mx.scaleSizeOut` | the requantizer's output group | spike (`GROUP_OUT`) |
 | `mx.enable_lut` | a copy of the RTL's `GemminiArrayConfig.enable_lut`, which no RTL module reads | recorded by ppa and perf; nothing decides from it |
 | `mx.lut` | the LUT unit as built, the RTL's `GemminiLUTConfig` field for field, or `null` for a build without one: `projFormat` (which finders the requantizer has, so which LUT formats the build serves), `rdataWidth` (bits per entry), `raddrWidth` (log2 entries per LUT; 4), `numEntries` (LUTs per table, by `MX_LOAD_LUT` sel: B, A, C), `numBits` (16 x `rdataWidth`), `lutUpdateRegularityWidth` (the G register's width), `actCodeWidth`/`weiCodeWidth` (0; asymmetric builds are refused). Every key written | `check` (the formats served, the index and entry widths, G's range), emitters (each table's capacity) |
 | `accumulator.acc_read_full_width`, `acc_read_small_width` | accumulator read widths | nothing in Python |
-| `scratchpad.banks`, `scratchpad.rows` | scratchpad geometry | emitters (`bank_num`, `bank_rows`) |
+| `scratchpad.banks`, `scratchpad.rows` | scratchpad geometry | emitters (`bank_num`, `bank_rows`); spike's cycle model (`spad.banks`, `spad.bank_rows`) |
 | `implementation.clock_ns` | target clock period | ppa (`--clock-ns`), perf (`--clock-ns`) |
 | `implementation.utilization` | placement utilization | ppa (`--util`) |
 | `provenance.*` | where each number was taken from | people |

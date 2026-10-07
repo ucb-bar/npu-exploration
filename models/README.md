@@ -11,7 +11,7 @@ all five run by default; any comma list works.
 |---|---|---|---|---|---|
 | `reference/` | what does the kernel compute in plain float32? | kernel | `y` | `VERDICT` on the fp32 tier when no mxquant model is available | ms |
 | `mxquant/` | which bits must the recipe's machine produce for this kernel? and, through `evaluate`, what does that arithmetic do to a language model? | kernel (or workload), recipe, operand format, edge map from the lowering | `y`, every intermediate, the as-shipped `y`; perplexity next to bf16 | `VERDICT PASS/FAIL hardware == mxquant` with spike, `MXQUANT … NO VERDICT` without | seconds |
-| `spike/` | what does the functional model of that machine produce? | recipe (`build_spike.py` patches and builds `libgemmini.so` per `build_id`) | the run itself lives in `grade/pipeline.py` for now | — | seconds to build, seconds to run |
+| `spike/` | what does the functional model of that machine produce, and how many cycles does the ELF take on it? | recipe (`build_spike.py` patches and builds `libgemmini.so` per `build_id`; the same library holds the cycle model, run beside the bits with `GEMMINI_MODE=both`) | the run itself lives in `grade/pipeline.py` for now; `metrics.timing` is the cycle model's record | — | seconds to build, seconds to run |
 | `ppa/` | what does the machine cost in silicon? | recipe | area, power, pJ/op | `PPA` | ms |
 | `perf/` | how long does this kernel take on that machine? | recipe, stage shapes | predicted cycles, utilisation, energy | `PERF` | ms |
 
@@ -103,6 +103,43 @@ a GPU the path reports why.
 
 The lowering is `compiler/lower.py` and the operand encoder `compiler/operands.py`; the spike run
 still lives in `grade/pipeline.py`.
+
+## The cycle model inside spike
+
+Since libgemmini 92fae92 the plug-in spike loads carries two models of the machine: `gemmini.cc`, the
+bit-exact one every VERDICT is graded on, and `perf/` (Nico Rakela), an event-driven cycle model of the
+mesh, reservation station, DMA, scratchpad and accumulator banks, L2, DRAM and the Rocket host, fed the
+same RoCC command stream. The pipeline runs every spike run with `GEMMINI_MODE=both`, so one run gives
+the bits and the time: the ELF's `rdcycle` reads return modelled cycles (`metrics.total_cycles`,
+labelled by `metrics.cycles_source`; a record without that key holds spike's instruction counter, the
+old meaning), and the model's summary and resolved parameters land in `metrics.timing` and as
+`timing_summary.txt` / `timing_config.txt` next to `metrics.json`. The model knows time only, never
+data, so `both` gives the same bits as `func`; `tests/selftest_timing.py` holds that on a matmul, a fused
+chain and the attention graph.
+
+Its geometry is a run-time parameter, not a build-time one: the recipe's `array.meshRows`,
+`scratchpad.banks`, `scratchpad.rows` and `mx.scaleSize` are passed through `GEMMINI_PERF_SET`
+(`runner.TIMING_PARAMS`) on the `mx_rocket` preset, read back from the dump and refused on a mismatch,
+the way `_assert_geometry` holds the functional model to the recipe. Every other parameter is the
+preset's (`perf/params/config.h`, each tagged measured / assumed / placeholder; the host side is still a
+placeholder). `build_spike --list` marks a cached `.so` built before the model existed; the pipeline
+refuses to record a timed run that left no summary.
+
+| `metrics.timing` key | meaning |
+|---|---|
+| `cycles`, `stage_cycles` | the ELF's measured windows (modelled cycles), the kernel and per stage where the ELF reports them |
+| `summary.mesh_busy_cycles`, `mesh_tiles` | cycles the array computed, and tile computes |
+| `summary.host_stalled_cycles` | cycles the Rocket model stalled (RoCC queue, fences, L1 misses) |
+| `summary.l2_hits/misses`, `bus_busy_cycles`, `dram_busy_cycles` | the memory system |
+| `summary.load_bytes/gets`, `store_reads/puts`, `scale_bytes` | DMA traffic |
+| `summary.ports` | busy cycles per scratchpad bank port (read, write) and accumulator bank |
+| `summary.not_modelled`, `unparsed` | commands the model ignored; report lines this adapter does not know |
+| `config.preset`, `params`, `overridden` | the parameters the model ran with, and which the recipe set |
+
+A per-stage run (one ELF per matmul) records one summary per stage under `per_stage_summaries` and their
+sum under `summary`. The number is not the one Amanda's perf model predicts for the same shapes (below):
+hers is an analytical timeline of a GEMM stage calibrated on the workspace's kernels, this one times the
+ELF our emitter wrote, host code included. Neither has yet been checked against RTL on these kernels.
 
 ## How ppa and perf are driven
 
