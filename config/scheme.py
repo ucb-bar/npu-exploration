@@ -12,8 +12,9 @@ numbers, and a perplexity is tied to the ``build_id`` that VERDICT was proved ag
     ----------------------------------------  ------------------------------------------------------
     run.operand_fmt, hw mx.scaleSize          block.mxgemmini.quantize(fmt, block_size,
     run.rounding, run.scale_floor                 rounding_mode, scale_floor)
-    run.scale "ocp"                               block.ocp.quantize(fmt, block_size, rounding_mode) instead:
-                                                  the block max at the format max, not in [1, 2)
+    run.scale "ocp" / "ocp_below_top" /          block.ocp.quantize(fmt, block_size, rounding_mode, placement)
+              "ocp_no_clip"                       instead: the block max in the format's top binade (OCP MX v1.0),
+                                                  the binade below it, or the top unless that would clip
     hw types.meshProdPrecisionList            matmul.MXGEMMINI(prod_e, prod_m, prod_floor)   one product format
     hw types.prodFloor
     hw types.meshAccPrecisionList             schedule = [(expWidth, sigWidth - 1)] x dim
@@ -21,6 +22,8 @@ numbers, and a perplexity is tied to the ``build_id`` that VERDICT was proved ag
     run.reduce                                which reducer (REDUCERS)
     run.lut.group, run.lut.fit.max_iters      block.lut.quantize(group, max_iters)            a LUT format's operands;
                                               Scheme(rows=2**group)                           MXLinear keeps 2**G tokens together
+    run.vector.softmax, run.vector.rmsnorm    mxq.nn.patch(vector={...})                      not the Scheme: the vector ops
+                                                                                              between the matmuls
 
 Every knob is passed explicitly, never left to mxq's defaults: the RTL rounds operands
 round-to-nearest-even since 2026-09-10 and floors the block max at FLT_EPSILON = 2^-23, while mxq's
@@ -57,6 +60,9 @@ CODEBOOK = frozenset({"fp8_e4m3_quad", "fp8_e5m2", "fp6_e3m2", "fp6_e2m3"})
 #: format's cost alone); or fp32 inside each 32-block and the hardware's bf16 step across blocks.
 REDUCERS = ("hardware", "exact", "bf16_tiles")
 
+#: run.scale -> mxq.block.ocp.quantize's placement of the block max (mxq.block.ocp.PLACEMENTS); mxgemmini is absent.
+OCP_PLACEMENT = {"ocp": "top", "ocp_below_top": "below_top", "ocp_no_clip": "no_clip"}
+
 
 def mxq_format(dtype: str) -> str:
     """An operand format name -> the mxq element format it quantizes to."""
@@ -88,9 +94,10 @@ def quantizer(hw: Hardware, run: Run):
         return partial(block.lut.quantize, fmt=mxq_format(run.operand_fmt), axis=0, block_size=hw.block,
                        rounding_mode=run.rounding, scale_floor=run.scale_floor, group=run.lut.group,
                        max_iters=run.lut.fit.max_iters)
-    if run.scale == "ocp":                  # OCP placement: block max at the format max; no scale floor there
+    if run.scale in OCP_PLACEMENT:          # OCP element grid, block max placed per run.scale; no scale floor there
         return partial(block.ocp.quantize, fmt=mxq_format(run.operand_fmt), axis=0, block_size=hw.block,
-                       rounding_mode={"rne": "even", "ties_away": "nearest"}[run.rounding])
+                       rounding_mode={"rne": "even", "ties_away": "nearest"}[run.rounding],
+                       placement=OCP_PLACEMENT[run.scale])
     return partial(block.mxgemmini.quantize, fmt=mxq_format(run.operand_fmt), axis=0, block_size=hw.block,
                    rounding_mode=run.rounding, scale_floor=run.scale_floor)
 
@@ -98,6 +105,12 @@ def quantizer(hw: Hardware, run: Run):
 def rows(run: Run) -> int:
     """Token rows one activation quantizer call must keep together: 2**G for a LUT format, else 1."""
     return 1 << run.lut.group if uses_lut(run) else 1
+
+
+def vector(run: Run) -> dict | None:
+    """What mxq.nn.patch takes as ``vector`` for this run: None (no vector block: as transformers computes
+    them) or {"softmax": None | "bf16", "rmsnorm": None | "bf16"}."""
+    return None if run.vector is None else run.vector.mxq()
 
 
 def lut_record(run: Run) -> dict | None:

@@ -126,6 +126,78 @@ def _assert_geometry(console: str, recipe, simulator: str, tel) -> None:
     tel.log("geometry", f"{simulator} reports dim={got}, matches recipe")
 
 
+#: Where the cycles in a record come from once spike runs with the cycle model beside the bits.
+CYCLES_SOURCE = ("libgemmini cycle model (GEMMINI_MODE=both): modelled cycles between the ELF's rdcycle reads; "
+                 "records without this key hold spike's instruction counter")
+
+
+def _timing_request(recipe) -> dict:
+    """The recipe's geometry the cycle model must run with (runner.TIMING_PARAMS)."""
+    return {"dim": recipe.dim, "banks": recipe.banks, "rows": recipe.rows, "block": recipe.block}
+
+
+def _sum_summaries(summaries: list[dict]) -> dict:
+    """One summary for a run of several ELFs: integer counters added, ports added per bank, the rest from
+    the first. Only the per-stage path needs this; a fused or graph kernel is one ELF, one summary."""
+    out: dict = {}
+    for s in summaries:
+        for k, v in s.items():
+            if isinstance(v, int) and not isinstance(v, bool):
+                out[k] = out.get(k, 0) + v
+            elif k == "ports":
+                ports = out.setdefault("ports", {})
+                for bank, busy in v.items():
+                    if isinstance(busy, dict):
+                        cur = ports.setdefault(bank, {"read": 0, "write": 0})
+                        cur["read"] += busy["read"]
+                        cur["write"] += busy["write"]
+                    else:
+                        ports[bank] = ports.get(bank, 0) + busy
+            elif k == "not_modelled":
+                nm = out.setdefault("not_modelled", {})
+                for name, n in v.items():
+                    nm[name] = nm.get(name, 0) + n
+            elif k == "unparsed":
+                out.setdefault("unparsed", []).extend(v)
+            else:
+                out.setdefault(k, v)
+    return out
+
+
+def _timing_record(whole: dict | None, stage_records: list[dict], total_cycles: int | None) -> dict:
+    """``metrics["timing"]``: the cycle model's account of the run, beside the bits it was computed with.
+
+    ``cycles`` is the ELF's own measured window (the same number as ``metrics["total_cycles"]``);
+    ``stage_cycles`` the per-stage windows where the ELF reports them; ``summary`` the model's counters
+    (mesh busy cycles, host stall, L2 hits/misses, DRAM busy, port occupancy) over the whole program;
+    ``config`` the parameters it resolved, with the ones the recipe overrode named.
+    """
+    if whole is not None:
+        summary, config, per_stage = whole["summary"], whole["config"], None
+    else:
+        per = [s["timing"] for s in stage_records if s.get("timing")]
+        per_stage = [t["summary"] for t in per]
+        summary = _sum_summaries(per_stage) if per_stage else None
+        config = per[0]["config"] if per else None
+    stage_cycles = {}
+    for s in stage_records:
+        if s.get("where", "mesh") != "mesh" or not s.get("metrics"):
+            continue
+        m = s["metrics"]
+        cyc = m.get(f"cycles_stage{s['stage']}", m.get("cycles"))
+        if cyc is not None:
+            stage_cycles[str(s["stage"])] = cyc
+    rec = {"mode": "both",
+           "source": "libgemmini perf/ -- the cycle model inside the spike plug-in, fed the ELF's RoCC commands",
+           "cycles": total_cycles,
+           "stage_cycles": stage_cycles,
+           "summary": summary,
+           "config": config}
+    if per_stage is not None:
+        rec["per_stage_summaries"] = per_stage
+    return rec
+
+
 def _libgemmini_fingerprint(mx) -> dict:
     """Identify the model that actually ran, not just where it lives.
 
@@ -257,6 +329,11 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
                                  "using the shipped libgemmini.so")
         tel.log("toolchain", f"gcc={mx.runner.gcc_path()}  spike={mx.runner.spike_path()}")
 
+    # The cycle model runs beside the bits (GEMMINI_MODE=both) on every spike run, with the recipe's
+    # geometry; the ELF's cycle counts are then modelled time (CYCLES_SOURCE).
+    timing_req = _timing_request(recipe) if ("spike" in models and not build_only) else None
+    run_timing = None                                    # the one-ELF paths' timing result
+
     # --- (2) lower and run ------------------------------------------------------------
     art_dir = workdir / "artifacts"
     stage_records: list[dict] = []
@@ -310,7 +387,9 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
         if "perf" in models:
             def _perf():
                 from models.perf.perf import run_perf
-                return run_perf(recipe, dtype, shapes,
+                # energy=False: perf_model's own --energy cannot run here (see models/perf/perf.py); the
+                # kernel's energy is priced on the measured window in merge_measured instead.
+                return run_perf(recipe, dtype, shapes, energy=False,
                                 lut_group=run_recipe.lut.group if run_recipe.lut else None)
             pending["perf"] = pool.submit(_perf)
 
@@ -336,10 +415,11 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
             for rec in stage_records:
                 rec["elf"] = str(elf)
             return {"metrics": None, "run_dir": None, "stages": stage_records}
-        res = mx.run_command_buffer(cb, workdir=gdir, simulator=simulator)
+        res = mx.run_command_buffer(cb, workdir=gdir, simulator=simulator, timing=timing_req)
         _assert_geometry(res.get("console", ""), recipe, simulator, tel)
         raw = res["metrics"]
         fused_cycles = raw.get("cycles")
+        run_timing = res.get("timing")
         for rec in stage_records:
             rec["elf"] = res["elf"]
             where = "mesh" if rec["where"] == "mesh" else "host"
@@ -366,10 +446,11 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
                 rec["elf"] = str(elf)
             return {"metrics": None, "run_dir": None, "stages": stage_records}
 
-        res = mx.run_command_buffer(cb, workdir=chain_dir, simulator=simulator)
+        res = mx.run_command_buffer(cb, workdir=chain_dir, simulator=simulator, timing=timing_req)
         _assert_geometry(res.get("console", ""), recipe, simulator, tel)
         raw = res["metrics"]
         fused_cycles = raw.get("cycles")
+        run_timing = res.get("timing")
 
         for i, rec in enumerate(stage_records):
             rec["elf"] = res["elf"]
@@ -495,13 +576,14 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
                 stage_records.append({"stage": i, "name": st.name, "elf": str(elf)})
                 break
 
-            res = mx.run_command_buffer(cb, workdir=stage_dir, simulator=simulator)
+            res = mx.run_command_buffer(cb, workdir=stage_dir, simulator=simulator, timing=timing_req)
             _assert_geometry(res.get("console", ""), recipe, simulator, tel)
             cycles = res["metrics"].get("cycles")
             stage_records.append({"stage": i, "name": st.name, "where": "mesh",
                                   "m": m_, "k": k_, "n": n_,
                                   "out_dtype": INTERMEDIATE_DTYPE if emit_fp8 else "bf16",
-                                  "metrics": res["metrics"], "elf": res["elf"]})
+                                  "metrics": res["metrics"], "elf": res["elf"],
+                                  "timing": res.get("timing")})
 
             if artifacts:
                 art_dir.mkdir(parents=True, exist_ok=True)
@@ -603,6 +685,14 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
             metrics["seam_cycles"] = sum(v for s in stage_records
                                          for k, v in (s.get("metrics") or {}).items()
                                          if k.startswith("seam_cycles_stage"))
+        if timing_req is not None:
+            metrics["cycles_source"] = CYCLES_SOURCE
+            metrics["timing"] = _timing_record(run_timing, stage_records, metrics["total_cycles"])
+            sm = metrics["timing"]["summary"] or {}
+            tel.log("timing", f"{metrics['total_cycles']} cycles modelled  mesh busy {sm.get('mesh_busy_cycles')}  "
+                              f"host stalled {sm.get('host_stalled_cycles')}  L2 {sm.get('l2_hits')}/{sm.get('l2_misses')} "
+                              f"hits/misses  DRAM busy {sm.get('dram_busy_cycles')}  "
+                              f"(preset {(metrics['timing']['config'] or {}).get('preset')})")
     else:
         metrics["total_cycles"] = None
     # --- silicon cost: the PPA model. Analytical (no EDA tools, ~0.4 s), consumes the
@@ -621,13 +711,17 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
     # models/perf/perf.py for why it is not comparable to spike's functional count).
     if "perf" in models:
         try:
-            perf = metrics["perf"] = pending["perf"].result()
-            perf["spike_functional_cycles"] = metrics.get("total_cycles")
-            e = perf.get("energy")
-            tel.log("perf", f"{perf['total_cycles_predicted']} cycles predicted "
-                            f"({perf['total_us']:.1f} us, util {perf['utilization_pct_min']:.1f}%"
-                            + (f", {e['uj_kernel']:.2f} uJ" if e else "") + ")  "
-                            "[spike's count is a functional op counter, not a timeline]")
+            from models.perf.perf import merge_measured
+            perf = metrics["perf"] = merge_measured(pending["perf"].result(), metrics.get("timing"),
+                                                    clock_ns=recipe.clock_ns, recipe=recipe, dtype=dtype)
+            e, est = perf.get("energy"), perf["estimate"]
+            tel.log("perf", (f"{perf['cycles']} cycles measured ({perf['us']:.1f} us, mesh util "
+                             f"{perf['utilization_pct']:.1f}%)" if perf.get("cycles") is not None
+                             else "no measured cycles (spike did not run)")
+                            + (f"  {e['uj_kernel']:.2f} uJ ({e['pj_per_op']:.2f} pJ/op) on the measured window" if e
+                               else f"  [no energy: {perf['model']['measured'].get('energy_note')}]")
+                            + f"  | perf_model estimate {est['total_cycles_predicted']} cycles "
+                              f"({est['total_us']:.1f} us, util {est['utilization_pct_min']:.1f}%)")
         except Exception as exc:
             tel.log("perf", f"UNAVAILABLE -- {exc}")
     pool.shutdown(wait=False)
@@ -692,9 +786,28 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
             # A path is not an identity: hash the .so that ran, so a stale build is visible in the
             # record rather than inferred later from a wrong answer.
             "libgemmini_id": _libgemmini_fingerprint(mx) if hw is not None else None,
+            # The cycle model that timed the run: its preset, what the recipe set, and the libgemmini it
+            # came from. A different libgemmini is a different timing model; the bits say nothing about it.
+            "timing_model": None if (hw is None or timing_req is None) else {
+                "preset": mx.runner.TIMING_PRESET,
+                "set": mx.runner.timing_env(timing_req, Path("."))["GEMMINI_PERF_SET"],
+                "libgemmini_head": _git_head(mx.runner.gemmini_root() / "software" / "libgemmini"),
+            },
         },
         hardware_output=hw, fp32_reference=ref_fp32, mxquant_output=mxq_out,
         metrics=metrics, artifacts=artifact_paths, telemetry=tel)
+
+    # The cycle model's own files, next to metrics.json: the summary as spike wrote it and the parameters
+    # it resolved. One pair for a one-ELF run, one pair per stage otherwise.
+    if hw is not None and timing_req is not None:
+        pairs = ([("", run_timing)] if run_timing is not None
+                 else [(f"_stage{s['stage']}", s["timing"]) for s in stage_records if s.get("timing")])
+        for suffix, t in pairs:
+            for kind, name in (("summary", mx.runner.TIMING_SUMMARY), ("config", mx.runner.TIMING_CONFIG)):
+                src = (t.get("files") or {}).get(kind)
+                if src and Path(src).exists():
+                    stem, ext = name.rsplit(".", 1)
+                    shutil.copy(src, run_dir / f"{stem}{suffix}.{ext}")
 
     if artifacts:
         (art_dir / "spike_result.json").write_text(

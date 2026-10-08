@@ -289,7 +289,17 @@ def build(recipe, *, force: bool = False, gxx: str | None = None, quiet: bool = 
         "gemmini_head": gemmini_pin(),
         "so_sha256": hashlib.sha256(so.read_bytes()).hexdigest()[:16],
         "glibcxx_max": ours,
+        "cycle_model": has_cycle_model(so),
     }, indent=2) + "\n", encoding="utf-8")
+
+
+def has_cycle_model(so: Path) -> bool:
+    """Whether this libgemmini.so carries the cycle model (libgemmini >= 92fae92: gemmini_perf.cc reads
+    GEMMINI_MODE). An older build ignores GEMMINI_MODE and the pipeline's timed run would find no summary."""
+    try:
+        return b"GEMMINI_MODE" in so.read_bytes()
+    except OSError:
+        return False
 
     if not quiet:
         print(f"[built     ] {so} ({so.stat().st_size} B, needs GLIBCXX_{ours})")
@@ -337,12 +347,18 @@ def main() -> int:
         if not BUILD_ROOT.exists():
             print(f"no builds yet ({BUILD_ROOT})")
             return 0
+        want = sources_fingerprint(upstream_dir())
         for d in sorted(BUILD_ROOT.iterdir()):
             meta = d / "meta.json"
             if meta.exists():
                 m = json.loads(meta.read_text())
+                flags = []
+                if m.get("sources_sha256") != want:
+                    flags.append("STALE: sources moved, rebuilt on next use")
+                if not has_cycle_model(d / "libgemmini.so"):
+                    flags.append("NO CYCLE MODEL (built before libgemmini 92fae92)")
                 print(f"  {m['build_id']}  {m['recipe_name']:14s} built {m['built']}  "
-                      f"{', '.join(m['changes'])}")
+                      f"{', '.join(m['changes'])}" + (f"   [{'; '.join(flags)}]" if flags else ""))
         return 0
 
     names = ([p.stem for p in sorted(HARDWARE_DIR.glob("*.json"))] if a.all

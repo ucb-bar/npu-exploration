@@ -149,6 +149,7 @@ measure stale RTL — the mistake that cost two days in
  ┌───────────── grade/pipeline.run ────────────────────────────────────────┐
  │ reference  fp32                                                         │
  │ spike      LOWER: compiler/lower.py (compiler/graph, host_ops) → command buffer│
+ │            run with GEMMINI_MODE=both: the bits, and the cycle model's time     │
  │            (fused chain | graph | per-stage)   → compiler/targets backend│
  │            mxgemm_emit / mxgraph_emit → main.c → ELF → spike             │
  │ mxquant    models/mxquant on mxq, fed the same wire operands             │
@@ -182,7 +183,7 @@ launch several `run_kernel.py` processes; each run writes its own `results/<time
 | silicon cost of one machine | `python -m models.ppa.ppa --hw baseline` |
 | predicted timeline of one matmul on it | `python -m models.perf.perf --hw baseline --m 64 --k 64 --n 64` |
 | build or list the per-recipe functional models | `python -m models.spike.build_spike --hw R --force` |
-| the claims, one test each | `tests/selftest_*.py` (17 of them) and `tests/test_recipe_drift.py` |
+| the claims, one test each | `tests/selftest_*.py` (18 of them) and `tests/test_recipe_drift.py` |
 | environment | `bash scripts/setup.sh --check`, `source scripts/env.sh` |
 
 Kernels by name: `linear`, `mlp2` … `mlp8`, `attention`, and `llama_attention` / `llama_mlp` once a
@@ -229,6 +230,7 @@ of the run recipe are written `run.*` below. Every field and its meaning is in
 | `run.fp32_tol` | | | | | |
 | `run.allow_lossy_chain` | | | | | lowering |
 | `run.lut` (LUT formats) | codebooks | | | lut-a/w/c | codebooks, lut_group |
+| `run.vector` (optional) | softmax, RMSNorm precision | | | | |
 
 `run.fp32_tol` is read by the grading step, not by a model: it is the pass threshold on the error
 against fp32. `array.tileRows/tileColumns` and the `accumulator` widths are in `build_id` but no

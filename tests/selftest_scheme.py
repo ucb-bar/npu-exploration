@@ -140,6 +140,13 @@ def main() -> int:
     check("scale ocp quantizes through mxq.block.ocp (block max at the format max), rne -> even",
           s_ocp.a.func.__module__ == "mxq.block.ocp" and s_ocp.a.keywords["rounding_mode"] == "even"
           and s_ocp.a.keywords["fmt"] == "MXFP4")
+    check("scale ocp places the block max at the top (placement top)", s_ocp.a.keywords["placement"] == "top")
+    for sc, pl in (("ocp_below_top", "below_top"), ("ocp_no_clip", "no_clip")):
+        s_r = scheme.scheme(base, replace(load_run("fp4_e2m1"), scale=sc))
+        check(f"scale {sc} quantizes through mxq.block.ocp with placement {pl}, and has its own run_id",
+              s_r.a.func.__module__ == "mxq.block.ocp" and s_r.a.keywords["placement"] == pl
+              and s_r.a.keywords["rounding_mode"] == "even"
+              and replace(load_run("fp4_e2m1"), scale=sc).run_id() not in (ocp_run.run_id(), load_run("fp4_e2m1").run_id()))
     check("scale ocp changes run_id; scale mxgemmini (the default) keeps it",
           ocp_run.run_id() != load_run("fp4_e2m1").run_id()
           and replace(load_run("fp4_e2m1"), scale="mxgemmini").run_id() == load_run("fp4_e2m1").run_id())
@@ -311,6 +318,37 @@ def main() -> int:
     check("a removed flag names its run field", "operand_fmt" in (removed_flag(["--kernel", "x", "--dtype", "fp4_e2m1"]) or ""))
     check("--flag=value spelling is caught too", "rounding" in (removed_flag(["--rounding-mode=ties_away"]) or ""))
     check("current flags pass", removed_flag(["--hw", "baseline", "--run", "exact"]) is None)
+
+    print("\n[5d] the vector block (run recipe) ----------------------------------------")
+    from config.recipe import Vector
+    vrun = load_run("default_bf16_vector")
+    check("config/run/default_bf16_vector.json: softmax and rmsnorm in bf16",
+          vrun.vector == Vector(softmax="bf16", rmsnorm="bf16") and scheme.vector(vrun) == {"softmax": "bf16", "rmsnorm": "bf16"},
+          vrun.describe())
+    check("no vector block: Run.vector is None, fields() has no vector key, mxq gets None",
+          dflt.vector is None and "vector" not in dflt.fields() and scheme.vector(dflt) is None)
+    check("default_bf16_vector differs from default only in its vector block",
+          {k: v for k, v in vrun.fields().items() if k != "vector"} == dflt.fields())
+    vraw = {"name": "x", **vrun.fields()}
+    check("fields() round-trips through parse_run", parse_run(vraw).vector == vrun.vector)
+    check("run_id moves with the vector block",
+          len({dflt.run_id(), vrun.run_id(), parse_run({**vraw, "vector": {"softmax": None, "rmsnorm": "bf16"}}).run_id()}) == 3)
+    check("a null op is as transformers computes it",
+          scheme.vector(parse_run({**vraw, "vector": {"softmax": None, "rmsnorm": "bf16"}})) == {"softmax": None, "rmsnorm": "bf16"})
+    refused_load("unknown vector op refused by name",
+                 lambda: parse_run({**vraw, "vector": {"softmax": "bf16", "rmsnorm": "bf16", "silu": "bf16"}}), "silu")
+    refused_load("every vector op is written", lambda: parse_run({**vraw, "vector": {"softmax": "bf16"}}), "required")
+    refused_load("a vector precision mxq does not implement is refused",
+                 lambda: parse_run({**vraw, "vector": {"softmax": "fp16", "rmsnorm": None}}), "fp16")
+    refused_load("the kernel path refuses a vector block", lambda: check_recipes(base, vrun, "kernel"), "vector")
+    check_recipes(base, vrun, "perplexity")
+    check("the perplexity path accepts it", True)
+    from models.mxquant import rules as R
+    s = scheme.scheme(base, dflt)
+    core = R.build("mxquant_layers_core", s)
+    check("mxquant_layers_core = the attention core through the Scheme, then mxquant_layers",
+          core[0][1] == (s, s) and core[1:] == R.build("mxquant_layers", s)
+          and R.build("all_linear_core", s)[1:] == R.build("all_linear", s))
 
     print("\n[6] model selection -------------------------------------------------")
     check("default group", models.select("default") == ("reference", "mxquant", "spike", "ppa", "perf"))

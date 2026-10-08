@@ -46,19 +46,19 @@ All of these are in `build_id` except the labels (`name`, `description`, `proven
 
 | field | meaning | read by |
 |---|---|---|
-| `array.meshRows`, `array.meshColumns` | the mesh dimension `dim`; must be equal | mxquant (window), spike (`-DGEMMINI_DIM`), ppa (`--cols`), perf (`--rows/--cols`), emitters |
+| `array.meshRows`, `array.meshColumns` | the mesh dimension `dim`; must be equal | mxquant (window), spike (`-DGEMMINI_DIM`; the cycle model's `mesh.dim`), ppa (`--cols`), perf (`--rows/--cols`), emitters |
 | `array.tileRows`, `array.tileColumns` | PEs per tile | nothing in Python |
 | `types.meshProdPrecisionList` | per-lane product precision; must be uniform (spike has one `prod_e/prod_m`) | mxquant, spike, ppa (`--prod`) |
 | `types.meshAccPrecisionList` | the accumulator ladder down the column, one entry per lane | mxquant, spike, ppa (`--rows`) |
 | `types.*[].expWidth`, `sigWidth` | exponent bits; significand bits including the implicit bit (mantissa = `sigWidth - 1`) | same |
 | `types.*[].count`, `isRecoded`, `pad` | passed through, not read | |
 | `types.prodFloor` | a product below 2^prodFloor is flushed to zero (MxFPMul: -16); `null` for no flush | mxquant |
-| `mx.scaleSize` | elements per E8M0 scale on the operands | mxquant, spike (`GROUP`) |
+| `mx.scaleSize` | elements per E8M0 scale on the operands | mxquant, spike (`GROUP`; the cycle model's `mx.block`) |
 | `mx.scaleSizeOut` | the requantizer's output group | spike (`GROUP_OUT`) |
 | `mx.enable_lut` | a copy of the RTL's `GemminiArrayConfig.enable_lut`, which no RTL module reads | recorded by ppa and perf; nothing decides from it |
 | `mx.lut` | the LUT unit as built, the RTL's `GemminiLUTConfig` field for field, or `null` for a build without one: `projFormat` (which finders the requantizer has, so which LUT formats the build serves), `rdataWidth` (bits per entry), `raddrWidth` (log2 entries per LUT; 4), `numEntries` (LUTs per table, by `MX_LOAD_LUT` sel: B, A, C), `numBits` (16 x `rdataWidth`), `lutUpdateRegularityWidth` (the G register's width), `actCodeWidth`/`weiCodeWidth` (0; asymmetric builds are refused). Every key written | `check` (the formats served, the index and entry widths, G's range), emitters (each table's capacity) |
 | `accumulator.acc_read_full_width`, `acc_read_small_width` | accumulator read widths | nothing in Python |
-| `scratchpad.banks`, `scratchpad.rows` | scratchpad geometry | emitters (`bank_num`, `bank_rows`) |
+| `scratchpad.banks`, `scratchpad.rows` | scratchpad geometry | emitters (`bank_num`, `bank_rows`); spike's cycle model (`spad.banks`, `spad.bank_rows`) |
 | `implementation.clock_ns` | target clock period | ppa (`--clock-ns`), perf (`--clock-ns`) |
 | `implementation.utilization` | placement utilization | ppa (`--util`) |
 | `provenance.*` | where each number was taken from | people |
@@ -70,10 +70,11 @@ All of these are in `build_id` except the labels (`name`, `description`, `proven
 | `operand_fmt` | MX operand format: `fp8_e4m3`, `fp8_e5m2`, `fp8_e4m3_quad`, `fp6_e3m2`, `fp6_e2m3`, `fp4_e2m1` | `fp8_e4m3` |
 | `rounding` | operand rounding: `rne` or `ties_away` | `rne` |
 | `scale_floor` | the block maximum is floored here before the scale is taken | 2^-23 |
-| `scale` (optional) | where the block scale puts the block maximum: `mxgemmini` (in [1, 2): the chip's requantizer, MXQuant, every record so far) or `ocp` (at the format maximum, OCP MX v1.0, `mxq.block.ocp`; perplexity path only, no `scale_floor`, no `lut`). Absent keeps `run_id` | `mxgemmini` |
+| `scale` (optional) | where the block scale puts the block maximum: `mxgemmini` (in [1, 2): the chip's requantizer, MXQuant, every record so far); `ocp` (in the format's top binade, OCP MX v1.0: a block max whose mantissa rounds above the format maximum's is clipped there); `ocp_below_top` (one binade below the top: never clips, the top binade unused); `ocp_no_clip` (`ocp`, except the blocks that would clip go one binade down: a comparator and an exponent increment in a requantizer). The `ocp` ones run through `mxq.block.ocp` (placement `top` / `below_top` / `no_clip`); perplexity path only, no `scale_floor`, no `lut`. Absent keeps `run_id` | `mxgemmini` |
 | `reduce` | how codes are multiplied: `hardware` (the recipe's array), `exact`, `bf16_tiles` | `hardware` |
 | `allow_lossy_chain` | run a chain whose codebook cannot be chosen exactly | `false` |
 | `fp32_tol` | kernel pass threshold on relative Frobenius error against fp32 | 0.15 |
+| `vector` (optional, perplexity path) | the precision of the vector ops between the matmuls, every op written: `softmax` (attention's scale, mask and softmax, in `mxq.nn.attend`) and `rmsnorm` (every RMSNorm), each `null` (as transformers computes it: fp32 inside, bf16 out) or `"bf16"` (every step rounded to bf16). Passed to `mxq.nn.patch(vector=...)`. With softmax set, an attention module no core rule chose runs mxq's exact core (no quantization) so its softmax can be rounded; the `*_core` rule lists quantize the core too. Refused on the kernel path. Absent: no change, and the `run_id` and perplexity cache key stay as they were | absent; `config/run/default_bf16_vector.json` sets both |
 | `lut` (LUT formats) | how a LUT format's tables are made, every key written: `group` (G: one LUT per 2**G rows of A, columns of B, rows of C), `weights` (B tables: `data`), `activations` (A tables: `data`), `outputs` (a chain's C tables: `estimate`, fitted to an fp32 run of the input), `pick` (A and B indices: `host`, nearest by value), `fit` (`{"method": "kmeans", "init": "quantile", "max_iters"}`). Each accepts what the compiler implements today; the plan's other values are refused by name. Refused for a direct format. A LUT format without it runs LUT off, quantized straight to its grid, on the perplexity path (`fp6_e3m2_direct`) and is refused on the kernel path, whose requantizer needs the LUT; a recipe without it keeps its `run_id` | `config/run/<format>.json` for the four LUT formats |
 
 `name` and `description` are labels and stay out of `run_id`. The hardware recipe says what LUT unit was
@@ -110,6 +111,7 @@ holds these constants and `baseline.json` equal to libgemmini, the Chisel source
 | `mxq_format(dtype)` | mxq's format name (`MXFP8_E4M3`, `MXFP4`, ...) | `run.operand_fmt` |
 | `quantizer(hw, run)` | `block.mxgemmini.quantize` with block size, rounding and scale floor passed explicitly | `mx.scaleSize`, `run.rounding`, `run.scale_floor` |
 | `mxgemmini(hw)` | `MXGEMMINI(prod_e, prod_m, prod_floor)` | product list, `types.prodFloor` |
+| `vector(run)` | `mxq.nn.patch`'s `vector`: `None` or `{"softmax": None \| "bf16", "rmsnorm": None \| "bf16"}` | `run.vector` |
 | `datapath(hw)` | `(mxgemmini(hw), [(e, m) per lane], window = dim)` | plus the ladder and `dim` |
 | `shipped_datapath(hw)` | the same on `MXQUANT(prod_e, prod_m)`, the as-shipped definition | same |
 | `scheme(hw, run)` | an mxq `Scheme`: the quantizer for A and B, and the reducer `run.reduce` names | all of the above |

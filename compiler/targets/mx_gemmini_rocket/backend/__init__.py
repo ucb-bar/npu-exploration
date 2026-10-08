@@ -21,12 +21,20 @@ from .mxgemm_emit import (  # noqa: F401
 )
 from .runner import (  # noqa: F401
     ORACLE,
+    TIMING_CONFIG,
+    TIMING_PARAMS,
+    TIMING_PRESET,
+    TIMING_SUMMARY,
     MxRunnerError,
     available,
     compile_command_buffer,
     parse_output,
+    parse_timing_config,
+    parse_timing_summary,
+    read_timing,
     run_command_buffer,
     run_elf,
+    timing_env,
 )
 
 try:

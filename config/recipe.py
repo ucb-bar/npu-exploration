@@ -8,7 +8,9 @@ scale floor, reducer and the grading tolerance, and, for a LUT format, how its L
 (``lut``); ``run_id`` hashes it the same way. A run recipe never triggers a build.
 The hardware recipe says what LUT unit was built (``mx.lut``, the RTL's GemminiLUTConfig); the run recipe
 says how it is used (``lut``). Every LUT setting is written in one of the two files: the code holds no
-default for any of them (planning/LUT_integration.md).
+default for any of them (planning/LUT_integration.md). The run recipe's optional ``vector`` block says at
+what precision the perplexity path computes the vector ops between the matmuls (softmax, RMSNorm); absent,
+they run as transformers computes them.
 
 Every key is read by something; an unknown key is refused by name. ``check(hw, run, path)`` refuses
 the combinations a path cannot follow (the kernel path runs on spike and the chip's requantizer, the
@@ -41,12 +43,20 @@ _HW_SECTIONS = {
 }
 _MXFLOAT = {"expWidth", "sigWidth", "count", "isRecoded", "pad"}
 _RUN_KEYS = {"name", "description", "operand_fmt", "rounding", "scale_floor", "reduce",
-             "allow_lossy_chain", "fp32_tol", "lut", "scale"}
+             "allow_lossy_chain", "fp32_tol", "lut", "scale", "vector"}
 #: Optional run keys: absent means today's behaviour, and leaves run_id unchanged.
-_RUN_OPTIONAL = {"description", "lut", "scale"}
+_RUN_OPTIONAL = {"description", "lut", "scale", "vector"}
 #: Where the block scale puts the block maximum: "mxgemmini" (in [1, 2): the chip's requantizer, MXQuant, every
-#: record so far) or "ocp" (at the format's maximum, OCP MX v1.0; mxq.block.ocp, perplexity path only).
-SCALES = ("mxgemmini", "ocp")
+#: record so far); "ocp" (in the format's top binade, OCP MX v1.0: a block max is clipped at the format maximum);
+#: "ocp_below_top" (one binade below the top: never clips, the top binade unused); "ocp_no_clip" (ocp, except
+#: the blocks that would clip go one binade down). The ocp ones run through mxq.block.ocp (placement top /
+#: below_top / no_clip), perplexity path only.
+SCALES = ("mxgemmini", "ocp", "ocp_below_top", "ocp_no_clip")
+
+#: The run recipe's vector block: every op written, each one of these (mxq.nn.patch(vector=...)). null = as
+#: transformers computes it (fp32 inside, bf16 out); "bf16" = every step's result rounded to bf16.
+VECTOR_OPS = ("softmax", "rmsnorm")
+VECTOR_CHOICES = (None, "bf16")
 
 #: mx.lut: the RTL's GemminiLUTConfig field names (MxConfigFragments.scala:48), so one JSON describes both.
 _HW_LUT_KEYS = {"projFormat", "rdataWidth", "raddrWidth", "numEntries", "numBits", "lutUpdateRegularityWidth",
@@ -241,6 +251,22 @@ class Lut:
 
 
 @dataclass(frozen=True)
+class Vector:
+    """The run recipe's ``vector`` block: the precision of each vector op on the perplexity path.
+
+    softmax   attention's scale, mask and softmax (mxq.nn.attend; an attention module with no core rule gets
+              mxq's exact core so its softmax can be rounded)
+    rmsnorm   every RMSNorm module
+    None = as transformers computes it; "bf16" = each step rounded to bf16 (mxq/nn/_vector.py)."""
+    softmax: str | None
+    rmsnorm: str | None
+
+    def mxq(self) -> dict:
+        """What mxq.nn.patch takes as ``vector``."""
+        return {"softmax": self.softmax, "rmsnorm": self.rmsnorm}
+
+
+@dataclass(frozen=True)
 class Run:
     """A validated run recipe. The defaults are ``config/run/default.json``: what the chip does."""
     name: str = "default"
@@ -252,13 +278,15 @@ class Run:
     fp32_tol: float = 0.15
     lut: Lut | None = None      # None: no lut block (the kernel path's LUTs are the compiler's; perplexity is full grid)
     scale: str = "mxgemmini"    # SCALES; "mxgemmini" is absent from run_id so every recipe without it keeps its id
+    vector: Vector | None = None    # None: no vector block (softmax and RMSNorm as transformers computes them)
     description: str = ""
     path: Path | None = None
 
     def fields(self) -> dict:
-        """Every field that changes a number. ``lut`` only when set, so a recipe without it keeps its run_id."""
+        """Every field that changes a number. ``lut`` and ``vector`` only when set, so a recipe without them
+        keeps its run_id."""
         return {k: v for k, v in asdict(self).items()
-                if k not in _LABELS and k != "path" and not (k == "lut" and v is None)
+                if k not in _LABELS and k != "path" and not (k in ("lut", "vector") and v is None)
                 and not (k == "scale" and v == "mxgemmini")}
 
     def run_id(self) -> str:
@@ -269,8 +297,10 @@ class Run:
             f"  lut G={self.lut.group} B {self.lut.weights} A {self.lut.activations} C {self.lut.outputs}"
             f" pick {self.lut.pick} {self.lut.fit.method}/{self.lut.fit.init}x{self.lut.fit.max_iters}")
         scale = "" if self.scale == "mxgemmini" else f"  scale {self.scale}"
+        vec = "" if self.vector is None else (
+            "  vector " + " ".join(f"{op} {getattr(self.vector, op) or 'hf'}" for op in VECTOR_OPS))
         return (f"{self.name}  {self.operand_fmt}  {self.rounding}  floor {self.scale_floor:g}  "
-                f"reduce {self.reduce}{lut}{scale}")
+                f"reduce {self.reduce}{lut}{scale}{vec}")
 
 
 def _digest(obj) -> str:
@@ -384,7 +414,24 @@ def parse_run(raw: dict, *, path: Path | None = None) -> Run:
     return Run(name=raw["name"], operand_fmt=str(raw["operand_fmt"]), rounding=str(raw["rounding"]),
                scale_floor=float(raw["scale_floor"]), reduce=str(raw["reduce"]),
                allow_lossy_chain=bool(raw["allow_lossy_chain"]), fp32_tol=float(raw["fp32_tol"]),
-               lut=_parse_lut(raw.get("lut"), path), scale=scale, description=raw.get("description", ""), path=path)
+               lut=_parse_lut(raw.get("lut"), path), scale=scale, vector=_parse_vector(raw.get("vector")),
+               description=raw.get("description", ""), path=path)
+
+
+def _parse_vector(obj) -> Vector | None:
+    """The run recipe's ``vector`` block: every op written, each null or "bf16"."""
+    if obj is None:
+        return None
+    if not isinstance(obj, dict):
+        raise RecipeError(f"vector: an object with {', '.join(VECTOR_OPS)}, each null or \"bf16\"")
+    _check_keys(obj, set(VECTOR_OPS), "vector")
+    missing = sorted(set(VECTOR_OPS) - set(obj))
+    if missing:
+        raise RecipeError(f"vector: {', '.join(missing)} required (null = as transformers computes it)")
+    for op in VECTOR_OPS:
+        if obj[op] not in VECTOR_CHOICES:
+            raise RecipeError(f"vector.{op} {obj[op]!r}: null or \"bf16\"")
+    return Vector(**{op: obj[op] for op in VECTOR_OPS})
 
 
 def _bool(v, where: str) -> bool:
@@ -479,6 +526,9 @@ def check(hw: Hardware, run: Run, path: str) -> None:
                           "placed the mxgemmini way")
     if path == "perplexity":
         return                  # a codebook format without a lut block: quantized straight to its grid (LUT off)
+    if run.vector is not None:
+        raise RecipeError(f"run {run.name}: a vector block on the kernel path, which grades matmul kernels; the "
+                          "vector ops' precision is the perplexity path's (python -m models.mxquant)")
     if path != "kernel":
         raise ValueError(f"path {path!r}: 'kernel' or 'perplexity'")
     refusals = []

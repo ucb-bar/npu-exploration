@@ -18,7 +18,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from models.perf.perf import PerfError, perf_args, perf_model_path, run_perf, spad_kb  # noqa: E402
+from models.perf.perf import PerfError, line, merge_measured, perf_args, perf_model_path, run_perf, spad_kb  # noqa: E402
 from config.recipe import load_hardware as load, load_run, parse_hardware  # noqa: E402
 
 #: G for a LUT format: its run recipe's lut.group (config/run/<fmt>.json), never a constant here.
@@ -123,9 +123,14 @@ def main() -> int:
         check(f"fp6 {M}x{K}x{N}: the model's LUT tables == the compiler's LUT groups ({want})", got_t == want,
               f"model {got_t}")
         check("fp6 with the LUT spends cycles loading LUTs", lut["stages"][0]["phases"]["lut"] > 0)
-        check("energy parsed (uJ > 0)",
-              "energy" in res and res["energy"]["uj_kernel"] > 0,
-              str(res.get("energy")))
+        if "energy" in res:
+            check("energy parsed (uJ > 0)", res["energy"]["uj_kernel"] > 0, str(res.get("energy")))
+        else:
+            # perf_model's own compose_gemmini call; with the workspace at >= 3d28713 it needs the PDK SRAM
+            # table we do not have. Not a failure of this adapter: the record must say why instead.
+            check("no energy: the record says why (perf_model's compose call, no --system)",
+                  "energy_note" in res["model"] and "compose_gemmini" in res["model"]["energy_note"],
+                  res["model"].get("energy_note", "")[:100])
         check("kernel totals = stage sums",
               res["total_cycles_predicted"] == s["cycles_predicted"])
 
@@ -175,8 +180,82 @@ def main() -> int:
             check("memory energy parsed (uJ macros > 0, reads > 0)",
                   sm["uj_macros"] > 0 and sm["memories"]["smem"]["reads"] > 0)
             check("kernel memory total = stage sum", syn["memory"]["uj_macros"] == round(sm["uj_macros"], 3))
-        check("cycles and energy do not move with --mem",
-              (syn["total_cycles_predicted"], syn.get("energy")) == (real["total_cycles_predicted"], real.get("energy")))
+        check("cycles do not move with --mem", syn["total_cycles_predicted"] == real["total_cycles_predicted"])
+        if real.get("energy") is not None:
+            check("energy does not move with --mem", syn.get("energy") == real.get("energy"))
+        else:
+            print("  note  energy absent on the real workspace (see above); the synthetic table lets compose run")
+
+    print("C: the cycle model's measurement goes on top, this model's timeline under estimate")
+    fake = {"stages": [{"cycles_predicted": 8875, "us": 17.7, "m_ops": 0.26, "utilization_pct": 11.5, "gops": 14.8,
+                        "phases": {"compute": 1049, "lut": 0}, "pe_mode": 8, "ops_per_pe_cycle": 1,
+                        "energy": {"uj": 4.78}, "args": "--M 64", "stage": 0, "gemm": "64x64x64", "out_fmt": "bf16"},
+                       {"cycles_predicted": 8875, "us": 17.7, "m_ops": 0.26, "utilization_pct": 11.5, "gops": 14.8,
+                        "phases": {"compute": 1049, "lut": 0}, "pe_mode": 8, "ops_per_pe_cycle": 1,
+                        "energy": {"uj": 4.78}, "args": "--M 64", "stage": 1, "gemm": "64x64x64", "out_fmt": "bf16"}],
+            "total_cycles_predicted": 17750, "total_us": 35.4, "utilization_pct_min": 11.5,
+            "energy": {"uj_kernel": 9.56, "pj_per_op_achieved": 18.4},
+            "memory": {"available": False, "why": "no table"},
+            "model": {"source": "perf_model.py", "workspace_head": "d5e82e7"}, "spike_cycles": {"cycles": 5637}}
+    timing = {"cycles": 5637, "stage_cycles": {"0": 2701, "1": 2933}, "summary": {"mesh_busy_cycles": 2048}}
+    import copy
+    m = merge_measured(copy.deepcopy(fake), timing, clock_ns=2.0)
+    check("measured cycles, us, utilization on top", (m["cycles"], m["us"], m["utilization_pct"]) == (5637, 11.27, 36.3),
+          f"{m['cycles']} {m['us']} {m['utilization_pct']}")
+    check("gops from the kernel's ops over the measured window", m["gops"] == round(0.52e6 / (5637 * 2e-9) / 1e9, 1), str(m["gops"]))
+    check("per-stage measured windows", [s["cycles"] for s in m["stages"]] == [2701, 2933])
+    check("this model's totals moved under estimate",
+          (m["estimate"]["total_cycles_predicted"], m["estimate"]["total_us"], m["estimate"]["utilization_pct_min"]) == (17750, 35.4, 11.5)
+          and "total_cycles_predicted" not in m)
+    check("this model's per-stage timeline moved under estimate, phases included",
+          m["estimate"]["stages"][0]["cycles_predicted"] == 8875 and m["estimate"]["stages"][0]["phases"]["compute"] == 1049
+          and "cycles_predicted" not in m["stages"][0] and "phases" not in m["stages"][0])
+    check("what only this model gives stays: m_ops, pe_mode, memory",
+          m["stages"][0]["m_ops"] == 0.26 and m["stages"][0]["pe_mode"] == 8 and m["memory"]["available"] is False)
+    check("perf_model's own energy moves under estimate, per stage too, naming its window",
+          m["estimate"]["energy"]["uj_kernel"] == 9.56 and m["estimate"]["energy"]["basis_cycles"] == 17750
+          and m["estimate"]["stages"][0]["energy"]["uj"] == 4.78 and "energy" not in m["stages"][0])
+    check("without a recipe there is no measured energy and the record says why",
+          m["energy"] is None and "recipe" in m["model"]["measured"]["energy_note"])
+    check("the spike counter key is gone; model names both sources",
+          "spike_cycles" not in m and set(m["model"]) == {"measured", "estimate"} and m["model"]["estimate"]["workspace_head"] == "d5e82e7")
+    check("merging twice is a no-op", merge_measured(copy.deepcopy(m), timing, clock_ns=2.0) == m)
+    ln = line(m)
+    check("the PERF line leads with the measurement and names the estimate",
+          ln.startswith("PERF     5637 cycles (spike cycle model)") and "estimate 17750 cycles" in ln and "on the estimate" in ln, ln)
+    none = merge_measured(copy.deepcopy(fake), None, clock_ns=2.0)
+    check("without a spike run the measured fields are None and say why",
+          none["cycles"] is None and none["utilization_pct"] is None and "spike did not run" in none["cycles_source"]
+          and none["estimate"]["total_cycles_predicted"] == 17750)
+    check("its PERF line says so", line(none).startswith("PERF     no measured cycles"), line(none))
+
+    print("D: energy on the measured window (compose_gemmini at the measured utilization)")
+    if live:
+        from models.ppa.ppa import PpaError, _compose, ppa_args, ppa_root
+        try:
+            ppa_root()
+            raw = run_perf(r, "fp8_e4m3", [{"stage": 0, "m": 64, "k": 64, "n": 64, "out_dtype": "bf16"}], energy=False)
+            t = {"cycles": 3766, "stage_cycles": {"0": 3766}, "summary": {"mesh_busy_cycles": 1024}}   # linear on baseline
+            md = merge_measured(raw, t, clock_ns=2.0, recipe=r, dtype="fp8_e4m3")
+            e = md["energy"]
+            check("energy present, on the measured window", e is not None and e["basis_cycles"] == 3766
+                  and e["utilization_pct"] == 27.2 and "energy_note" not in md["model"]["measured"], str(e)[:120])
+            check("uJ = compose power at 27.2 % utilization x 7.53 us",
+                  abs(e["uj_kernel"] - e["power_mw"] * 3766 * 2.0 / 1e6) < 1e-3, f"{e['uj_kernel']} uJ, {e['power_mw']} mW")
+            want = _compose(ppa_root(), ppa_args(r, "fp8_e4m3", util=1024 / 3766), r, "fp8_e4m3")["pj_per_op"]
+            check("pJ/op over the kernel's ops equals compose's own pJ/op at that utilization (busy = ops / peak)",
+                  abs(e["pj_per_op"] - want) <= 0.01, f"{e['pj_per_op']} vs {want}")
+            check("the call was --system radiance at the measured utilization",
+                  "--system radiance" in e["model"]["args"] and "--util 0.2719" in e["model"]["args"], e["model"]["args"])
+            check("the PERF line carries it", f"{e['uj_kernel']:.2f} uJ ({e['pj_per_op']:.2f} pJ/op)" in line(md), line(md))
+            zero = merge_measured(run_perf(r, "fp8_e4m3", [{"stage": 0, "m": 64, "k": 64, "n": 64, "out_dtype": "bf16"}],
+                                           energy=False),
+                                  {"cycles": 3766, "stage_cycles": {}, "summary": {"mesh_busy_cycles": 0}},
+                                  clock_ns=2.0, recipe=r, dtype="fp8_e4m3")
+            check("no mesh busy cycles: energy None and the record says why",
+                  zero["energy"] is None and "busy" in zero["model"]["measured"]["energy_note"])
+        except PpaError as exc:
+            print(f"  skip  {exc}")
 
     print("fail-soft: bad MX_PPA_ROOT raises PerfError, nothing else")
     old = os.environ.get("MX_PPA_ROOT")
