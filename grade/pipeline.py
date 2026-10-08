@@ -387,7 +387,9 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
         if "perf" in models:
             def _perf():
                 from models.perf.perf import run_perf
-                return run_perf(recipe, dtype, shapes,
+                # energy=False: perf_model's own --energy cannot run here (see models/perf/perf.py); the
+                # kernel's energy is priced on the measured window in merge_measured instead.
+                return run_perf(recipe, dtype, shapes, energy=False,
                                 lut_group=run_recipe.lut.group if run_recipe.lut else None)
             pending["perf"] = pool.submit(_perf)
 
@@ -711,16 +713,15 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
         try:
             from models.perf.perf import merge_measured
             perf = metrics["perf"] = merge_measured(pending["perf"].result(), metrics.get("timing"),
-                                                    clock_ns=recipe.clock_ns)
+                                                    clock_ns=recipe.clock_ns, recipe=recipe, dtype=dtype)
             e, est = perf.get("energy"), perf["estimate"]
             tel.log("perf", (f"{perf['cycles']} cycles measured ({perf['us']:.1f} us, mesh util "
                              f"{perf['utilization_pct']:.1f}%)" if perf.get("cycles") is not None
                              else "no measured cycles (spike did not run)")
+                            + (f"  {e['uj_kernel']:.2f} uJ ({e['pj_per_op']:.2f} pJ/op) on the measured window" if e
+                               else f"  [no energy: {perf['model']['measured'].get('energy_note')}]")
                             + f"  | perf_model estimate {est['total_cycles_predicted']} cycles "
-                              f"({est['total_us']:.1f} us, util {est['utilization_pct_min']:.1f}%)"
-                            + (f", {e['uj_kernel']:.2f} uJ on the estimate" if e else "")
-                            + (f"  [{perf['model']['estimate']['energy_note']}]"
-                               if perf["model"]["estimate"].get("energy_note") else ""))
+                              f"({est['total_us']:.1f} us, util {est['utilization_pct_min']:.1f}%)")
         except Exception as exc:
             tel.log("perf", f"UNAVAILABLE -- {exc}")
     pool.shutdown(wait=False)

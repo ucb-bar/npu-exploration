@@ -128,8 +128,9 @@ def _run_length(pairs) -> str:
     return " ".join(f"{n}x{e},{s}" for n, (e, s) in groups)
 
 
-def ppa_args(recipe, dtype: str = "fp8_e4m3", lut: bool | None = None) -> list[str]:
+def ppa_args(recipe, dtype: str = "fp8_e4m3", lut: bool | None = None, *, util: float | None = None) -> list[str]:
     """Map a hardware recipe and a run's operand format onto compose_gemmini's CLI.
+    ``util`` replaces the recipe's nominal mesh utilization (run_energy passes the measured one).
 
     The model speaks (expWidth, sigWidth); the recipe's properties speak
     (e, m = sig-1), so sig = m + 1 here. The acc ladder is run-length encoded
@@ -153,7 +154,7 @@ def ppa_args(recipe, dtype: str = "fp8_e4m3", lut: bool | None = None) -> list[s
             # Gemmini blocks. The workspace's default since its 3d28713 is the Rocket system, which adds the operand
             # banks' SRAM macros from the PDK QRT table (tech/sram_qrt/qrt_table.csv), absent here.
             "--system", SYSTEM,
-            "--util", str(recipe.utilization), "--clock-ns", str(recipe.clock_ns)]
+            "--util", str(recipe.utilization) if util is None else f"{util:.4f}", "--clock-ns", str(recipe.clock_ns)]
     if uses_lut(dtype, lut):
         args += ["--products", str(products)]   # without a LUT the model's own default is the same number
     return args
@@ -209,11 +210,8 @@ def _workspace_head(root: Path) -> str | None:
         return None
 
 
-def run_ppa(recipe, dtype: str = "fp8_e4m3", lut: bool | None = None) -> dict:
-    """Area/power/energy for the machine this hardware recipe describes, fed ``dtype`` operands, through the
-    LUTs or not (``lut``; default the chip's rule for the format). Raises PpaError."""
-    root = ppa_root()
-    args = ppa_args(recipe, dtype, lut)
+def _compose(root: Path, args: list[str], recipe, dtype: str) -> dict:
+    """Run compose_gemmini with ``args`` and parse its report (``_parse``). Raises PpaError."""
     cmd = [sys.executable, str(root / "compose_gemmini.py"), *args]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=root)
@@ -224,7 +222,16 @@ def run_ppa(recipe, dtype: str = "fp8_e4m3", lut: bool | None = None) -> dict:
             raise PpaError(f"{recipe.name} running {dtype}: MxGemmini-workspace has no measurement of this "
                            f"mesh with that stimulus ({r.stderr.strip().splitlines()[-1]})")
         raise PpaError(f"compose_gemmini exited {r.returncode}:\n{r.stderr[-1500:]}")
-    out = _parse(r.stdout)
+    return _parse(r.stdout)
+
+
+def run_ppa(recipe, dtype: str = "fp8_e4m3", lut: bool | None = None) -> dict:
+    """Area/power/energy for the machine this hardware recipe describes, fed ``dtype`` operands, through the
+    LUTs or not (``lut``; default the chip's rule for the format), at the recipe's nominal utilization.
+    Raises PpaError."""
+    root = ppa_root()
+    args = ppa_args(recipe, dtype, lut)
+    out = _compose(root, args, recipe, dtype)
     out["model"] = {
         "source": "MxGemmini-workspace/ppa/compose_gemmini.py",
         "args": " ".join(args),
@@ -241,6 +248,34 @@ def run_ppa(recipe, dtype: str = "fp8_e4m3", lut: bool | None = None) -> dict:
     out["pe"] = pe_spec(dtype, lut)
     out["memory"] = memory_inventory(recipe)
     return out
+
+
+ENERGY_BASIS = ("compose_gemmini --system radiance at the mesh utilization the cycle model measured, times the "
+                "measured window (metrics.timing); every block's idle power included")
+
+
+def run_energy(recipe, dtype: str = "fp8_e4m3", lut: bool | None = None, *,
+               util: float, cycles: int, ops: float) -> dict:
+    """Energy of one kernel run on the recipe machine: compose_gemmini's Gemmini power at mesh utilization
+    ``util`` (a fraction: mesh busy cycles over the window) times the window of ``cycles`` at the recipe's
+    clock; ``pj_per_op`` over the kernel's ``ops`` (multiply-accumulates). This is what the workspace's own
+    perf_model energy() computes on its predicted timeline, here on the measured one. Raises PpaError."""
+    if not 0 < util <= 1:
+        raise PpaError(f"utilization must be a fraction in (0, 1], got {util!r}")
+    if not cycles > 0 or not ops > 0:
+        raise PpaError(f"energy needs a window and ops > 0, got cycles={cycles!r} ops={ops!r}")
+    root = ppa_root()
+    args = ppa_args(recipe, dtype, lut, util=util)
+    out = _compose(root, args, recipe, dtype)
+    us = cycles * recipe.clock_ns / 1e3
+    uj = out["power_mw"] * us / 1e3
+    return {"uj_kernel": round(uj, 4), "pj_per_op": round(uj * 1e6 / ops, 3), "power_mw": out["power_mw"],
+            "power_mw_blocks": {name: b["power_mw"] for name, b in out["blocks"].items()},
+            "utilization_pct": round(100 * util, 1), "basis_cycles": int(cycles), "us": round(us, 2),
+            "basis": ENERGY_BASIS,
+            "model": {"source": "MxGemmini-workspace/ppa/compose_gemmini.py", "args": " ".join(args),
+                      "system": SYSTEM, "clock_ns": recipe.clock_ns, "calibrated": recipe.dim == CALIBRATED_DIM,
+                      "workspace_head": _workspace_head(root)}}
 
 
 #: The SRAM compiler tables memory_model.py reads, relative to the workspace root. PDK data: not in the repo.

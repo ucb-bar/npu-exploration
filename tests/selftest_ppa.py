@@ -21,7 +21,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from models.ppa.ppa import CALIBRATION, CALIBRATION_LUT, FORMATS, PpaError, ppa_args, ppa_root, run_ppa, uses_lut  # noqa: E402
+from models.ppa.ppa import (CALIBRATION, CALIBRATION_LUT, FORMATS, PpaError, ppa_args, ppa_root, run_energy,  # noqa: E402
+                            run_ppa, uses_lut)
 from config.recipe import load_hardware as load, parse_hardware  # noqa: E402
 
 CHECKS = []
@@ -49,6 +50,23 @@ def main() -> int:
     check("--system radiance: the tapeout cluster's Scratchpad accounting (rocket needs the PDK QRT table)",
           got.get("--system") == "radiance", str(got.get("--system")))
     check("an fp4 run stimulates fp4", dict(zip(*[iter(ppa_args(r, "fp4_e2m1"))] * 2))["--stim"] == "fp4")
+    check("util= replaces the recipe's nominal utilization (4 decimals, as perf_model passes it)",
+          dict(zip(*[iter(ppa_args(r, "fp8_e4m3", util=0.25))] * 2))["--util"] == "0.2500")
+    for bad in ({"util": 0.0}, {"util": 1.5}, {"cycles": 0}, {"ops": 0}):
+        try:
+            run_energy(r, "fp8_e4m3", **{"util": 0.5, "cycles": 1000, "ops": 1000.0, **bad})
+            check(f"run_energy refuses {bad}", False, "accepted")
+        except PpaError as exc:
+            check(f"run_energy refuses {bad}", True, str(exc)[:60])
+    try:
+        e = run_energy(r, "fp8_e4m3", util=0.25, cycles=4000, ops=262144.0)
+        check("run_energy: uJ = compose's power at that utilization x the window at the recipe clock",
+              abs(e["uj_kernel"] - e["power_mw"] * 4000 * r.clock_ns / 1e6) < 1e-3, f"{e['uj_kernel']} uJ")
+        check("run_energy records the window, the utilization and --system radiance",
+              e["basis_cycles"] == 4000 and e["utilization_pct"] == 25.0 and "--system radiance" in e["model"]["args"]
+              and "--util 0.2500" in e["model"]["args"] and set(e["power_mw_blocks"]) and e["model"]["calibrated"])
+    except PpaError as exc:
+        print(f"  skip  run_energy live: {exc}")
     print("the recipe's LUT unit picks the machine priced; the run's format only the stimulus")
     lut8 = load("lut_fp8e4m3")
     a6 = ppa_args(r, "fp6_e3m2")

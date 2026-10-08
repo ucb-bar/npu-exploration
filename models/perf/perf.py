@@ -248,6 +248,7 @@ def run_perf(recipe, dtype: str, stages, *, as_measured: bool = True, energy: bo
                        memory=no_memory is None, **opts)
         res["stage"] = s.get("stage", len(per_stage))
         res["gemm"] = f"{s['m']}x{s['k']}x{s['n']}"
+        res["ops"] = int(s["m"]) * int(s["k"]) * int(s["n"])        # exact; perf_model prints m_ops to 2 decimals
         res["out_fmt"] = str(s.get("out_dtype", "bf16"))
         per_stage.append(res)
     if not per_stage:
@@ -302,22 +303,28 @@ def run_perf(recipe, dtype: str, stages, *, as_measured: bool = True, energy: bo
 
 #: Amanda's timeline fields that the cycle model's measurement replaces; they move under ``estimate``.
 _ESTIMATE_TOTAL = ("total_cycles_predicted", "total_us", "utilization_pct_min")
-_ESTIMATE_STAGE = ("cycles_predicted", "us", "gops", "utilization_pct", "phases", "args")
+_ESTIMATE_STAGE = ("cycles_predicted", "us", "gops", "utilization_pct", "phases", "args", "energy")
 MEASURED_SOURCE = ("libgemmini cycle model (GEMMINI_MODE=both), timing the ELF the emitter wrote; "
                    "metrics.timing has its counters")
 
 
-def merge_measured(perf: dict, timing: dict | None, *, clock_ns: float) -> dict:
-    """Put spike's measured time at the top of the ``perf`` record and this model's timeline under
-    ``estimate``. In place; returns ``perf``.
+def merge_measured(perf: dict, timing: dict | None, *, clock_ns: float, recipe=None,
+                   dtype: str = "fp8_e4m3") -> dict:
+    """Put spike's measured time at the top of the ``perf`` record, this model's timeline under
+    ``estimate``, and the kernel's energy on the measured window. In place; returns ``perf``.
 
     ``timing`` is ``metrics["timing"]`` (grade.pipeline): ``cycles`` is the ELF's whole measured window,
     ``stage_cycles`` the per-stage windows where the ELF reports them, ``summary.mesh_busy_cycles`` the
     cycles the array computed. Utilization is mesh busy over the window; ``gops`` the kernel's ops over the
     window at the recipe's clock. A stage without its own window keeps ``cycles: None``. Without
     ``timing`` (spike did not run) every measured field is ``None`` and ``cycles_source`` says so.
-    Keys that only this model produces (``m_ops``, ``pe_mode``, LUT layout, ``energy``, ``memory``) stay
-    where they were; ``energy`` gains ``basis_cycles``, the estimated window it was computed on.
+
+    ``energy`` is ``models.ppa.ppa.run_energy`` on ``recipe``'s machine: compose_gemmini's power at the
+    measured utilization times the measured window, pJ/op over the kernel's ops. Without ``recipe``
+    (standalone use), without a window or without a mesh-busy count it is ``None`` and
+    ``model.measured.energy_note`` says why. perf_model's own ``--energy`` figure, when it ran, is on its
+    predicted timeline and moves under ``estimate.energy`` (per stage too).
+    Keys that only this model produces (``m_ops``, ``pe_mode``, LUT layout, ``memory``) stay where they were.
     """
     if "estimate" in perf:
         return perf                                  # already merged
@@ -326,13 +333,18 @@ def merge_measured(perf: dict, timing: dict | None, *, clock_ns: float) -> dict:
                           for s in perf["stages"]]
     perf.pop("spike_cycles", None)
     perf.pop("spike_functional_cycles", None)
-    ops = sum(float(s.get("m_ops") or 0) for s in perf["stages"]) * 1e6
+    ops = sum(float(s["ops"]) if s.get("ops") else float(s.get("m_ops") or 0) * 1e6 for s in perf["stages"])
+    if "energy" in perf:                          # perf_model --energy: on its own timeline
+        estimate["energy"] = {**perf.pop("energy"), "basis_cycles": estimate.get("total_cycles_predicted"),
+                              "basis": "perf_model's own timeline and utilization, not the measured window"}
+    energy, energy_note = None, None
     if timing is None or timing.get("cycles") is None:
         cyc = None
         for s in perf["stages"]:
             s["cycles"] = s["us"] = None
         measured = {"cycles": None, "us": None, "gops": None, "utilization_pct": None,
                     "cycles_source": "none: spike did not run; estimate holds perf_model's timeline"}
+        energy_note = "no measured window (spike did not run)"
     else:
         cyc = int(timing["cycles"])
         busy = (timing.get("summary") or {}).get("mesh_busy_cycles")
@@ -347,12 +359,24 @@ def merge_measured(perf: dict, timing: dict | None, *, clock_ns: float) -> dict:
             sc = stage_cycles.get(str(s.get("stage")))
             s["cycles"] = sc
             s["us"] = round(sc * clock_ns / 1e3, 2) if sc is not None else None
-    if "energy" in perf:
-        perf["energy"]["basis_cycles"] = estimate.get("total_cycles_predicted")
-        perf["energy"]["basis"] = "perf_model's own timeline and utilization (estimate), not the measured cycles"
+        if recipe is None:
+            energy_note = "no recipe given (standalone merge): run_energy needs the machine"
+        elif not busy:
+            energy_note = "the cycle model reported no mesh busy cycles: no utilization to price power at"
+        elif not ops:
+            energy_note = "the stage records carry no ops"
+        else:
+            from models.ppa.ppa import PpaError, run_energy
+            try:
+                energy = run_energy(recipe, dtype, util=busy / cyc, cycles=cyc, ops=ops)
+            except PpaError as exc:
+                energy_note = str(exc)
     model = perf.pop("model")
-    ordered = {**measured, "stages": perf.pop("stages"), **perf, "estimate": estimate,
-               "model": {"measured": {"source": MEASURED_SOURCE, "clock_ns": clock_ns}, "estimate": model}}
+    measured_model = {"source": MEASURED_SOURCE, "clock_ns": clock_ns}
+    if energy_note:
+        measured_model["energy_note"] = energy_note
+    ordered = {**measured, "energy": energy, "stages": perf.pop("stages"), **perf, "estimate": estimate,
+               "model": {"measured": measured_model, "estimate": model}}
     perf.clear()
     perf.update(ordered)
     return perf
@@ -366,11 +390,15 @@ def line(perf: dict) -> str:
         return (f"PERF     {perf['total_cycles_predicted']} cycles predicted   "
                 f"{perf['total_us']:.1f} us   util {perf['utilization_pct_min']:.1f}%"
                 + (f"   {e['uj_kernel']:.2f} uJ ({e['pj_per_op_achieved']:.1f} pJ/op achieved)" if e else ""))
-    head = (f"PERF     {perf['cycles']} cycles (spike cycle model)   {perf['us']:.1f} us   "
-            f"mesh util {perf['utilization_pct']:.1f}%" if perf.get("cycles") is not None
-            else "PERF     no measured cycles (spike did not run)")
+    if perf.get("cycles") is None:
+        head = "PERF     no measured cycles (spike did not run)"
+    else:
+        head = (f"PERF     {perf['cycles']} cycles (spike cycle model)   {perf['us']:.1f} us   "
+                f"mesh util {perf['utilization_pct']:.1f}%"
+                + (f"   {e['uj_kernel']:.2f} uJ ({e['pj_per_op']:.2f} pJ/op)" if e else ""))
+    ee = est.get("energy")
     return (head + f"   | estimate {est['total_cycles_predicted']} cycles"
-            + (f", {e['uj_kernel']:.2f} uJ ({e['pj_per_op_achieved']:.1f} pJ/op, on the estimate)" if e else ""))
+            + (f", {ee['uj_kernel']:.2f} uJ ({ee['pj_per_op_achieved']:.1f} pJ/op, on the estimate)" if ee else ""))
 
 
 def main() -> int:
