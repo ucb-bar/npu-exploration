@@ -21,6 +21,8 @@ numbers, and a perplexity is tied to the ``build_id`` that VERDICT was proved ag
     run.reduce                                which reducer (REDUCERS)
     run.lut.group, run.lut.fit.max_iters      block.lut.quantize(group, max_iters)            a LUT format's operands;
                                               Scheme(rows=2**group)                           MXLinear keeps 2**G tokens together
+    run.vector.softmax, run.vector.rmsnorm    mxq.nn.patch(vector={...})                      not the Scheme: the vector ops
+                                                                                              between the matmuls
 
 Every knob is passed explicitly, never left to mxq's defaults: the RTL rounds operands
 round-to-nearest-even since 2026-09-10 and floors the block max at FLT_EPSILON = 2^-23, while mxq's
@@ -98,6 +100,12 @@ def quantizer(hw: Hardware, run: Run):
 def rows(run: Run) -> int:
     """Token rows one activation quantizer call must keep together: 2**G for a LUT format, else 1."""
     return 1 << run.lut.group if uses_lut(run) else 1
+
+
+def vector(run: Run) -> dict | None:
+    """What mxq.nn.patch takes as ``vector`` for this run: None (no vector block: as transformers computes
+    them) or {"softmax": None | "bf16", "rmsnorm": None | "bf16"}."""
+    return None if run.vector is None else run.vector.mxq()
 
 
 def lut_record(run: Run) -> dict | None:

@@ -13,6 +13,9 @@ record ("mxquant_layers") always means the same layers.
     attention_projections          the attention projections alone.
     lm_head                        lm_head alone.
     attention_projections_lm_head  the attention projections and lm_head; the MLP linears stay bf16.
+    mxquant_layers_core, all_linear_core
+                     the same, plus the attention core: S = Q·Kᵀ and O = P·V of every attention module through the
+                     Scheme too (mxq.nn.attend; scale, mask and softmax between them, at the run's vector precision).
 """
 from __future__ import annotations
 
@@ -54,9 +57,22 @@ def attention_projections_lm_head(scheme) -> list:
     return [(is_attention, scheme), (is_lm_head, scheme), (nn.Linear, None)]
 
 
+def is_attention_module(name: str, module, parent) -> bool:
+    """An attention module: it holds q_proj and k_proj (the module whose core mxq.nn.attend computes)."""
+    return hasattr(module, "q_proj") and hasattr(module, "k_proj")
+
+
+def with_core(rules):
+    """A rule list, plus the attention core of every attention module through the same Scheme."""
+    def build(scheme) -> list:
+        return [(is_attention_module, (scheme, scheme))] + rules(scheme)
+    return build
+
+
 NAMES = {"mxquant_layers": mxquant_layers, "all_linear": all_linear, "linears_no_head": linears_no_head,
          "mlp_linears": mlp_linears, "attention_projections": attention_projections, "lm_head": lm_head,
-         "attention_projections_lm_head": attention_projections_lm_head}
+         "attention_projections_lm_head": attention_projections_lm_head,
+         "mxquant_layers_core": with_core(mxquant_layers), "all_linear_core": with_core(all_linear)}
 
 
 def build(name: str, scheme) -> list:

@@ -230,6 +230,7 @@ of the run recipe are written `run.*` below. Every field and its meaning is in
 | `run.fp32_tol` | | | | | |
 | `run.allow_lossy_chain` | | | | | lowering |
 | `run.lut` (LUT formats) | codebooks | | | lut-a/w/c | codebooks, lut_group |
+| `run.vector` (optional) | softmax, RMSNorm precision | | | | |
 
 `run.fp32_tol` is read by the grading step, not by a model: it is the pass threshold on the error
 against fp32. `array.tileRows/tileColumns` and the `accumulator` widths are in `build_id` but no
