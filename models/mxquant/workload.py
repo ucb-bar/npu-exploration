@@ -76,10 +76,12 @@ def _settings(w: _workloads.Workload, recipe, run) -> dict:
     if recipe is not None:
         d.update(recipe=recipe.name, build_id=recipe.build_id(), format=_scheme.mxq_format(run.operand_fmt),
                  rules=w.rules, rounding_mode=run.rounding, scale_floor=float(run.scale_floor))
-        if _scheme.is_codebook(run.operand_fmt):
+        if _scheme.uses_lut(run):
             d["codebook"] = _scheme.lut_record(run)
         if run.reduce != "hardware":
             d["reduce"] = run.reduce
+        if run.scale != "mxgemmini":
+            d["scale"] = run.scale
     return d
 
 
@@ -117,7 +119,8 @@ def evaluate(workload, recipe, run: _recipe.Run, *, gpus: str | None = None, com
         "recipe": recipe.name, "build_id": recipe.build_id(), "run": run.name, "run_id": run.run_id(),
         "dtype": run.operand_fmt, "format": _scheme.mxq_format(run.operand_fmt),
         "codebook": _scheme.lut_record(run),
-        "rounding_mode": run.rounding, "scale_floor": run.scale_floor, "reduce": run.reduce, "compiled": compiled,
+        "rounding_mode": run.rounding, "scale_floor": run.scale_floor, "reduce": run.reduce, "scale": run.scale,
+        "compiled": compiled,
         "scheme": q["scheme"],
         "layers_quantized": sum(1 for row in q["layers"] if row[4]), "layers_total": len(q["layers"]),
         "seconds": q["seconds"], "gpus": gpus, "mxq_commit": q["mxq_commit"], **environment(),
@@ -131,6 +134,8 @@ def line(m: dict) -> str:
     note = f"  [LUT G={m['codebook']['group']}]" if isinstance(m.get("codebook"), dict) else ""
     if m.get("reduce") not in (None, "hardware"):
         note = f"  reduce {m['reduce']}" + note
+    if m.get("scale") not in (None, "mxgemmini"):
+        note = f"  scale {m['scale']}" + note
     return (f"PPL      {m['perplexity']:.4f}   bf16 {m['bf16_perplexity']:.4f}  ({m['delta']:+.4f})   "
             f"{m.get('workload', m['model_id'].rsplit('/', 1)[-1])} {m['dtype'] if m.get('dtype') else ''}  "
             f"{m['nsamples'] or 'all'}x{m['seqlen']}{'' if m.get('seed', 0) is not None else ' in order'}   "
