@@ -210,11 +210,13 @@ def main() -> int:
     check("this model's per-stage timeline moved under estimate, phases included",
           m["estimate"]["stages"][0]["cycles_predicted"] == 8875 and m["estimate"]["stages"][0]["phases"]["compute"] == 1049
           and "cycles_predicted" not in m["stages"][0] and "phases" not in m["stages"][0])
-    check("what only this model gives stays: m_ops, pe_mode, energy, memory",
-          m["stages"][0]["m_ops"] == 0.26 and m["stages"][0]["pe_mode"] == 8 and m["stages"][0]["energy"]["uj"] == 4.78
-          and m["memory"]["available"] is False)
-    check("energy names the window it was computed on",
-          m["energy"]["basis_cycles"] == 17750 and "estimate" in m["energy"]["basis"])
+    check("what only this model gives stays: m_ops, pe_mode, memory",
+          m["stages"][0]["m_ops"] == 0.26 and m["stages"][0]["pe_mode"] == 8 and m["memory"]["available"] is False)
+    check("perf_model's own energy moves under estimate, per stage too, naming its window",
+          m["estimate"]["energy"]["uj_kernel"] == 9.56 and m["estimate"]["energy"]["basis_cycles"] == 17750
+          and m["estimate"]["stages"][0]["energy"]["uj"] == 4.78 and "energy" not in m["stages"][0])
+    check("without a recipe there is no measured energy and the record says why",
+          m["energy"] is None and "recipe" in m["model"]["measured"]["energy_note"])
     check("the spike counter key is gone; model names both sources",
           "spike_cycles" not in m and set(m["model"]) == {"measured", "estimate"} and m["model"]["estimate"]["workspace_head"] == "d5e82e7")
     check("merging twice is a no-op", merge_measured(copy.deepcopy(m), timing, clock_ns=2.0) == m)
@@ -226,6 +228,34 @@ def main() -> int:
           none["cycles"] is None and none["utilization_pct"] is None and "spike did not run" in none["cycles_source"]
           and none["estimate"]["total_cycles_predicted"] == 17750)
     check("its PERF line says so", line(none).startswith("PERF     no measured cycles"), line(none))
+
+    print("D: energy on the measured window (compose_gemmini at the measured utilization)")
+    if live:
+        from models.ppa.ppa import PpaError, _compose, ppa_args, ppa_root
+        try:
+            ppa_root()
+            raw = run_perf(r, "fp8_e4m3", [{"stage": 0, "m": 64, "k": 64, "n": 64, "out_dtype": "bf16"}], energy=False)
+            t = {"cycles": 3766, "stage_cycles": {"0": 3766}, "summary": {"mesh_busy_cycles": 1024}}   # linear on baseline
+            md = merge_measured(raw, t, clock_ns=2.0, recipe=r, dtype="fp8_e4m3")
+            e = md["energy"]
+            check("energy present, on the measured window", e is not None and e["basis_cycles"] == 3766
+                  and e["utilization_pct"] == 27.2 and "energy_note" not in md["model"]["measured"], str(e)[:120])
+            check("uJ = compose power at 27.2 % utilization x 7.53 us",
+                  abs(e["uj_kernel"] - e["power_mw"] * 3766 * 2.0 / 1e6) < 1e-3, f"{e['uj_kernel']} uJ, {e['power_mw']} mW")
+            want = _compose(ppa_root(), ppa_args(r, "fp8_e4m3", util=1024 / 3766), r, "fp8_e4m3")["pj_per_op"]
+            check("pJ/op over the kernel's ops equals compose's own pJ/op at that utilization (busy = ops / peak)",
+                  abs(e["pj_per_op"] - want) <= 0.01, f"{e['pj_per_op']} vs {want}")
+            check("the call was --system radiance at the measured utilization",
+                  "--system radiance" in e["model"]["args"] and "--util 0.2719" in e["model"]["args"], e["model"]["args"])
+            check("the PERF line carries it", f"{e['uj_kernel']:.2f} uJ ({e['pj_per_op']:.2f} pJ/op)" in line(md), line(md))
+            zero = merge_measured(run_perf(r, "fp8_e4m3", [{"stage": 0, "m": 64, "k": 64, "n": 64, "out_dtype": "bf16"}],
+                                           energy=False),
+                                  {"cycles": 3766, "stage_cycles": {}, "summary": {"mesh_busy_cycles": 0}},
+                                  clock_ns=2.0, recipe=r, dtype="fp8_e4m3")
+            check("no mesh busy cycles: energy None and the record says why",
+                  zero["energy"] is None and "busy" in zero["model"]["measured"]["energy_note"])
+        except PpaError as exc:
+            print(f"  skip  {exc}")
 
     print("fail-soft: bad MX_PPA_ROOT raises PerfError, nothing else")
     old = os.environ.get("MX_PPA_ROOT")
