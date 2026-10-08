@@ -556,6 +556,8 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
                 a_c, a_s, _al = quantize_operand(operand(lhs_ref), side="a", dtype=dtype, lut=lut)
                 b_c, b_s, _bl2 = quantize_operand(b_np, side="b", dtype=dtype, lut=lut)
                 ops = {"a_codes": a_c, "a_scales": a_s, "b_codes": b_c, "b_scales": b_s}
+                if _bl2 is not None:   # a LUT format: the tables go with the codes (a bf16 commit's C book is unused)
+                    ops |= {"a_lut": _al, "b_lut": _bl2, "c_lut": _al}
 
             # A mesh stage commits through the requantizer only when a later stage will consume it in
             # that form; everything else reads back as bf16.
