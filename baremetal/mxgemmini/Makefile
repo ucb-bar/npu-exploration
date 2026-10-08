@@ -32,16 +32,17 @@ KERNELS   := llama_mlp llama_mlp_small llama_mlp_tiny llama_mlp_tiny_t1 llama_ml
              llama_attention_full_dgb \
              llama_qkv_tiny llama_proj_q llama_proj_k llama_proj_v llama_sep_qkv llama_two_mm llama_two_mm_micro \
              llama_layer_full llama_layer_full_native llama_layer_full_native_gh \
-             mx_bench_matmul mx_bench_matmul_m32 mx_bench_matmul_m32_blk \
-             attn_vpu attn_vpu_mid attn_vpu_fa attn_flash attn_flash_mid attn_flash_llama attn_flash_llama_wide attn_flash_llama_causal attn_flash_llama_vb attn_flash_llama_2h attn_flash_llama_vb_fused attn_flash_llama_2h_fused attn_flash_llama_vb_fused_dbg
+             mx_bench_matmul mx_bench_matmul_m32 mx_bench_matmul_m32_blk mx_bench_matmul_m64_proj \
+             attn_vpu attn_vpu_mid attn_vpu_fa attn_flash attn_flash_mid attn_flash_llama attn_flash_llama_wide attn_flash_llama_causal attn_flash_llama_vb attn_flash_llama_2h attn_flash_llama_vb_fused attn_flash_llama_2h_fused attn_flash_llama_vb_fused_dbg attn_flash_layer5 attn_flash_layer5_fused attn_flash_llama7b attn_flash_llama7b_fused mx_fp4_dramloop attn_flash_llama_2h_fused_fp4 attn_flash_llama7b_fused_fp4 llama_mlp_e2e llama_mlp_e2e_fp4 mlp_proj_fp4 \
+             llama_layer_e2e llama_e2e_elemwise
 
 # Kernels whose data is a linked binary blob rather than C initializers, and the blob each uses.
 # See the objcopy rule below for why the basenames matter.
 BLOB_KERNELS := llama_attention_full llama_attention_full_dgb llama_mlp_full llama_layer_full llama_layer_full_native \
-                llama_layer_full_native_gh mx_bench_matmul mx_bench_matmul_m32 mx_bench_matmul_m32_blk llama_model llama_model_l2 \
-                llama_model_m64 llama_model_m64l2 mx_bench
+                llama_layer_full_native_gh mx_bench_matmul mx_bench_matmul_m32 mx_bench_matmul_m32_blk mx_bench_matmul_m64_proj llama_model llama_model_l2 \
+                llama_model_m64 llama_model_m64l2 mx_bench llama_layer_e2e llama_e2e_elemwise llama_mlp_e2e llama_mlp_e2e_fp4 mlp_proj_fp4
 BLOBS        := llama_attn_full llama_mlp_full llama_layer_full llama_model llama_model_l2 \
-                llama_model_m64 llama_model_m64l2 mx_bench
+                llama_model_m64 llama_model_m64l2 mx_bench llama_layer_e2e llama_mlp_fp4 mlp_proj_fp4
 blob_llama_attention_full := llama_attn_full
 blob_llama_attention_full_dgb := llama_attn_full
 blob_llama_mlp_full       := llama_mlp_full
@@ -51,10 +52,16 @@ blob_llama_layer_full_native_gh := llama_layer_full
 blob_mx_bench_matmul     := mx_bench
 blob_mx_bench_matmul_m32 := mx_bench
 blob_mx_bench_matmul_m32_blk := mx_bench
+blob_mx_bench_matmul_m64_proj := mx_bench
 blob_llama_model          := llama_model
 blob_llama_model_l2       := llama_model_l2
 blob_llama_model_m64      := llama_model_m64
 blob_llama_model_m64l2    := llama_model_m64l2
+blob_llama_layer_e2e      := llama_layer_e2e
+blob_llama_e2e_elemwise   := llama_layer_e2e
+blob_llama_mlp_e2e        := llama_layer_e2e
+blob_llama_mlp_e2e_fp4    := llama_mlp_fp4
+blob_mlp_proj_fp4         := mlp_proj_fp4
 blob_of = $(blob_$(1))
 
 # `llama_model_l2` is llama_model.c against a 2-layer data header -- the bring-up build. The layer
@@ -112,9 +119,12 @@ $(foreach k,llama_attention_small llama_attention_tiny llama_attention_tiny_t1 l
 $(foreach d,spike mx_rocket,\
   $(foreach k,llama_layer_full_native llama_layer_full_native_gh,$(eval $(OUT)/$(d)/$(k): $(CURDIR)/src/llama_layer_full.c $(CURDIR)/include/mx_native.h)))
 $(foreach d,spike mx_rocket,\
-  $(foreach k,mx_bench_matmul mx_bench_matmul_m32 mx_bench_matmul_m32_blk,$(eval $(OUT)/$(d)/$(k): $(CURDIR)/src/mx_bench_matmul.c $(CURDIR)/include/mx_native.h $(CURDIR)/data/mx_bench.h)))
+  $(foreach k,mx_bench_matmul mx_bench_matmul_m32 mx_bench_matmul_m32_blk mx_bench_matmul_m64_proj,$(eval $(OUT)/$(d)/$(k): $(CURDIR)/src/mx_bench_matmul.c $(CURDIR)/include/mx_native.h $(CURDIR)/data/mx_bench.h)))
 $(foreach d,spike mx_rocket,$(foreach k,attn_vpu_mid attn_vpu_fa,$(eval $(OUT)/$(d)/$(k): $(CURDIR)/src/attn_vpu.c)))
-$(foreach d,spike mx_rocket,$(foreach k,attn_flash_mid attn_flash_llama attn_flash_llama_wide attn_flash_llama_causal attn_flash_llama_vb attn_flash_llama_2h attn_flash_llama_vb_fused attn_flash_llama_2h_fused attn_flash_llama_vb_fused_dbg,$(eval $(OUT)/$(d)/$(k): $(CURDIR)/src/attn_flash.c)))
+$(foreach d,spike mx_rocket,$(foreach k,attn_flash_mid attn_flash_llama attn_flash_llama_wide attn_flash_llama_causal attn_flash_llama_vb attn_flash_llama_2h attn_flash_llama_vb_fused attn_flash_llama_2h_fused attn_flash_llama_vb_fused_dbg attn_flash_layer5 attn_flash_layer5_fused attn_flash_llama7b attn_flash_llama7b_fused,$(eval $(OUT)/$(d)/$(k): $(CURDIR)/src/attn_flash.c)))
+$(foreach d,spike mx_rocket,$(eval $(OUT)/$(d)/attn_flash_llama7b_fused: $(CURDIR)/src/attn_flash_llama7b.c))
+$(foreach d,spike mx_rocket,$(eval $(OUT)/$(d)/llama_mlp_e2e_fp4: $(CURDIR)/src/llama_mlp_e2e.c $(CURDIR)/include/mx_native.h))
+$(foreach d,spike mx_rocket,$(foreach k,llama_layer_e2e llama_e2e_elemwise,$(eval $(OUT)/$(d)/$(k): $(CURDIR)/src/attn_flash.c $(CURDIR)/include/mx_native.h $(CURDIR)/src/llama_layer_e2e.c)))
 $(foreach k,llama_mlp_small llama_mlp_tiny llama_mlp_tiny_t1 llama_mlp_tiny_db llama_mlp_tiny_native llama_mlp_small_native llama_mlp_tiny_native_ua llama_mlp_native,\
   $(eval $(OUT)/spike/$(k) $(OUT)/mx_rocket/$(k): $(CURDIR)/src/llama_mlp.c))
 

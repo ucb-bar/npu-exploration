@@ -21,8 +21,12 @@
 #ifndef BENCH_M
 #define BENCH_M 128
 #endif
-#define BENCH_K MXB_K
+#ifndef BENCH_K
+#define BENCH_K MXB_K   // a smaller K / N runs the leading sub-matrix (A, B and scale pitches stay the blob's)
+#endif
+#ifndef BENCH_N
 #define BENCH_N MXB_N
+#endif
 typedef char bench_m_fits[(BENCH_M <= MXB_MMAX && BENCH_M % DIM == 0) ? 1 : -1];
 
 static uint16_t C[BENCH_M][BENCH_N] __attribute__((aligned(64)));
@@ -84,6 +88,7 @@ int main() {
 
   // ---- pass 0: load-only DMA ceiling on this platform: stream the 4 MB row-major B sequentially with
   // 64 B-row mvins (1 KB each, 4 tiles) into a rotating 8192-row spad window, no compute ----
+#ifndef BENCH_SKIP_STREAM   // (~500k cycles: skipped by the waveform-sized variants)
   {
     const uint64_t bytes = (uint64_t) MXB_K * MXB_N;
     gemmini_extended3_config_ld(64, MVIN_SCALE_IDENTITY, false, 0);
@@ -97,6 +102,7 @@ int main() {
            (unsigned long) sc, (unsigned long) (bytes / sc), (unsigned long) (bytes * 100 / sc % 100));
     ld_counters_report("stream", sc);
   }
+#endif
 
   counter_reset();
   counter_snapshot_reset();
@@ -131,6 +137,7 @@ int main() {
   printf(" idle=%ld\n", (long) cyc - (long) sum);
 
   // ---- pass 2: the same matmul again (data >> L2, still DRAM-cold) with the load/DMA counters ----
+#ifndef BENCH_ONE_PASS
   ld_counters_start();
   t0 = read_cycles();
   if (mxn_matmul_ex(A, MXB_K, B, MXB_N, &C[0][0], BENCH_N, A_sc, MXB_MMAX, B_sc, MXB_N,
@@ -140,6 +147,7 @@ int main() {
   printf("PERF pass2 cycles=%lu util=%lu.%lu%%\n", (unsigned long) cyc2,
          (unsigned long) (ideal * 100 / cyc2), (unsigned long) (ideal * 1000 / cyc2 % 10));
   ld_counters_report("matmul", cyc2);
+#endif
 
   uint64_t csum = 0, cx = 0;
   for (int m = 0; m < BENCH_M; m++)

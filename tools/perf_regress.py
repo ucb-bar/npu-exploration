@@ -24,7 +24,10 @@ CFG_MX = "chipyard.harness.TestHarness.MxGemminiRocketConfig"
 # (name, elf, vcs log, how to read the numbers). Only tests whose ELF matches the VCS run's .dump.
 DRAMLOOPS = ["dramloop", "dramloop_nc", "dramloop_kt", "dramloop_nc4", "dramloop_nc_2d", "dramloop_ls",
              "dramloop_ls4", "dramloop_nc_wait"]
-TESTS = [("128x128 (spad loop)", ISA / "matmul_tiled_fp8_128x128-baremetal", "perf",
+# The 128x128 VCS run is from the pre-09-28 256-bit system-bus build (a TLWidthWidget splits each Put in two;
+# perf_model_plan.md 13.6.1): modelled with that build's bus width.
+OLD_BUS = {"mem.bus_bytes": "32"}
+TESTS = [("128x128 (spad loop, old 256-bit bus build)", ISA / "matmul_tiled_fp8_128x128-baremetal", "perf",
           "matmul_tiled_fp8_128x128-baremetal", "binary differs from the VCS run: mvout VCS-equiv ~4560")]
 TESTS += [(n, ISA / f"matmul_tiled_fp8_128x128_{n}-baremetal", "perf", f"matmul_tiled_fp8_128x128_{n}-baremetal", "")
           for n in DRAMLOOPS]
@@ -32,6 +35,33 @@ TESTS += [("mx_mem_bw", ISA / "mx_mem_bw-baremetal", "membw", "mx_mem_bw-baremet
 TESTS += [("llama_mlp_tiny_db", KER / "llama_mlp_tiny_db", "phase", "llama_mlp_tiny_db", "host: cpi 1 placeholder"),
           ("llama_mlp_small", KER / "llama_mlp_small", "mesh", "llama_mlp_small", "host: cpi 1 placeholder")]
 REPLAY = [("llama_mlp_tiny_native_ua (replay)", KER / "llama_mlp_tiny_native_ua", "llama_mlp_tiny_native_ua")]
+# VPU config (MxE4M3VpuGemminiRocketConfig, preset e4m3_vpu): every "PERF ... <n> cycles" line, in order.
+CFG_VPU = "chipyard.harness.TestHarness.MxE4M3VpuGemminiRocketConfig"
+VPU_TESTS = [("chain_pipelined", ISA / "chain_pipelined-baremetal", "chain_pipelined-baremetal"),
+             ("attn_vpu_fa", KER / "attn_vpu_fa", "attn_vpu_fa"),
+             ("attn_flash_llama7b_fused", KER / "attn_flash_llama7b_fused", "attn_flash_llama7b_fused"),
+             ("attn_flash_llama_vb_fused [VALIDATION]", KER / "attn_flash_llama_vb_fused", "attn_flash_llama_vb_fused"),
+             ("attn_flash_llama_2h", KER / "attn_flash_llama_2h", "attn_flash_llama_2h"),
+             ("attn_flash_llama_2h_fused", KER / "attn_flash_llama_2h_fused", "attn_flash_llama_2h_fused"),
+             ("mx_bench_matmul_m64_proj", KER / "mx_bench_matmul_m64_proj", "mx_bench_matmul_m64_proj"),
+             ("llama_e2e_elemwise", KER / "llama_e2e_elemwise", "llama_e2e_elemwise")]
+
+
+def same_binary(elf, dump):
+    """The ELF is the one VCS ran: its objdump -D equals the run's .dump (minus the path line)."""
+    if not dump.exists():
+        return None
+    a = subprocess.run(["riscv64-unknown-elf-objdump", "-D", str(elf)], capture_output=True, text=True).stdout
+    return a.splitlines()[2:] == dump.read_text(errors="replace").splitlines()[2:]
+
+
+def perf_cycles(text):
+    out = []
+    for ln in text.splitlines():
+        m = re.match(r"PERF\s+(.*?)\s(\d+) cycles", ln)
+        if m:
+            out.append((re.sub(r"\s+", " ", m.group(1))[:28], int(m.group(2))))
+    return out
 
 
 def run(so, elf, mode, extra_env):
@@ -91,7 +121,11 @@ def main():
         if a.only and a.only not in name:
             continue
         vcs = numbers("mesh" if kind == "mesh" else kind, (VCS / CFG_MX / f"{log}.log").read_text(errors="replace"))
-        mod = numbers("mesh" if kind == "mesh" else kind, run(a.so, elf, "perf", extra))
+        env = extra
+        if "old 256-bit" in name:
+            sets = dict(kv.split("=") for kv in a.set.split(",") if kv)
+            env = {"GEMMINI_PERF_SET": ",".join(f"{k}={v}" for k, v in {**OLD_BUS, **sets}.items())}
+        mod = numbers("mesh" if kind == "mesh" else kind, run(a.so, elf, "perf", env))
         for k, v in vcs.items():
             if k in mod:
                 rows.append((name, k, v, mod[k], note))
@@ -108,10 +142,26 @@ def main():
             if d < -100000:
                 continue   # a fence the RTL took after Gemmini was long idle
             rows.append((name, f"fence {i} (model idle - rtl retire)", r, m, "cycles, not a phase"))
+    for name, elf, log in VPU_TESTS:
+        if a.only and a.only not in name:
+            continue
+        if not elf.exists():
+            continue
+        match = same_binary(elf, VCS / CFG_VPU / f"{log}.dump")
+        logf = VCS / CFG_VPU / f"{log}.log"
+        if not logf.exists():
+            continue
+        if match is False:
+            rows.append((name, "(ELF rebuilt since the VCS run)", 0, 0, "binary differs: not compared"))
+            continue
+        vcs = perf_cycles(logf.read_text(errors="replace"))
+        mod = perf_cycles(run(a.so, elf, "perf", dict(extra, GEMMINI_PERF_CONFIG="e4m3_vpu")))
+        for (k, v), (_, m) in zip(vcs, mod):
+            rows.append((name, k, v, m, ""))
     w = max(len(r[0]) for r in rows) if rows else 10
     print(f"{'test':{w}}  {'phase':28} {'VCS':>9} {'model':>9}   error")
     for name, k, v, m, note in rows:
-        err = f"{m - v:+d} cyc" if note == "cycles, not a phase" else pct(m, v)
+        err = f"{m - v:+d} cyc" if note == "cycles, not a phase" else ("   --" if not v else pct(m, v))
         print(f"{name:{w}}  {k:28} {v:9d} {m:9d}  {err}" + (f"   [{note}]" if note and note != "cycles, not a phase" else ""))
 
 

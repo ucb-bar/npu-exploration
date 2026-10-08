@@ -22,6 +22,16 @@ their queries as extra rows: Sq = sq x heads (rows h*sq.. are head h). Softmax i
 
     ../../../.venv/bin/python3 gen_attn_vpu.py --capture ../../../out/layer_capture/attn_qkv_layer5_h{0,1}_s2112.npz \
         --sq 64 --sk 2048 --tag _llama_2h --no-s-golden
+--layer TEMPLATE: a whole layer's attention as GQA-packed passes. TEMPLATE has {h} for the query head; heads that
+share a kv head are packed --pack at a time (consecutive heads of a group), each pass Sq = sq x pack. One header
+holds every pass's Q, each kv head's K/V once, the fp64-attention O reference per pass, and the pass -> kv map.
+
+    ../../../.venv/bin/python3 gen_attn_vpu.py --layer ../../../out/layer_capture/attn_qkv_layer5_h{h}_s2112.npz \
+        --heads 0-31 --pack 2 --sq 64 --sk 2048 --tag _layer5_p2
+--scale-in-q: Q is pre-scaled by 1/sqrt(d) (the scale folded into Wq), so a d that is not a power of 4 (Llama-7B's 128)
+needs neither an E8M0 fold nor a VPU multiply.
+
+    ../../../.venv/bin/python3 gen_attn_vpu.py --sq 64 --sk 2048 --d 128 --scale-in-q --tag _llama7b --no-s-golden
 --causal: Q = the last sq of the sk key tokens (chunked prefill: the chunk attends to the cache and to itself), with
 the causal mask (key position > query position -> -inf) on the last sq keys; emits MASK_BF16 [sq][sq] (0 / -inf).
 
@@ -64,7 +74,14 @@ def main() -> int:
                     help="npz from capture_attn_qkv.py (real Q/K/V); several = query heads of one kv head, packed")
     ap.add_argument("--no-s-golden", action="store_true", help="omit S_GOLDEN (dense-kernel check only)")
     ap.add_argument("--causal", action="store_true", help="queries are the last sq keys; causal mask on them")
+    ap.add_argument("--scale-in-q", action="store_true",
+                    help="Q pre-scaled by 1/sqrt(d) (as with the scale folded into Wq): for d not a power of 4")
+    ap.add_argument("--layer", default=None, help="capture path template with {h}: whole-layer multi-pass header")
+    ap.add_argument("--heads", default="0-31", help="--layer: query heads, 'a-b' or comma list")
+    ap.add_argument("--pack", type=int, default=2, help="--layer: query heads per pass (sharing a kv head)")
     a = ap.parse_args()
+    if a.layer is not None:
+        return main_layer(a)
     Sq, Sk, d = a.sq, a.sk, a.d
     src = f"random N(0,1), seed {a.seed}"
     H = 1
@@ -93,11 +110,14 @@ def main() -> int:
         K = rng.standard_normal((Sk, d)).astype(np.float32)
         V = rng.standard_normal((Sk, d)).astype(np.float32)
 
+    if a.scale_in_q:
+        Q = (Q / np.sqrt(d)).astype(np.float32)
+        src += ", Q pre-scaled by 1/sqrt(d)"
     q_codes, q_scales, q_P = G.quantize(Q, axis="row", f=FMT)                         # A [Sq][d], [Sq][d/32]
     kt_codes, kt_scales, kt_P = G.quantize(np.ascontiguousarray(K.T), axis="col", f=FMT)  # B [d][Sk], [d/32][Sk]
     v_codes, v_scales, v_P = G.quantize(V, axis="col", f=FMT)                         # B [Sk][d], [Sk/32][d]
     S = L.mesh(q_P, q_scales, kt_P, kt_scales)                                        # exact BF16 values
-    sc = 1.0 / np.sqrt(d)
+    sc = 1.0 if a.scale_in_q else 1.0 / np.sqrt(d)
     # causal: query i sits at position Sk - Sq + i and sees keys <= its position (mask adds -inf beyond)
     neg = np.zeros((Sq, Sk))
     if a.causal:
@@ -133,6 +153,7 @@ def main() -> int:
 #define ATTN_D  {d}
 #define ATTN_CAUSAL {int(a.causal)}
 #define ATTN_HEADS  {H}   // packed query heads sharing K/V (rows h*ATTN_SQ/ATTN_HEADS ..)
+#define ATTN_SCALE_IN_Q {int(a.scale_in_q)}   // 1: Q already carries 1/sqrt(d); no scaling in the kernel
 
 static const uint8_t Q_IN[ATTN_SQ][ATTN_D] __attribute__((aligned(64))) = {{
 {r(q_codes, 2)}
@@ -172,6 +193,98 @@ static const uint32_t O_REF_Q_F32[ATTN_SQ][ATTN_D] = {{
 #endif
 """)
     print(f"  wrote {path}")
+    return 0
+
+
+def main_layer(a) -> int:
+    """Multi-pass header for a whole layer (non-causal): passes of a.pack GQA heads, K/V once per kv head."""
+    assert not a.causal, "--layer: non-causal only"
+    heads = (list(range(int(a.heads.split("-")[0]), int(a.heads.split("-")[1]) + 1)) if "-" in a.heads
+             else [int(x) for x in a.heads.split(",")])
+    zs = {h: np.load(a.layer.format(h=h)) for h in heads}
+    kv_of = {h: int(zs[h]["kv_head"]) for h in heads}
+    kvs = sorted(set(kv_of.values()))
+    passes = []                                    # (kv head, [query heads])
+    for kv in kvs:
+        hs = [h for h in heads if kv_of[h] == kv]
+        assert len(hs) % a.pack == 0, f"kv head {kv}: {len(hs)} heads not a multiple of --pack {a.pack}"
+        passes += [(kv, hs[i:i + a.pack]) for i in range(0, len(hs), a.pack)]
+    z0 = zs[heads[0]]
+    T = int(z0["seq"]); d = int(z0["Q"].shape[1]); sq, Sk = a.sq, a.sk
+    assert sq + Sk <= T and sq % 16 == 0 and Sk % 32 == 0 and d % 32 == 0
+    q0 = T - sq
+    Sq = sq * a.pack
+    sc = 1.0 / np.sqrt(d)
+    kvi = {kv: i for i, kv in enumerate(kvs)}
+    kt_c, kt_s, v_c, v_s, kd, vd = {}, {}, {}, {}, {}, {}
+    for kv in kvs:
+        src = next(zs[h] for h in heads if kv_of[h] == kv)
+        for h in heads:
+            if kv_of[h] == kv:
+                assert np.array_equal(zs[h]["K"], src["K"]) and np.array_equal(zs[h]["V"], src["V"]), "kv mismatch"
+        K = np.ascontiguousarray(src["K"][:Sk]); V = np.ascontiguousarray(src["V"][:Sk])
+        kt_c[kv], kt_s[kv], kt_P = G.quantize(np.ascontiguousarray(K.T), axis="col", f=FMT)
+        v_c[kv], v_s[kv], v_P = G.quantize(V, axis="col", f=FMT)
+        kd[kv] = deq(kt_P, kt_s[kv], "col").T; vd[kv] = deq(v_P, v_s[kv], "col")
+    q_c, q_s, o_ref = [], [], []
+    for kv, hs in passes:
+        Q = np.ascontiguousarray(np.vstack([zs[h]["Q"][q0:q0 + sq] for h in hs]))
+        qc, qs, qP = G.quantize(Q, axis="row", f=FMT)
+        q_c.append(qc); q_s.append(qs)
+        o_ref.append(softmax((deq(qP, qs, "row") @ kd[kv].T) * sc) @ vd[kv])
+    r = G._rows
+    nest = lambda arrs, w: ",\n".join("  {\n" + r(x, w) + "\n  }" for x in arrs)
+    f32 = lambda x: ",\n".join("    { " + ", ".join("0x%08x" % int(v) for v in row) + " }"
+                               for row in np.ascontiguousarray(x, dtype=np.float32).view(np.uint32))
+    nestf = lambda arrs: ",\n".join("  {\n" + f32(x) + "\n  }" for x in arrs)
+    P = len(passes); NKV = len(kvs)
+    path = DATA / f"attn_vpu{a.tag}.h"
+    guard = f"INCLUDE_ATTN_VPU{a.tag.upper()}_H"
+    with open(path, "w") as fh:
+        fh.write(f"""// GENERATED by gen/gen_attn_vpu.py --layer --heads {a.heads} --pack {a.pack} --sq {sq} --sk {Sk} -- do not edit.
+// Whole-layer attention for src/attn_flash_layer.c: TinyLlama layer {int(z0['layer'])}, {len(heads)} query heads over {NKV} kv
+// heads, packed {a.pack} per pass ({P} passes). Queries = tokens {q0}..{T - 1}, keys/values = tokens 0..{Sk - 1}, non-causal.
+#ifndef {guard}
+#define {guard}
+
+#include <stdint.h>
+
+#define ATTN_SQ {Sq}
+#define ATTN_SK {Sk}
+#define ATTN_D  {d}
+#define ATTN_CAUSAL 0
+#define ATTN_HEADS  {a.pack}
+#define ATTN_NPASS  {P}
+#define ATTN_NKV    {NKV}
+
+static const uint8_t LPASS_KV[ATTN_NPASS] = {{ {", ".join(str(kvi[kv]) for kv, _ in passes)} }};
+static const uint8_t LPASS_HEAD0[ATTN_NPASS] = {{ {", ".join(str(hs[0]) for _, hs in passes)} }};
+static const uint8_t LQ_IN[ATTN_NPASS][ATTN_SQ][ATTN_D] __attribute__((aligned(64))) = {{
+{nest(q_c, 2)}
+}};
+static const uint8_t LQ_SCALES[ATTN_NPASS][ATTN_D / 32][ATTN_SQ] __attribute__((aligned(64))) = {{
+{nest([x.T for x in q_s], 2)}
+}};
+static const uint8_t LKT_IN[ATTN_NKV][ATTN_D][ATTN_SK] __attribute__((aligned(64))) = {{
+{nest([kt_c[kv] for kv in kvs], 2)}
+}};
+static const uint8_t LKT_SCALES[ATTN_NKV][ATTN_D / 32][ATTN_SK] __attribute__((aligned(64))) = {{
+{nest([kt_s[kv] for kv in kvs], 2)}
+}};
+static const uint8_t LV_IN[ATTN_NKV][ATTN_SK][ATTN_D] __attribute__((aligned(64))) = {{
+{nest([v_c[kv] for kv in kvs], 2)}
+}};
+static const uint8_t LV_SCALES[ATTN_NKV][ATTN_SK / 32][ATTN_D] __attribute__((aligned(64))) = {{
+{nest([v_s[kv] for kv in kvs], 2)}
+}};
+// fp64 attention on the dequantized inputs, per pass (rows h*{sq}.. = the pass's h-th head)
+static const uint32_t LO_REF_F_F32[ATTN_NPASS][ATTN_SQ][ATTN_D] = {{
+{nestf(o_ref)}
+}};
+
+#endif
+""")
+    print(f"  {len(heads)} heads, {NKV} kv heads, {P} passes of Sq {Sq}: wrote {path}")
     return 0
 
 

@@ -6,6 +6,7 @@ offline, CPU). Layer --layer's own input RMSNorm, q/k/v projections and rotary e
 and V (GQA kv head = head // 8) at their true positions, saved as fp32 [seq][64] arrays.
 
     HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 ../../../.venv/bin/python3 capture_attn_qkv.py --seq 2112
+    ... capture_attn_qkv.py --seq 2112 --head all      # every query head of the layer from one forward pass
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ def main() -> int:
     ap.add_argument("--model-id", default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
     ap.add_argument("--seq", type=int, default=2112)
     ap.add_argument("--layer", type=int, default=5)
-    ap.add_argument("--head", type=int, default=0)
+    ap.add_argument("--head", nargs="+", default=["0"], help="query head(s), or 'all'")
     a = ap.parse_args()
     torch.set_grad_enabled(False)
     tok = AutoTokenizer.from_pretrained(a.model_id)
@@ -39,11 +40,11 @@ def main() -> int:
     model.eval()
     cfg = model.config
     hd = cfg.hidden_size // cfg.num_attention_heads
-    kvh = a.head // (cfg.num_attention_heads // cfg.num_key_value_heads)
+    heads = list(range(cfg.num_attention_heads)) if a.head == ["all"] else [int(x) for x in a.head]
     ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
     ids = tok("\n\n".join(ds["text"]), return_tensors="pt").input_ids[:, :a.seq]
     assert ids.shape[1] == a.seq
-    print(f"model {a.model_id}: layer {a.layer}, head {a.head} (kv head {kvh}), head_dim {hd}, {a.seq} tokens")
+    print(f"model {a.model_id}: layer {a.layer}, heads {heads}, head_dim {hd}, {a.seq} tokens")
     out = model(ids, output_hidden_states=True)
     h = out.hidden_states[a.layer]                       # input to decoder layer a.layer
     layer = model.model.layers[a.layer]
@@ -55,11 +56,13 @@ def main() -> int:
     pos = torch.arange(T)[None]
     cos, sin = model.model.rotary_emb(v, pos)
     q, k = apply_rotary_pos_emb(q, k, cos, sin)
-    Q, K, V = (x[0, i].numpy().astype(np.float32) for x, i in ((q, a.head), (k, kvh), (v, kvh)))
     OUT.mkdir(parents=True, exist_ok=True)
-    path = OUT / f"attn_qkv_layer{a.layer}_h{a.head}_s{T}.npz"
-    np.savez(path, Q=Q, K=K, V=V, layer=a.layer, head=a.head, kv_head=kvh, seq=T)
-    print(f"  |Q| {np.abs(Q).max():.3g}  |K| {np.abs(K).max():.3g}  |V| {np.abs(V).max():.3g}  -> {path}")
+    for hh in heads:
+        kvh = hh // (cfg.num_attention_heads // cfg.num_key_value_heads)
+        Q, K, V = (x[0, i].numpy().astype(np.float32) for x, i in ((q, hh), (k, kvh), (v, kvh)))
+        path = OUT / f"attn_qkv_layer{a.layer}_h{hh}_s{T}.npz"
+        np.savez(path, Q=Q, K=K, V=V, layer=a.layer, head=hh, kv_head=kvh, seq=T)
+        print(f"  head {hh} (kv {kvh}): |Q| {np.abs(Q).max():.3g}  |K| {np.abs(K).max():.3g}  |V| {np.abs(V).max():.3g}  -> {path}")
     return 0
 
 

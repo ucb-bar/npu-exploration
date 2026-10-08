@@ -426,3 +426,289 @@ stalls now appear (last tile 9977 vs RTL 9926); replay −2.6 %, the rest is the
 
 **Open (small): L2 write throughput.** RTL Put spacing at the end of dramloop is ~7 cycles (acks slow down as the L2
 write path fills: p90 242 vs mean 115); the model's fixed ack latency gives bursts. Worth ~1-2 % here.
+
+### 13.6 VPU config (e4m3_vpu preset, 2026-10-05) — in progress
+Built: RS vec queue out of order with the RTL deps (row conflicts, shared read banks, SR after SR, SR after a
+quantized store); VPU timing (EXPSUM dst2 + 1 bubble/row, latency 5, unit busy until drained, 2 units);
+LoopMatmul vec_bypass (`vec_pass` / `cfg_pass` / `ld_pass`, `model.cc` `may_pass`). `check_stuck()` prints a
+deadlock diagnostic at fence/finish.
+
+Bug found: a CONFIG_SCALE_MEM that bypassed the loops bumped the loops' ex-outstanding count (`note_passed_ex`,
+RTL :1440-1446) but its RS entry was untagged, so it never gave the slot back. After 16 passes the ex throttle
+closed forever -> SPAD_REQUANT stuck at the front-end head, model ran 16/32 loops of `attn_flash_llama_2h`
+(and reported an impossible 130% util). Fix: tag the passed command `LC_EX` (`passing_` flag in `model_t`).
+
+Exact-binary results after the fix (perf mode, model vs VCS):
+| test | phase | VCS | model | err |
+|---|---|---|---|---|
+| attn_flash_llama_2h | pipelined | 184258 | 183736 | -0.3% |
+| attn_flash_llama_2h_fused | pipelined | 156357 | 156677 | +0.2% |
+| attn_flash_llama_vb_fused | pipelined | 82341 | 82261 | -0.1% |
+| chain_pipelined | fenced / program / pipelined | 6470 / 5851 / 5285 | 6311 / 5027 / 4985 | -2.5 / -14.1 / -5.7% |
+| attn_vpu_fa | attn_vpu | 47510 | 43252 | -9.0% |
+| dramloop_relu | loops / total | 10793 / 11186 | 10586 / 10801 | -1.9 / -3.4% |
+Open: chain_pipelined `program` and attn_vpu_fa (both short, host-heavy — check host share before tuning);
+dramloop_relu `scales` 2 vs 55 (cold scale fetch, same open item as mx_mem_bw scale_cold).
+Validation (`attn_flash_llama_vb`): no matching binary yet — the ELF was rebuilt after the VCS run.
+
+#### 13.6.1 Host vs Gemmini share (replay), and a bus-width finding (2026-10-05)
+* Replay (RTL commit-trace host timing): **attn_vpu_fa** Gemmini idles within +452 cycles of the RTL (~1%) — its
+  -9% is the deferred host model. **chain_pipelined**: a constant ~+222 per fenced phase, from `check()`'s 4 KB of
+  16 B-row spad mvouts (256 PutPartials).
+* **The FSDBs come from two system-bus builds.** `perf_bus_width.py` (spad.widget present = a TLWidthWidget splits
+  Gemmini's 64 B DMA beats for a narrower bus): every MxGemminiRocketConfig FSDB up to `llama_mlp_tiny` (09-28 11:19),
+  incl. **`matmul_tiled_fp8_128x128` (the 13.1 write-path calibration)**, has it; from `mx_mem_bw` (09-28 14:27) on
+  (all dramloops, MLP native/db/small, attention, mx_bench) and the VPU config: none (512-bit, current RTL).
+* So 13.1's "L2 takes a Put every 2nd cycle" (`mem.put_cycles = 2`) is the old build's width adapter (two 32 B beats
+  per Put; `a_ready` at `spad.auto_id_out` is always 1). On the 512-bit build the bus accepts a PutPartial every cycle:
+  - chain_pipelined check (L2-warm 4 KB buffer): 256 Puts in 306 cycles, a_ready never low, ack mean 30.
+  - mx_mem_bw mvout_16B (cold lines): 1024 Puts at 2.7 cyc/Put, a_ready never low, ack ~85 → bound by the 32 in
+    flight / ack latency, not by the bus.
+  Scripts: `perf_put_line_gap.py`, `perf_bus_width.py`, `perf_put_bursts.py` (waveform-debug/mxgemmini_debug_scripts).
+
+#### 13.6.2 Write path re-fit on the 512-bit build (user-approved step, 2026-10-05)
+Done:
+1. `mem.bus_bytes` (64; 32 = the pre-09-28 MX build) replaces `mem.put_cycles` / `mem.full_put_cycles`: a Put is
+   always a line-sized TileLink message (DMA.scala:426-430: with 64 B beats the only write size is 64 B, PutFull iff
+   the mask covers the line), so it takes line / bus_bytes bus cycles.
+2. Partial Put ack: `mem.write_ack_latency` 46 → 29 (chain_pipelined, L2-warm). A partial Put to a line the L2 lacks
+   now waits for the line's fill (as a read miss does). New `mem.write_fill_cycles = 11`: the L2 starts a
+   partial-write fill every 11.0 cycles (mx_mem_bw mvout_16B FSDB, L2 DRAM side: 257 AcquireBlocks, 2.8 outstanding,
+   27-33 cycles each) vs 8 for a read miss.
+3. `perf_regress.py`: the 128x128 row runs with the old build's bus (`mem.bus_bytes=32, mem.write_ack_latency=46`).
+4. Bug found on the way: **StC chunk geometry**. RTL (LoopMatmul.scala:573-577, 714-720): a chunk is mbl/2 j tiles
+   (32 BF16 cols = whole 64 B lines), and a j group of gb tiles stores gb·numChunks/4 chunks (≥1). The model always
+   cut a group into 2 halves, so a 2-tile group (dramloop_nc4 / ls4: J = 2 per loop) became 2 chunks of 32 B partial
+   Puts (1024 Puts + 512 write fills) where the RTL sends 512 whole-line PutFulls. Fixed (`stc_tiles/stc_chunks/
+   stc_per_i` in loop_matmul.h).
+
+| test / phase | VCS | before | after |
+|---|---|---|---|
+| mx_mem_bw mvout_16B | 2917 | 2132 (-26.9%) | 2900 (-0.6%) |
+| chain_pipelined check() fences (replay) | — | +222 each | +54 each (+0.6%) |
+| 128x128 total (old-bus row) | 21559 | — | 21494 (-0.3%) |
+| dramloop_nc4 loops | 10727 | +2.2% | 11298 (+5.3%) |
+| dramloop_ls4 loops | 10900 | +0.5% | 11477 (+5.3%) |
+| attn_flash_llama_2h / 2h_fused / vb_fused | 184258 / 156357 / 82341 | -0.3 / +0.2 / -0.1% | -0.3 / +0.2 / -0.1% |
+Other rows unchanged.
+
+nc4 / ls4 were right for the wrong reasons before (wrong chunking hid behind cheap partial Puts). What is left:
+the **PutFull ack is a fixed 115** (dramloop mean), but in nc4 the RTL's PutFull acks are bimodal (bursts: median
+12-62, mean 81-152), and with 32 Puts in flight a flat 115 makes the store too slow. Candidate mechanism (not yet
+verified): the L2's MSHRs are shared by read misses, write fills and PutFull misses, so a PutFull acks fast when
+the L2 is idle and waits behind load fills otherwise; it would also explain the read-miss (~4 outstanding) and
+write-fill (~2.8 outstanding) rates as one limit instead of two fitted slot lengths.
+
+#### 13.6.3 L2 / probe model (user-approved "MSHR" step, 2026-10-06)
+Parameters are now tagged in `config.h`: **[knob]** = a hardware parameter (bus width, L1 geometry/replacement,
+...), **[measured]** = a latency/rate read off an FSDB for behaviour not modelled structurally, **[approximation]**.
+Findings (scripts: `perf_line_timeline.py` [SLOW=, PROBESTATS=], `perf_put_bursts.py`, `perf_tl_latency.py`):
+* **MSHR hypothesis rejected**: the L2 has 42 MSHRs (`ListBuffer_QueuedRequest_q126_e42`; 2 + memCycles 40 /
+  blockBeats 1) -- never the limit. Cold reads run 31 fills deep at the DRAM side (DRAM-bandwidth-bound, 8 cyc/line:
+  the model's existing mechanism is right). A "shared L2 data array" (fill 8 + 1/access) was also tried and rejected
+  (A_cold_64B +11%).
+* **Same-line Puts serialize**: warm line (chain FSDB) acks +22/+30/+38/+46 -> `l2_put_serial_cycles 8`,
+  `write_ack_latency 22`. After a write-allocate fill the spacing is ~16 (noisy) -> `l2_put_serial_filled_cycles`
+  [measured, mechanism unexplained].
+* **The slow PutFull acks are L1 probes** (dramloop FSDB): 305 of 512 C lines are probed out of the CPU's L1
+  (ProbeAckData: the CPU memset C_hw), and all 295 slow acks are probed lines. Probes issue one per 7 cycles
+  (292/304 gaps), probe -> ProbeAckData 19 (301/301), -> Put ack +7; unprobed PutFull acks in 10. New params
+  `probe_issue_latency 5, probe_cycles 7 (serial L1 port), probe_latency 19, probe_put_ack_latency 7,
+  full_write_ack_latency 10` (was 115 = the probe-inflated mean); placeholders `probe_cycles 20 / probe_bus 2` gone.
+* **CPU L1**: WithNHugeCores = 64 sets x 8 ways (32 KB, was 16 KB fully-assoc), random replacement
+  (`host_l1_ways`, `host_l1_random`). Approximation per user ("the cache may be approximate"): the L1 starts full of
+  unseen lines (`host_l1_start_full`) -> dramloop 331 probes vs RTL 305. CPU-load tracking was tried (no effect on
+  this, removed).
+* **Bug fixed: the CPU-store tracer attached on the first RoCC instruction** (Spike registers `--extension` after
+  the processor reset, so `extension_t::reset(processor_t&)` never reached us) and missed every store before it
+  (e.g. dramloop's `memset(C_hw)`). Now attached from `get_instructions(processor)` via
+  `gemmini_perf_t::on_register` (one line in gemmini.cc). func/both outputs unchanged (chain_pipelined, dramloop).
+
+| test / phase | VCS | 13.6.2 | now |
+|---|---|---|---|
+| dramloop compute | 11899 | -4.2% | -0.4% |
+| dramloop_nc / kt / nc_2d / ls / nc_wait loops | | -1.9 / -2.2 / -1.6 / -0.6 / -0.7% | +0.0 / -1.8 / +0.2 / +1.2 / +1.2% |
+| dramloop_nc4 / ls4 loops | 10727 / 10900 | +5.3 / +5.3% | +5.8 / +5.8% |
+| mx_mem_bw mvout_16B | 2917 | -0.6% (fitted write_fill_cycles) | -26.0% (open: cold partial-write latency) |
+| llama_mlp_tiny_native_ua fence 1 / 2 (replay) | | -147 / +1 cyc | -258 / -109 cyc |
+| attn_flash_llama_2h / 2h_fused / vb_fused | | -0.3 / +0.2 / -0.1% | -0.8 / -0.5 / -0.7% |
+Open: nc4/ls4 +5.8% (store side, 4 small loops), cold partial-write path (mvout_16B; RTL's first ack after a
+fill is later under load, 45-91), scale_cold / B_cold_16B (unchanged).
+
+### 13.7 Fixing the remaining kernels (user: "lets try to fix these kernels", 2026-10-06)
+* **chain_pipelined**: replay (RTL host timing) puts Gemmini's end of `program` at −4 and `pipelined` at −7 cycles,
+  `fenced` +125 (+1.9 %). The perf-mode −14.1 / −5.7 % is the deferred host model. Individual fenced stages are
+  ±100 cycles (requant +7 %, the small loop_ws_spad matmul +14..29 %).
+* **dramloop_nc4 / ls4 (+5.8 % → −1.7 / −1.6 %)** — RTL-exact loop-store RS range. Per-loop mesh: RTL 16 cyc/tile
+  steady, model 4 bubbles of 82 at tiles 120-123 of every loop (store ↔ preload ping-pong). RTL RS stream
+  (`perf_rs_trace.py`) shows the same packed acc layout (preload C = i·16 + j·4) and the store allocated before the
+  next preload, yet no stall: LoopMatmulStC (`LoopMatmul.scala:602-611`) gives every chunk of (i, j-group) the group's
+  acc address and packed cols = tiles·DIM/4 ≤ DIM (one mat), so the RS range is 16 rows from the group base — tile
+  row i only. The model used the chunk's tile address and (blocks−1)·DIM + rows = 32 rows (into row i+1). Fixed:
+  `loop_cmd_t::rs_span` for L_STC; raw mvouts keep the rs2-derived range. The 13.5 store/mesh stalls come from the
+  preloads' DIM-row C range and are unaffected (dramloop compute −0.1 %).
+* **`mem.l2_fill_secondary_cycles` (16, approximation)** replaces `l2_put_serial_filled_cycles`: requests queued on
+  a fill (Gets and partial Puts) resume one per 16 cycles after it lands. B_cold_16B −18.9 → −13.2 %, mvout_16B
+  −26 %, nothing else moves. Not tuned further (user: cache may be approximate).
+* **MLP native_ua loops G,U**: perf-mode phase 1542 vs RTL 2088 (−26 %), Y 991 vs 1255 (−21 %); replay: Gemmini
+  idle 405 cycles early. The binary matches the VCS .dump. Ordinal Get comparison: the model pulls ahead at Gets
+  #48-64 and #112-144 (RTL 6 cyc/Get there). There the L2's DRAM side shows latency ~100 (min 97) with only ~6
+  outstanding and D beats at 100-156 per 200 cycles (no write-backs on C) — elsewhere it saturates at 1 beat/cycle
+  with latency 20-30. **The RTL's memory is SimDRAM + DRAMSim2 (DDR3: banks, open rows, refresh;
+  `mm_dramsim2.cc`)**: latency depends on the address pattern; the model's DRAM is a fixed pipe (8 cyc/line + 20).
+  Scripts: `perf_l2_outer.py`, `perf_rs_trace.py`, `perf_line_timeline.py` (now with Gets).
+
+### 13.8 Optional open-row DRAM model (user: "additional, not as important", 2026-10-06)
+`mem.dram_model = 1` adds DRAMSim2-like banks (testchipip `dramsim2_ini`: DDR3-1333, 8 banks, open page, scheme2 →
+bank = line % 8, row = line / 2048; at 500 MHz tRP+tRCD = 15 cycles, tRC = 26). Off by default: it moves every
+regression row by < 1 % and MLP G,U only 1558 → 1573 (RTL 2088), so the MLP gap is **not** row misses. Not pursued
+further (refresh, scheduler reordering not modelled). The MLP G,U / Y gap (replay: Gemmini idle ~375-400 cycles
+early, ~18 % of the 2088-cycle phase) stays open: the RTL's L2→DRAM latency is ~100 with ~6 outstanding in two
+stretches of the G,U loads; cause not identified.
+
+### 13.9 llama_layer_e2e vs FireSim, and a projection reproducer (2026-10-06)
+FireSim build (firesim-cy, recipe `alveo_u250_firesim_mx_gemmini_rocket_singlecore_no_nic`): MxGemminiFiresimRocketConfig
+= MxE4M3VpuGemminiRocketConfig with a **local 256-bit system bus**, every clock 1 GHz (one domain), FASED LatencyPipe
+(read latency 30, maxReads 16), no LLC, 64-bit memory bus. New preset **`firesim`** (= e4m3_vpu + bus_bytes 32,
+dram_latency 30, new knob `mem.dram_max_reads` 16). It moves the e2e phases < 4 %, so FireSim's memory is not the
+cause. Model vs FireSim (firesim preset): attention −1.9 %, projections +7.7..+13.2 % (model mesh util 84-90 % vs
+FireSim 94-99 %; demand ~4-6 B/c, not memory-bound), VPU/SR phases −19..−24 %, rope −36 % (CPU), layer +3.5 %.
+Sensitivity (not adopted): host.cpi 2 fixes rope only; dram 16 B/c fixes projections, latency 60 the VPU phases.
+
+**Reproducer for the projection gap**: `baremetal/mxgemmini/src/mx_bench_matmul_m64_proj.c` (mx_bench_matmul with
+BENCH_M 64, K 1024, N 512, BENCH_SKIP_STREAM, BENCH_ONE_PASS; K/N/skip macros added to mx_bench_matmul.c, defaults
+unchanged; Makefile entries added). Same mxn_matmul tile as the e2e projections (64 x 256 x 256 loops, 8 chained).
+Model: 141,653 cycles (util 92.5 %), ideal 131,072. Waiting on a VCS run with waveform on MxE4M3VpuGemminiRocketConfig.
+
+### 13.10 Projection reproducer on VCS → two LoopMatmul fixes (2026-10-06)
+`mx_bench_matmul_m64_proj` on MxE4M3VpuGemminiRocketConfig: **135,370 cycles (96.8 %)**, checksum = Spike; ELF = .dump.
+Model before: 141,653 (+4.6 %), replay +6773. RTL mesh: 16,404 cyc / 1024-tile loop with one 52-cycle bubble at each
+boundary; model: 500-1500-cycle stalls at boundaries and one 1522-cycle stall at tile 6 of loop 0.
+1. **Load-unroller loop id** (`unroller_loop`): an unroller takes the next loop's request as soon as it is idle
+   (io.req.fire sets loop_id), unless that request is withheld by `ld_blocked` (`ldA/ldB.io.req.valid`,
+   LoopMatmul.scala:1475-1476 / 1496-1497); the arbiter forces only when the A and B unrollers are on different loops
+   (:1173-1176). The model updated the id only on emitting, so both unrollers stayed on the finished head loop and
+   blocked each other's first load of the next loop until the head retired: the next loop's loads serialized behind
+   the head's compute (8.5k idle DMA cycles per boundary). dramloop_kt: its loop1→2 stall is now 491 vs RTL ~557
+   (old rule 1159 — the old −1.7 % was that overshoot cancelling a cold-start shortfall; kt is now −6.1 %, the rest
+   being the cold first loads/scales: −286 at start-up, −159 at loop 0→1).
+2. **Managed CONFIG_SCALE_MEM is the Ex unroller's first command** (LoopMatmulExecute: req → state cfg, :505), so a
+   loop's scale config cannot leave before every older loop's computes have: the model let loop 1's config enter
+   the in-order ex queue early, where it waited for its scales to land with loop 0's computes stuck behind it.
+Result: m64_proj **133,879 (−1.1 %)**, replay −1001; model boundary bubbles 61 vs RTL 52. Regression otherwise
+unchanged (dramloop_ls −0.0 %, ls4 −1.1 %), flash kernels −0.8 / −0.5 / −0.7 %.
+Script: `waveform-debug/mxgemmini_debug_scripts/perf_rtl_events.py` (whole-matmul window), ordinal comparison.
+
+### 13.11 CPU L1 caches from spike's cache simulator (user-approved, optional; 2026-10-06)
+`mem.host_tracking = 2` (default stays 1): `perf/host/host_cache.h` subclasses spike's installed `cache_sim_t`
+(libriscv.so; LFSR random replacement like Rocket) for the CPU's L1 D$ and (host.icache) I$, geometry
+`host.l1d_sets/ways`, `host.l1i_sets/ways` (spike --dc/--ic S:W:B terms; WithNHugeCores 64 x 8 x 64 B). The memtracer
+also forwards loads (and fetches) at level 2. Each L1 miss stalls the CPU clock (blocking D$, nMSHRs = 0):
+`host.l1_miss_l2_hit` 10 / `host.l1_miss_dram` 43 cycles — **measured** from the VCS commit traces with the new
+`tools/commit_stalls.py` (load/store retire gaps cluster at 10-12 and 43-45 in chain_pipelined, attn_vpu_fa,
+llama_mlp_tiny_db). Probes now come from the simulated L1 (Put → probe to N; Get → probe only a dirty line, to B);
+level 1 keeps the approximate store-only L1. No spike source change; spike quirk handled: a FETCH trace passes the
+end address, not a length. Speed: small kernels unchanged; llama_layer_e2e 3.4 → 7.0 s.
+Effect: llama_mlp_tiny_db ld_scales+Xn+Wg 605 → 799 (VCS 884), G,U 2121 → 2164 (2438), loop Y 1161 → 1204 (1151);
+e2e rope 412k → 584k (FireSim, old binary, 641k). chain_pipelined program / attn_vpu_fa barely move (5037 / 42719 vs
+VCS 5851 / 47510): their CPU time is not cache misses.
+What the commit traces show is left for the CPU model (next, not done): **RoCC issue** — chain_pipelined's 612
+commands retire 7.3 cycles apart on average, a cluster at 12 when not back to back (attn_vpu_fa: mean 100, mostly
+Gemmini backpressure, which the model has); **FP latency** — llama_mlp_tiny_db FP ops +2.48 cyc each (82k gaps of
+exactly 4 = dependent FP ops, 25-26 = fdiv/fsqrt), ~430k cycles; **branches** +0.44..0.63 per branch.
+
+### 13.12 CPU pipeline model (user-approved "RoCC / FP" step, 2026-10-06)
+Measured first (VCS commit traces, new `tools/commit_latency.py` + `tools/commit_stalls.py`):
+* **RoCC issue is ~free**: back-to-back commands retire at (instructions between) + 0..1 cycles; longer gaps are
+  Gemmini backpressure, which the model has. So the e2e VPU/SR phases' −20 % is not CPU time (it is the cold small
+  mvin / 16 B mvout path, = mx_mem_bw mvout_16B / B_cold_16B).
+* **Producer → dependent latency** (consumer = next instruction): int load 2, FP load 4, fadd/fmul/fma 4, fmv/fcvt
+  3-4, fsqrt 27-28, int div 66-67 (5-12 early-out). **Branches** (extra cycles after): taken 0.67-0.74, not taken
+  1.05-1.74 (0 or a 3-cycle mispredict), jal 0.4-1.0, jalr 0.25-0.56.
+Built: `perf/host/host_core.{h,cc}` — RV64GC decoder (per PC, cached) + register scoreboard + unpipelined fdiv/div
+units + branch penalties by outcome (exact: the next fetched PC), fed by the level-2 fetch trace; instruction bits
+read once per PC through the core's public MMU `load<uint16_t>` (spike unchanged). Params `host.lat_*`, `host.br_*`,
+`host.jal/jalr`, `host.core_model` (lat_fdiv, lat_mul [assumed]). Enabled with mem.host_tracking 2 (+ host.icache).
+Result (CPU-side compute time the kernels print): llama_mlp_tiny_db 1,483,681 VCS: level 1 −49 % → level 2 −15 %;
+llama_mlp_small 3,224,669: −44 % → −7.9 %. Defaults (level 1) unchanged; regression unchanged.
+Open: the remaining −8..−15 % (BHT/BTB, store buffer, mul latency not measured); chain_pipelined program /
+attn_vpu_fa regions are command-issue bound, unchanged.
+
+### 13.13 Element-wise reproducer for the e2e VPU/SR phases (2026-10-06)
+`baremetal/mxgemmini/src/llama_e2e_elemwise.c`: includes llama_layer_e2e.c with its `main` renamed (the user's file
+is not edited) and runs its `rms_phase` (VPU + SPAD_REQUANT) and `residual_phase` (VPU) on the layer's blob
+(Makefile: KERNELS, BLOB_KERNELS, blob_llama_e2e_elemwise := llama_layer_e2e, deps). Spike: rmsnorm1 hash xn1
+54258df321e5caae (= the FireSim full layer's), xn1_sr e9f0db92c5a5b802, hout 0a5aa1858366b822.
+Model (perf): rmsnorm1 81,444 (e4m3_vpu) / 84,320 (firesim); residual 108,007 / 108,855 (tracking 1), 125.5k at
+tracking 2. (The full-layer model's 109k rmsnorm1 was on the 15:06 ELF, older than the current rms_phase source
+(16:47); the user rebuilt llama_layer_e2e at 17:20.)
+Waiting on: VCS with waveform (MxE4M3VpuGemminiRocketConfig) and ideally FireSim of this ELF.
+VCS result (2026-10-06): rmsnorm1 129,344, residual 112,078; hashes = Spike. Model 104,071 / 88,136 (−19.5 / −21.4 %).
+* Replay (RTL host timing): −0.4 / +3.0 %. But the CPU spends 210k of 241k cycles waiting at RoCC (Gemmini's RS
+  is full 99 % of the time: head command a VPU op 43 %, mvout 32 %, mvin 22 % — `perf_rs_block.py`), so Gemmini is
+  the bound and replay masks per-command speed. Per command (`perf_rs_cmds.py`, RTL vs model perf trace): **VPU
+  exact** (median 263 both), SPAD_REQUANT −4.5 %, **mvin 120 vs 97 cyc/cmd, mvout 199 vs 158**.
+* Cause: **Get latency** (latency-bound: ~8 in flight). RTL mean 87.5 vs model 26.8. A cold Get (74 lines):
+  Get → L2 AcquireBlock 6, → last DRAM beat 41, → data 7 (first touch 56); the 3 other Gets of the line (one 64 B
+  Get per 16 B row) are served +31, +12, +8 after the first. Added [measured] `mem.l2_miss_detect` 6,
+  `mem.l2_fill_to_data` 7, `mem.l2_fill_secondary_first` 38 / `_next` 10 (replaces l2_fill_secondary_cycles).
+  Model now 107,499 / 90,242 (−16.9 / −19.5 %), mean Get latency 30.1. Remaining: the RTL L2 re-fetches more
+  (~6.3k read fills vs model 4,160: set-assoc random 512 KB L2 under ~640 KB of traffic vs the model's fully
+  associative LRU). Cold microbenchmarks improved: B_cold_16B −13.2 → −5.6 %, mvout_16B −26 → −15.8 %,
+  scale_cold −38 → −30 %; dramloop / m64_proj unchanged; exact flash attn_flash_llama7b_fused +2.3 % (unchanged).
+* **Binary drift**: attn_flash_llama_2h (ELF 10-05 22:27), _vb_fused and _2h_fused (ELF 10-06 17:53) no longer match
+  their VCS runs. `tools/perf_regress.py` now includes the VPU-config tests and checks each ELF against its VCS
+  .dump (objdump -D), reporting "binary differs" instead of an error figure.
+* **Concurrent edit (not this session)**: perf/control/loop_matmul.{cc,h} changed at 18:14 after the user's commit
+  92fae92 (StCSpad chunk geometry, sts_per_i / sts_chunks, terminal ex_ahead). It moves chain_pipelined (fenced
+  6311 → 6021). Left untouched pending the user.
+
+### 13.14 Handoff `perf_model_handoff_spad_store.md` (2026-10-06/07)
+1. Kept the handoff's L_STSPAD change (LoopMatmulStCSpad geometry + group RS range) and the `rs.packed_exact` removal.
+2. **Pending-bank gate implemented** (`rs.vec_pending_gate`, default 1): `store_unit_t` counts, per scratchpad bank,
+   acc/spad -> scratchpad stores from start to their last write-port beat (`pending_banks()`); a vector entry
+   (`rs_cmd_t::sp_banks` = banks of a/b/c/d) may not issue while they intersect (ReservationStation.scala:574-578);
+   Q_VEC is re-kicked when a count drops. Effect small: +0.1..0.8k cycles.
+3. **The handoff's diagnosis did not hold**: inside the RTL's 727-cycle mesh stalls (2h_fused FSDB, 177806+) the
+   pending-bank mask is 0 (`perf_stall_probe.py`); the stall is a dependency chain ending in a K/V block's mvins.
+   Per-command RTL vs model (`perf_rs_cmds.py` over the pass): **loop stores to the scratchpad (f23) take 67 cycles in
+   the RTL (median, p90 79) vs 19 in the model**: acc reads for requant_to_spad are accepted 1 in 4 cycles (a read
+   waits for the previous result's two bank-row writes: dma_resp_ready, Scratchpad.scala:1127-1131; 24 reads, ready
+   1 in 4, mesh idle; `perf_acc_reads.py`). New [measured] `st.spad_read_interval` 4 -> model store median 67.
+   7b_fused RTL stores: median 63 too.
+Exact binaries (VCS / model): 2h_fused (handoff copy, -DATTN_STATS_OUT=1) 156,475 / 159,441 (+1.9 %);
+attn_flash_llama7b_fused 144,008 / 156,308 (+8.5 %, was +2.3 %); chain_pipelined fenced +0.7 / program −9.5 /
+pipelined −0.6 % (were −6.9 / −19.7 / −11.9 %); dramloop / mx_mem_bw / elemwise unchanged.
+Open: with store durations now right, both flash totals overshoot by ~3k (2h_fused) / ~12k (7b_fused): the RTL
+hides part of the store time where the model does not. In 7b_fused the model's mvins (median 1408 vs RTL 1024)
+and computes (79 vs 64) are slower — next: which dependency serializes loads/computes behind the stores.
+
+#### 13.14.1 attn_flash_llama7b_fused comparison (2026-10-07)
+* Per 512-tile key block: model +1,026 cycles, from two clusters of mesh gaps (277 + 141 + 134 + 61) at tiles ~115
+  and ~371; RTL one 52-cycle gap there. Model: preloads wait for in-flight loop stores (DBG: preload C [0x114,0x124)
+  vs store source [0x120,0x130) of the next row group). RTL: no wait.
+* Cause: **RTL fix `b0dd6cb` (2026-10-05)** — with packed MX acc (`io.mx_packed_acc`), a preload's RS range starts at
+  its DIM-row group (`ReservationStation.scala:302-307`): "a range that starts mid-group would claim the next
+  group's rows: false WAR on its stores". New knob `rs.packed_preload_align` (`model_t::preload_c_span`, loop + raw
+  preloads): 0 = older RTL (the MxGemminiRocketConfig sim of 09-29, where 13.5's spill stalls are real), 1 in the
+  e4m3_vpu / firesim presets (VPU sim rebuilt 10-06 11:41; FireSim build of 10-05 21:06).
+* Result: **attn_flash_llama7b_fused 144,008 VCS -> 141,892 (−1.5 %)** (was +8.5 %); **2h_fused 156,475 ->
+  149,849 (−4.2 %)** (was +1.9 %). Regression otherwise unchanged.
+* 2h_fused's remaining −4.2 %: per block the model matches (+18) except every 2nd block, where the RTL has a ~700-cycle
+  mesh stall (the 727-cycle stalls): preload <- store f23 (waits 4.1k cycles) <- a 2,311-cycle VPU op completing.
+  The vector queue issues in a different order in the model (same op types, durations within 5 cycles), so that
+  chain does not form. Next if needed: compare the vector-queue issue order / deps.
+* MxGemmini-workspace (Amanda Shi, `ppa/opt`): an analytic PPA model — DMA 3.13 B/c (128-bit bus), DDR3 peak
+  21.3 B/c, DRAM energy presets, and DRAM *bytes / power* from DRAMSim2 epoch stats for validation. No cycle-level
+  DRAM timing; useful to check this model's L2 -> DRAM traffic, not its latency.
+
+#### 13.14.2 Per-chunk destination of loop scratchpad stores (2026-10-07)
+2h_fused's alternate-block ~700-cycle stall is a chain: preload <- loop store f23 (dst 0x2b84, waits ~4.1k) <- a
+2,311-cycle VPU op (src/dst 0x2000-0x2800, src2 0x2c00-0x2c80). The RTL store's range is exact
+(ReservationStation.scala:312-325: BF16 (rows-1)*step + 8 = 0x2b84-0x2c04, overlapping the VPU op's src2, WAR);
+the model gave every L_STSPAD the whole loop output (0x2000-0x2800) as its destination, so that dependency could
+not form (and others did). Now `make()` computes LoopMatmulStCSpad's per-chunk dst (:854-918; BF16 / FP8 flat /
+FP8 tiled via LOOP_WS rs2 bit 10 -> `loop_t::tiled`) and the RS range. `perf_cmd_bits.py` reads full 64-bit RS
+operands (NpiWave.val truncates); the model trace now carries each command's row ranges.
+Result: **2h_fused 156,475 -> 153,321 (−2.0 %)**, every key block within ±18 cycles of the RTL (alternate-block
+stall 704 vs 743); remaining difference at the pass start-up. 7b_fused −1.5 % (unchanged).
