@@ -712,3 +712,69 @@ FP8 tiled via LOOP_WS rs2 bit 10 -> `loop_t::tiled`) and the RS range. `perf_cmd
 operands (NpiWave.val truncates); the model trace now carries each command's row ranges.
 Result: **2h_fused 156,475 -> 153,321 (−2.0 %)**, every key block within ±18 cycles of the RTL (alternate-block
 stall 704 vs 743); remaining difference at the pass start-up. 7b_fused −1.5 % (unchanged).
+
+### 13.15 L2: set-associative + full at start (2026-10-07)
+* `mem.l2_ways` 8 (default; 0 = old fully-associative LRU): InclusiveCache 512 KB x 8 ways, 1024 sets (dts), 1 bank,
+  LFSR victim (Directory.scala:114-120), never a line with its fill outstanding. Alone: little effect.
+* L2-miss comparison (model trace `ev,l2fill|l2wb,<cycle>,<addr>`; RTL `perf_l2_lines.py` = the L2's outer A / C
+  messages with addresses), llama_e2e_elemwise, by buffer (ELF symbols): identical except **h_pre: RTL 6,098 fills
+  (2,002 re-fetched in the residual phase) vs model 4,224**. The RTL L2 starts evicting after 79 fills: it is full
+  at kernel start, so random replacement evicts ~half of h_pre before its re-read.
+* `mem.l2_start_full` 1 (approximation): placeholder clean lines in every way, evicted silently. Model fills 12,276
+  (RTL 12,401), write-backs 2,363 (RTL 2,341). residual −22.2 % -> **−3.1 %**; attn_vpu_fa −10.0 -> −6.4 %;
+  chain fenced +0.7 -> +1.9 %; others unchanged. rmsnorm1 still −16 % (another cause).
+
+### 13.16 FP4 multi-elem mode: attn_flash_llama7b_fused_fp4 (2026-10-07/08)
+MxE4M3Fp4VpuGemminiRocketConfig (`e4m3SingleFp4`, RTL commit d3e6df6), exact binary (objdump == VCS .dump).
+VCS `PERF pipelined` **112,137**; model before **83,282 (−25.7 %)** -> after **109,532 (−2.3 %)**.
+The model had no `mx_multi_elem` handling. Each key block ran ~3.4k cycles short because the softmax VPU chain
+(critical path to the next PV matmul) waits on the QK^T loop's scratchpad stores, and those were wrong:
+* **Mode detection** (`model.cc`, CONFIG_EX): `mx_multi_` = weight format != 0 or E5M2 (altfmt ^ rs1[31]);
+  `mx_multi_act_` likewise for the activation (ExecuteController.scala:177-187). LUT-E4M3 quad not modelled
+  (no LUT on the VPU presets). Passed to `loop_matmul_t::run`.
+* **LoopMatmulStCSpad multi-elem** (:822-966): one store per (i, j) tile, j outer / i inner, no chunks, release
+  on ej_high = j; acc tile (i*J + j)*DIM (narrow c_addr :407); BF16 dst i*J*DIM*(4|8) + 4j, step J*(4|8), range
+  (DIM−1)*step + 8; FP8 flat / tiled variants. 132 -> 264 stores per pass (RTL 264).
+* **Store data**: a quad tile is 2x2 outputs per acc element (`out_mult`): 32x32 BF16 = 128 spad rows, so the acc
+  -> spad pacing is max(reads*interval, beats): 67 -> 131 cycles (RTL 127).
+* Scale loads twice as long per quad operand (lds_row_bytes :1548); loop C rows << narrow (:1424-1426).
+* **FP4 SPAD_REQUANT** (rs2[32]; Controller/RS d3e6df6): never shares the requantizer. While one is ready-and-
+  unissued (`rs_.fp4_sr_waiting()`, after the bank gate) or running, no accumulator-source store starts
+  (`store_.on_acc_hold`); it starts only when no acc store is reading (`acc_reading`). RS dst range M*N/32 (M
+  padded to 32). Approximation: an in-flight store finishes instead of pausing (<= 128 cycles).
+* **Store reads paced by their writes**: the last read leaves once all but the last pipe+requant (16) rows are
+  written (write request split into beats−16 / 16; unstarved this is <= `paced`, no change). VPU writes win the
+  bank's write port, so a store into a bank the VPU is writing stalls (RTL: first 0x3400 store of the last block,
+  2,020 cycles). The pending banks are released by the last 16 rows, so back-to-back stores never open a hole in
+  `vpu_pending_banks` (an earlier variant that completed stores at their last write lost 16 cycles a store and let
+  VPU ops slip in between two stores).
+Per-block alignment now within ~20 cycles of the RTL (was −3.4k a block). Remaining −2.3 %: pass start-up (−850),
+last block (different gap pattern, ~+500 in the model), tail (−2.1k: the RTL's last QK^T stores start ~1k later
+relative to the final compute, so they meet the VPU write starvation and the FP4 hold; the model's run before them).
+Regression unchanged; 2h_fused exact binary −2.0 -> **−1.5 %** (154,133).
+
+#### 13.16.1 The FP4 tail (2026-10-08): RTL rules found, total unchanged
+The tail (RTL 9,152 cycles after the last compute, model 7,067) comes from the last key block: in the RTL the last
+QK^T stores run ~1k later than in the model, so they meet the FP4 SPAD_REQUANT and the VPU's writes. Walking it
+back (waveform, `perf_st_pending_delay.py`, `perf_pending_trace.py`, `perf_sig_runs.py`), every step is a race
+between one VPU op and one store, decided by a few cycles:
+* **Pending starts late** (`st.pending_delay` 3, measured): a store's banks enter `vpu_pending_banks` at its first
+  write_norm_q enq (+2) + the register (+1). A VPU op issued in the same cycle as a store wins the bank (seen at the
+  last block's start; now reproduced: store −457 -> 687 vs RTL −483 -> 656).
+* **Pending ends at the drain, completion at the last acc read**: a DMA write resp fires at the *acc read request*
+  (Scratchpad.scala:1283); `store_pending` counts write_norm_q enq -> write_issue_q deq. Unstarved: completion +127,
+  drain +138 (`st.pending_tail` 11), so a back-to-back next store claims first. The model now completes a scratchpad
+  store at max(paced, all-but-the-last-request written) and releases its banks `pending_tail` later
+  (`st.spad_write_lead` 4: rows land ~4 cycles after their read).
+* **An accumulating mesh write holds the acc bank's read port** (AccumulatorMem.scala:667:
+  `read.req.ready = !(write.valid && write.acc)`); an overwriting one does not. Loop preloads now carry the
+  accumulate bit (k > 0 or LOOP_WS rs1[0], LoopMatmul.scala:435) and only those reserve the acc port
+  (`acc.overwrite_blocks_reads` 0; 1 = the old model). Paced acc -> scratchpad reads now go to the port one at a time
+  across the paced window, so a late read meets the read-modify-write stream.
+* RTL case: store 247705 (dst 0x320c) — its last acc read is refused from 247824 (the PV loop's k = 1 accumulates
+  start) to 248498; its other rows drain at 247843 -> pending 0 -> a 1,031-cycle VPU op issues that cycle; the next
+  store is not issued (serial st queue) until 248500.
+In the model the same store's last read lands 4 cycles before the accumulates start, so it does not stall, and the
+chain does not form. These are ±15-cycle coincidences; reproducing them would need a cycle-exact mesh / store
+pipeline. **Result: FP4 109,479 (−2.4 %), steady-state blocks within ~20 cycles; tail and last block unchanged.**
+Regression unchanged within 0.4 % (chain fenced +1.5 %, pipelined −0.9 %; 2h_fused 154,186).
