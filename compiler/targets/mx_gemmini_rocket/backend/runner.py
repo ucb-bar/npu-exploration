@@ -15,10 +15,21 @@ Spike and Verilator run the *exact same ELF*; only the launch command differs.
 Toolchain resolution is environment-first so this works in a plain chipyard checkout:
 ``MERLIN_CHIPYARD`` / ``CHIPYARD_ROOT`` or the tree this package sits in, plus optional
 ``MX_RISCV_GCC`` / ``MX_SPIKE`` / ``MX_LIBGEMMINI`` / ``MX_ROCC_TESTS`` overrides.
+
+Timing. Since libgemmini 92fae92 the same ``libgemmini.so`` also holds a cycle model of the machine
+(``perf/``; Nico Rakela). ``run_elf(..., timing=...)`` runs spike with ``GEMMINI_MODE=both``: the
+bit-exact model computes the bits as before and the cycle model watches the same RoCC command stream,
+so the ELF's ``rdcycle`` reads -- its ``METRIC cycles`` lines -- become modelled time instead of
+spike's instruction counter, and a summary (mesh busy, host stall, L2, DRAM, port occupancy) lands in
+``timing_summary.txt``. The cycle model knows time only, never data: ``both`` must give the same bits
+as ``func``, which ``tests/selftest_timing.py`` holds. Its geometry (``mesh.dim``, scratchpad banks and
+rows, the block size) is a run-time parameter, so the recipe's is passed through ``GEMMINI_PERF_SET``
+and the resolved parameters are read back (``timing_config.txt``) and checked.
 """
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -192,8 +203,44 @@ def compile_command_buffer(cb: dict[str, Any], workdir: str | Path, *,
 
 # --- Run ------------------------------------------------------------------------------------------
 
-def run_elf(elf: str | Path, simulator: str = "spike", timeout: int = 600) -> str:
-    """Run the ELF on the chosen oracle; return raw console output."""
+#: The files a timed run leaves next to the ELF: the cycle model's summary (spike writes it, via
+#: GEMMINI_PERF_OUT) and the parameters it resolved (its stderr dump, GEMMINI_PERF_DUMP_CONFIG).
+TIMING_SUMMARY = "timing_summary.txt"
+TIMING_CONFIG = "timing_config.txt"
+
+#: recipe field -> the cycle model's parameter it must agree with (perf/params/config.h)
+TIMING_PARAMS = {"dim": "mesh.dim", "banks": "spad.banks", "rows": "spad.bank_rows", "block": "mx.block"}
+
+#: The cycle model's presets (config.cc). mx_rocket = MxGemminiRocketConfig, the machine the recipes describe.
+TIMING_PRESET = "mx_rocket"
+
+
+def timing_env(timing: dict[str, Any], out: Path) -> dict[str, str]:
+    """The environment that switches the cycle model on for one spike run.
+
+    ``timing`` carries the recipe's geometry under the TIMING_PARAMS keys (``dim``, ``banks``, ``rows``,
+    ``block``). Every one is passed, not just the ones that differ from the preset, so the record's
+    config dump says what ran without a reader having to know the preset's defaults.
+    """
+    missing = [k for k in TIMING_PARAMS if k not in timing]
+    if missing:
+        raise MxRunnerError(f"timing geometry incomplete: missing {missing} (want {sorted(TIMING_PARAMS)})")
+    return {"GEMMINI_MODE": "both",
+            "GEMMINI_PERF_CONFIG": TIMING_PRESET,
+            "GEMMINI_PERF_SET": ",".join(f"{TIMING_PARAMS[k]}={int(timing[k])}" for k in TIMING_PARAMS),
+            "GEMMINI_PERF_OUT": str(out / TIMING_SUMMARY),
+            "GEMMINI_PERF_DUMP_CONFIG": "1"}
+
+
+def run_elf(elf: str | Path, simulator: str = "spike", timeout: int = 600,
+            timing: dict[str, Any] | None = None) -> str:
+    """Run the ELF on the chosen oracle; return raw console output.
+
+    With ``timing`` (the recipe's geometry, see :func:`timing_env`) spike runs the cycle model beside
+    the functional one: the console's ``METRIC cycles`` are then modelled time, and the model's summary
+    and resolved parameters are left as ``TIMING_SUMMARY`` / ``TIMING_CONFIG`` next to the ELF, checked
+    by :func:`read_timing`. Without it the run is functional only (``GEMMINI_MODE`` unset = ``func``).
+    """
     if simulator != "spike":
         raise MxRunnerError(f"simulator {simulator!r} not wired up yet (spike only)")
     so = libgemmini_so()
@@ -201,6 +248,11 @@ def run_elf(elf: str | Path, simulator: str = "spike", timeout: int = 600) -> st
         raise MxRunnerError(f"libgemmini.so not found at {so} — build it in software/libgemmini")
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = f"{so.parent}:{env.get('LD_LIBRARY_PATH', '')}"
+    out = Path(elf).resolve().parent
+    if timing is not None:
+        env.update(timing_env(timing, out))
+        for name in (TIMING_SUMMARY, TIMING_CONFIG):   # never read a previous run's files
+            (out / name).unlink(missing_ok=True)
     cmd = [str(spike_path()), f"--extlib={so}", "--extension=gemmini", str(elf)]
     # errors="replace": a kernel that runs wild prints raw bytes, and a UnicodeDecodeError
     # traceback hides that. Decode lossily so the caller sees the garbage and can diagnose it.
@@ -209,7 +261,111 @@ def run_elf(elf: str | Path, simulator: str = "spike", timeout: int = 600) -> st
     if proc.returncode != 0:
         raise MxRunnerError(
             f"spike exited {proc.returncode}:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
+    if timing is not None:
+        (out / TIMING_CONFIG).write_text(proc.stderr, encoding="utf-8")
     return proc.stdout
+
+
+# --- The cycle model's output ---------------------------------------------------------------------
+
+_SUMMARY_HEAD = re.compile(
+    r"gemmini perf \[(?P<preset>\w+)\]: (?P<commands>\d+) commands, (?P<loops>\d+) loops, (?P<fences>\d+) fences; "
+    r"last activity (?P<last_activity>\d+); host stalled (?P<host_stalled_cycles>\d+) cycles; (?P<events>\d+) events")
+_SUMMARY_LINES = {
+    "mesh": re.compile(r"mesh: (?P<mesh_tiles>\d+) tiles, (?P<mesh_busy_cycles>\d+) busy cycles; VPU: (?P<vpu_commands>\d+) commands"),
+    "load": re.compile(r"load: (?P<load_bytes>\d+) bytes in (?P<load_gets>\d+) Gets; store: (?P<store_reads>\d+) reads, "
+                       r"(?P<store_puts>\d+) Puts; scales: (?P<scale_bytes>\d+) bytes"),
+    "memory": re.compile(r"memory: L2 (?P<l2_hits>\d+) hits, (?P<l2_misses>\d+) misses; bus busy (?P<bus_busy_cycles>\d+), "
+                         r"DRAM busy (?P<dram_busy_cycles>\d+) cycles; CPU stores (?P<cpu_store_lines>\d+) lines, "
+                         r"L1 probes (?P<l1_probes>\d+), partial-write fills (?P<partial_write_fills>\d+), "
+                         r"dirty write-backs (?P<dirty_writebacks>\d+)"),
+    "host": re.compile(r"host: L1 misses (?P<host_l1_misses>\d+) \(dirty evictions (?P<host_l1_writebacks>\d+)\), "
+                       r"(?P<host_l1_stall_cycles>\d+) stall cycles"),
+    "host pipeline": re.compile(r"host pipeline: (?P<host_pipeline_stall_cycles>\d+) stall cycles.*?fp (?P<host_fp_ops>\d+), "
+                                r"fdiv/fsqrt (?P<host_fdiv_fsqrt>\d+), branches (?P<host_branches>\d+)"),
+}
+_PORT = re.compile(r"(sp(\d+) r(\d+)/w(\d+))|(acc(\d+) (\d+))")
+_NOT_MODELLED = re.compile(r"not modelled: (\S+) x(\d+)")
+_CONFIG_LINE = re.compile(r"^\s+(?P<name>[a-z_]+\.[a-z0-9_]+)\s+(?P<value>-?[\d.e+-]+)(?P<star>\s\*)?\s", re.M)
+_CONFIG_PRESET = re.compile(r"gemmini perf config \(preset (\w+)\)")
+
+
+def parse_timing_summary(text: str) -> dict[str, Any]:
+    """The cycle model's end-of-run summary (perf/model.cc:report) as a dict.
+
+    Every counter the model prints gets a key; lines this parser does not know go under ``unparsed`` as
+    text, so a new line in the model's report widens the record instead of failing the run. The keys are
+    counts and cycles on the accelerator clock; ``ports`` is busy cycles per scratchpad bank (read and
+    write ports) and per accumulator bank.
+    """
+    out: dict[str, Any] = {"ports": {}, "not_modelled": {}, "unparsed": []}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = _SUMMARY_HEAD.match(line)
+        if m:
+            out.update({k: (v if k == "preset" else int(v)) for k, v in m.groupdict().items()})
+            continue
+        key = line.split(":", 1)[0]
+        pat = _SUMMARY_LINES.get(key)
+        if pat is not None and (m := pat.match(line)):
+            out.update({k: int(v) for k, v in m.groupdict().items()})
+            continue
+        if line.startswith("ports busy:"):
+            for pm in _PORT.finditer(line):
+                if pm.group(1):
+                    out["ports"][f"sp{pm.group(2)}"] = {"read": int(pm.group(3)), "write": int(pm.group(4))}
+                else:
+                    out["ports"][f"acc{pm.group(6)}"] = int(pm.group(7))
+            continue
+        if (m := _NOT_MODELLED.match(line)):
+            out["not_modelled"][m.group(1)] = int(m.group(2))
+            continue
+        out["unparsed"].append(line)
+    if "commands" not in out:
+        raise MxRunnerError(f"timing summary has no 'gemmini perf [...]' header; got:\n{text[:800]}")
+    return out
+
+
+def parse_timing_config(text: str) -> dict[str, Any]:
+    """The parameter dump (GEMMINI_PERF_DUMP_CONFIG=1): ``{"preset": ..., "params": {name: value},
+    "overridden": [names whose value differs from the preset's default]}``."""
+    m = _CONFIG_PRESET.search(text)
+    if not m:
+        raise MxRunnerError(f"no 'gemmini perf config' dump in spike's stderr; got:\n{text[:800]}")
+    params, overridden = {}, []
+    for pm in _CONFIG_LINE.finditer(text):
+        v = float(pm.group("value"))
+        params[pm.group("name")] = int(v) if v == int(v) else v
+        if pm.group("star"):
+            overridden.append(pm.group("name"))
+    return {"preset": m.group(1), "params": params, "overridden": overridden}
+
+
+def read_timing(out: str | Path, timing: dict[str, Any]) -> dict[str, Any]:
+    """Collect a timed run's files from the ELF's directory and hold them to the request.
+
+    Refuses (MxRunnerError) when the summary is missing -- the loaded ``libgemmini.so`` predates the cycle
+    model or ignored ``GEMMINI_MODE`` -- and when a resolved geometry parameter differs from the recipe's,
+    which would be the cycle model timing another machine than the one the bits were computed on.
+    """
+    out = Path(out)
+    summary_p, config_p = out / TIMING_SUMMARY, out / TIMING_CONFIG
+    if not summary_p.exists():
+        raise MxRunnerError(
+            f"spike ran with GEMMINI_MODE=both but wrote no {TIMING_SUMMARY}: the loaded libgemmini.so has no "
+            f"cycle model (built before libgemmini 92fae92?). Rebuild it: python -m models.spike.build_spike --force")
+    summary = parse_timing_summary(summary_p.read_text(encoding="utf-8"))
+    config = parse_timing_config(config_p.read_text(encoding="utf-8")) if config_p.exists() else None
+    if config is not None:
+        for key, name in TIMING_PARAMS.items():
+            got, want = config["params"].get(name), int(timing[key])
+            if got != want:
+                raise MxRunnerError(f"cycle model geometry: {name}={got} but the recipe says {want}; "
+                                    f"GEMMINI_PERF_SET was not honoured")
+    return {"mode": "both", "summary": summary, "config": config,
+            "files": {"summary": str(summary_p), "config": str(config_p) if config else None}}
 
 
 def parse_output(text: str) -> tuple[dict[str, list], dict[str, int]]:
@@ -254,15 +410,23 @@ def _parse_console_local(text: str) -> tuple[dict[str, list], dict[str, int]]:
 
 def run_command_buffer(cb: dict[str, Any], *, workdir: str | Path,
                        simulator: str = "spike", timeout: int = 600,
-                       transport: Transport | None = None) -> dict[str, Any]:
-    """Emit, build, run, parse. Returns outputs + metrics + the oracle's provenance."""
+                       transport: Transport | None = None,
+                       timing: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Emit, build, run, parse. Returns outputs + metrics + the oracle's provenance.
+
+    With ``timing`` (see :func:`run_elf`) the result also carries ``timing``: the cycle model's summary
+    and resolved parameters, and ``metrics`` are modelled cycles.
+    """
     elf = compile_command_buffer(cb, workdir, transport=transport)
-    console = run_elf(elf, simulator=simulator, timeout=timeout)
+    console = run_elf(elf, simulator=simulator, timeout=timeout, timing=timing)
     outputs, raw = parse_output(console)
-    return {
+    res = {
         "outputs": outputs,
         "metrics": raw,
         "oracle": {"simulator": simulator, **ORACLE[simulator]},
         "elf": str(elf),
         "console": console,
     }
+    if timing is not None:
+        res["timing"] = read_timing(elf.parent, timing)
+    return res
