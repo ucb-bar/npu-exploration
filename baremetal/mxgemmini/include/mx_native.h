@@ -43,11 +43,17 @@ static unsigned mxn_loops;   // loops issued so far: the parity picks the scratc
 // blk_nc/blk_kt != 0: B is PRE-BLOCKED for that tiling -- block (c, t) = B[t*Kt:+Kt][c*NC:+NC] stored
 // contiguously (row pitch NC), blocks c-major -- so each loop streams one contiguous run from DRAM instead
 // of Kt rows ldb apart. B_sc stays [K/32][N] (pitch sc_ldb). The chosen tiling must equal (blk_nc, blk_kt).
-static int mxn_matmul_ex(const uint8_t *A, int lda, const uint8_t *B, int ldb, uint16_t *C, int ldc,
-                         const uint8_t *A_sc, int sc_lda, const uint8_t *B_sc, int sc_ldb,
-                         int M, int K, int N, int blk_nc, int blk_kt) {
+// a_kt != 0: A is K-BLOCKED -- K-tile t = A + t*M*a_kt, a contiguous [M][a_kt] (lda = a_kt) -- and the K-tile is a_kt.
+static int mxn_matmul_core(const uint8_t *A, int lda, const uint8_t *B, int ldb, uint16_t *C, int ldc,
+                           const uint8_t *A_sc, int sc_lda, const uint8_t *B_sc, int sc_ldb,
+                           int M, int K, int N, int blk_nc, int blk_kt, int a_kt) {
   const int NC = mxn_pick_nc(M, N);
-  const int Kt = NC ? mxn_pick_kt(M, K, NC) : 0;
+  int Kt = NC ? mxn_pick_kt(M, K, NC) : 0;
+  if (a_kt) {
+    if (K % a_kt || M * a_kt / DIM + a_kt * NC / DIM > MXN_HALF_ROWS) Kt = 0;
+    else Kt = a_kt;
+    lda = a_kt;
+  }
   const int blocked = blk_nc != 0;
   if (blocked && (NC != blk_nc || Kt != blk_kt)) {
     printf("mxn_matmul: B blocked for NC=%d Kt=%d but tiling is NC=%d Kt=%d\n", blk_nc, blk_kt, NC, Kt);
@@ -69,7 +75,7 @@ static int mxn_matmul_ex(const uint8_t *A, int lda, const uint8_t *B, int ldb, u
     for (int t = 0; t < kts; t++) {
       const int h = 1 + (int) (mxn_loops++ & 1);
       gemmini_loop_ws_mx(M / DIM, NC / DIM, Kt / DIM,
-                         A + (size_t) t * Kt,
+                         A + (size_t) t * Kt * (a_kt ? M : 1),
                          blocked ? B + ((size_t) c * kts + t) * Kt * NC : B + (size_t) t * Kt * ldb + (size_t) c * NC,
                          t == kts - 1 ? C + (size_t) c * NC : NULL,
                          lda, ldb_loop, ldc,
@@ -80,9 +86,57 @@ static int mxn_matmul_ex(const uint8_t *A, int lda, const uint8_t *B, int ldb, u
   return 0;
 }
 
+static int mxn_matmul_ex(const uint8_t *A, int lda, const uint8_t *B, int ldb, uint16_t *C, int ldc,
+                         const uint8_t *A_sc, int sc_lda, const uint8_t *B_sc, int sc_ldb,
+                         int M, int K, int N, int blk_nc, int blk_kt) {
+  return mxn_matmul_core(A, lda, B, ldb, C, ldc, A_sc, sc_lda, B_sc, sc_ldb, M, K, N, blk_nc, blk_kt, 0);
+}
+
 static int mxn_matmul(const uint8_t *A, int lda, const uint8_t *B, int ldb, uint16_t *C, int ldc,
                       const uint8_t *A_sc, int sc_lda, const uint8_t *B_sc, int sc_ldb, int M, int K, int N) {
   return mxn_matmul_ex(A, lda, B, ldb, C, ldc, A_sc, sc_lda, B_sc, sc_ldb, M, K, N, 0, 0);
+}
+
+// FP4 (E2M1) x FP4 on the quad mesh (32 x 32 output tile per pass): A [M/2][K] bytes, row pair (2r, 2r+1) of
+// column k in byte (r, k) (low nibble = row 2r), pitch lda = K bytes; B [K][N/2] packed nibbles (low = even
+// column), pitch ldb bytes; scales and C as mxn_matmul. Same N-chunk / K-tile / half alternation; operands take
+// half the spad rows of E4M3, the accumulator the same. config_st is two C rows (an acc row holds two).
+static int mxn_pick_kt_fp4(int M, int K, int NC) {
+  for (int kt = 512; kt >= 32; kt >>= 1)
+    if (K % kt == 0 && M * kt / 32 + kt * NC / 32 <= MXN_HALF_ROWS && (kt / 32) * NC <= 4096 &&
+        (kt / 32) * M <= 4096) return kt;
+  return 0;
+}
+
+static int mxn_matmul_fp4(const uint8_t *A, int lda, const uint8_t *B, int ldb, uint16_t *C, int ldc,
+                          const uint8_t *A_sc, int sc_lda, const uint8_t *B_sc, int sc_ldb, int M, int K, int N) {
+  int NC = 0;
+  for (int nc = 512; nc >= 2 * DIM; nc >>= 1)
+    if (N % nc == 0 && M * nc / (DIM * 4) <= ACC_ROWS / 2) { NC = nc; break; }
+  const int Kt = NC ? mxn_pick_kt_fp4(M, K, NC) : 0;
+  if (!NC || !Kt || M % (2 * DIM) ||
+      (((uintptr_t) A_sc | (uintptr_t) B_sc | (uintptr_t) sc_lda | (uintptr_t) sc_ldb) & 7)) {
+    printf("mxn_matmul_fp4: unsupported shape/alignment M=%d K=%d N=%d (Kt=%d NC=%d)\n", M, K, N, Kt, NC);
+    return 1;
+  }
+  gemmini_extended3_config_ex(WEIGHT_STATIONARY, 0, 0, ACC_SCALE_IDENTITY, 1, 1, 0, 0, false, /*FP4*/ 2, 2,
+                              /*BF16*/ 3, 0);
+  gemmini_extended3_config_ld(lda, MVIN_SCALE_IDENTITY, false, 0);
+  gemmini_extended3_config_ld(ldb, MVIN_SCALE_IDENTITY, false, 1);
+  gemmini_config_st(2 * ldc * sizeof(uint16_t));
+  const int kts = K / Kt;
+  for (int c = 0; c < N / NC; c++)
+    for (int t = 0; t < kts; t++) {
+      const int h = 1 + (int) (mxn_loops++ & 1);
+      gemmini_loop_ws_mx(M / (2 * DIM), NC / (2 * DIM), Kt / DIM,
+                         A + (size_t) t * Kt, B + (size_t) t * Kt * ldb + (size_t) c * NC / 2,
+                         t == kts - 1 ? C + (size_t) c * NC : NULL,
+                         lda, ldb, ldc,
+                         A_sc + (size_t) (t * Kt / 32) * sc_lda,
+                         B_sc + (size_t) (t * Kt / 32) * sc_ldb + (size_t) c * NC, sc_lda, sc_ldb,
+                         /*accumulate*/ t > 0, h, h);
+    }
+  return 0;
 }
 
 // Ideal mesh cycles of one M x K x N matmul on the 16x16 mesh.

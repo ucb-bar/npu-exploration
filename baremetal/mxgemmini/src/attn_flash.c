@@ -32,6 +32,28 @@
 #ifndef ATTN_HEADS
 #define ATTN_HEADS 1   // query heads packed as rows (GQA: they share K/V)
 #endif
+// the pass's data: a single-pass header's arrays, or (attn_flash_layer.c) the current pass / kv head of a layer header
+#ifndef ATTN_FP4
+#define ATTN_FP4 0   // 1 (from the data header): Q, K, V and P in FP4 (E2M1) on the quad mesh (32 x 32 tiles, 4x rate)
+#endif
+#if ATTN_FP4 && !defined(ATTN_Q)
+#define ATTN_Q    Q4_IN    // [SQ/2][D] row pairs
+#define ATTN_QS   Q_SCALES
+#define ATTN_KT   KT4_IN   // [D][SK/2]
+#define ATTN_KTS  KT_SCALES
+#define ATTN_V    V4_IN    // [SK][D/2]
+#define ATTN_VS   V_SCALES
+#define ATTN_OREF O_REF_F_F32
+#endif
+#ifndef ATTN_Q
+#define ATTN_Q    Q_IN
+#define ATTN_QS   Q_SCALES
+#define ATTN_KT   KT_IN
+#define ATTN_KTS  KT_SCALES
+#define ATTN_V    V_IN
+#define ATTN_VS   V_SCALES
+#define ATTN_OREF O_REF_F_F32
+#endif
 #ifndef BK
 #define BK 64
 #endif
@@ -39,11 +61,15 @@
 #define ATTN_CAUSAL 0   // 1 (from the data header): queries are the last SQ keys; causal mask on the last key block
 #endif
 // d a power of 4: 1/sqrt(d) = 2^-(log4 d) exactly -> fold it into Q's E8M0 scales (the mesh then produces S/sqrt(d)
-// directly, bit-identical to the separate VPU multiply) and drop that pass; otherwise keep the MULS
-#ifndef ATTN_FOLD_SCALE
-#define ATTN_FOLD_SCALE (ATTN_D == 16 || ATTN_D == 64 || ATTN_D == 256)
+// directly, bit-identical to the separate VPU multiply) and drop that pass; otherwise keep the MULS.
+// ATTN_SCALE_IN_Q (data header): Q already carries 1/sqrt(d) (folded into Wq), so neither is needed.
+#ifndef ATTN_SCALE_IN_Q
+#define ATTN_SCALE_IN_Q 0
 #endif
-#define FOLD_SHIFT (ATTN_D == 16 ? 2 : ATTN_D == 64 ? 3 : 4)
+#ifndef ATTN_FOLD_SCALE
+#define ATTN_FOLD_SCALE (ATTN_SCALE_IN_Q || ATTN_D == 16 || ATTN_D == 64 || ATTN_D == 256)
+#endif
+#define FOLD_SHIFT (ATTN_SCALE_IN_Q ? 0 : ATTN_D == 16 ? 2 : ATTN_D == 64 ? 3 : 4)
 
 #if !defined(MX_ROCKET) && !defined(SPIKE_SIM)
 int main() { printf("skipped: needs the VPU config (MX_ROCKET) or Spike\n"); return 0; }
@@ -79,11 +105,16 @@ typedef char flash_blocks_ok[((SK - BK_FIRST - BK_LAST) % BK == 0 && BK_FIRST <=
 #define SPAD_STORE 0x38
 #define INC_ACC    0x100   // LOOP_WS rs2[8]: each loop takes the other accumulator half, so back-to-back loops never
                            // share accumulator rows (a loop's footprint: (M/16) * ceil4(N/16) * 4 rows <= 256)
-#define ACC_ROWS(m, n) (((m) / DIM) * ((((n) / DIM) + 3) / 4 * 4) * 4)
-typedef char flash_acc_half_fits[(ACC_ROWS(SQ, BK) <= 256 && ACC_ROWS(SQ, D) <= 256) ? 1 : -1];
+#define QT (ATTN_FP4 ? 2 : 1)   // operand elements per byte = output tile edge in DIMs (quad: 32 x 32 per pass)
+#if ATTN_FP4
+#define FLASH_ACC_ROWS(m, n) (((m) / (2 * DIM)) * ((n) / (2 * DIM)) * DIM)   // a quad tile: DIM rows
+#else
+#define FLASH_ACC_ROWS(m, n) (((m) / DIM) * ((((n) / DIM) + 3) / 4 * 4) * 4)
+#endif
+typedef char flash_acc_half_fits[(FLASH_ACC_ROWS(SQ, BK) <= 256 && FLASH_ACC_ROWS(SQ, D) <= 256) ? 1 : -1];
 typedef char flash_shape_ok[(BK % 32 == 0 && (SQ * BK / 32) % 32 == 0 && NB >= 2) ? 1 : -1];
 
-#define ROWS8(m, n)  ((m) * (n) / DIM)
+#define ROWS8(m, n)  ((m) * (n) / DIM / QT)   // MX operand rows (E4M3 or FP4)
 #define ROWS16(m, n) ((m) * (n) * 2 / DIM)
 // K/V: all blocks resident when they fit, else STREAMED through two block buffers (loads run under the matmuls)
 #define KV_BLK_ROWS (ROWS8(D, BK) + ROWS8(BK, D))
@@ -181,7 +212,7 @@ typedef char flash_shape_ok[(BK % 32 == 0 && (SQ * BK / 32) % 32 == 0 && NB >= 2
 #define ATTN_ST_BANK2 0
 #endif
 #define ATTN_ST_B2 (ATTN_SPLIT && !ATTN_O_LOW && ATTN_ST_BANK2 && ROWS16(SQ, BK) + ROWS16(SQ, D) + ST_ROWS * SQ <= BANK_ROWS)
-typedef char flash_st_bank2_ok[(!ATTN_ST_BANK2 || (ATTN_ST_B2 && !ATTN_CAUSAL)) ? 1 : -1];   // fits; mask not placed
+typedef char flash_st_bank2_ok[(!ATTN_ST_BANK2 || ATTN_ST_B2) ? 1 : -1];
 #define ATTN_ST_LOW (ATTN_SPLIT && !ATTN_O_LOW && !ATTN_ST_B2 && ATTN_ST_LOW_REQ && \
                      ROWS8(SQ, D) + V_BUFS * ROWS8(BK, D) + ST_ROWS * SQ <= BANK_ROWS)
 #if ATTN_ST_B2
@@ -199,17 +230,22 @@ typedef char flash_st_bank2_ok[(!ATTN_ST_BANK2 || (ATTN_ST_B2 && !ATTN_CAUSAL)) 
 #define ST_LT    (ST + 6 * SQ)
 typedef char flash_spad_fits[(SP_END <= SP_O && ST + ST_ROWS * SQ <= 4 * BANK_ROWS) ? 1 : -1];
 #define P_BUF(j)  (SP_P + ((j) & 1) * ROWS8(SQ, BK))
-// causal mask tile [SQ][SQ] BF16 (0 / -inf), added to the last SQ columns of the last block's S: in the bank the
-// last S is not in (split layout), so the per-row ADD reads its two operands from different banks
-#if ATTN_SPLIT && (ATTN_O_LOW || ((NB - 1) & 1))
+// causal mask: the queries are the last ATTN_CH keys (each packed head: ATTN_CH query rows). Tile [SQ][ATTN_CH] BF16
+// (0 / -inf; packed heads repeat it), added to the last ATTN_CH columns of the last block's S: in a bank the last S is
+// not in (split layout), so the ADD reads its two operands from different banks
+#define ATTN_CH (SQ / ATTN_HEADS)
+#if ATTN_ST_B2
+#define SP_MASK  (SP_V + V_BUFS * ROWS8(BK, D))                 // bank 0 after V (S is only ever in banks 2-3)
+#elif ATTN_SPLIT && (ATTN_O_LOW || ((NB - 1) & 1))
 #define SP_MASK  (S_BUF(NB) + ROWS16(SQ, BK) + ROWS16(SQ, D))   // after O_j in the bank the last S is not in
 #elif ATTN_ST_LOW
 #define SP_MASK  (SP_O + ROWS16(SQ, D))                         // bank 3 after O (the last S is in bank 2)
 #else
 #define SP_MASK  (ST + ST_ROWS * SQ)
 #endif
-typedef char flash_mask_fits[(!ATTN_CAUSAL || (SQ <= BK && SP_MASK + ROWS16(SQ, SQ) <= 4 * BANK_ROWS &&
-  (!ATTN_SPLIT || !((NB - 1) & 1) || SP_MASK + ROWS16(SQ, SQ) <= 3 * BANK_ROWS))) ? 1 : -1];
+typedef char flash_mask_fits[(!ATTN_CAUSAL || (ATTN_CH <= BK_LAST && SP_MASK + ROWS16(SQ, ATTN_CH) <= 4 * BANK_ROWS &&
+  (!ATTN_ST_B2 || SP_MASK + ROWS16(SQ, ATTN_CH) <= BANK_ROWS) &&
+  (ATTN_ST_B2 || !ATTN_SPLIT || !((NB - 1) & 1) || SP_MASK + ROWS16(SQ, ATTN_CH) <= 3 * BANK_ROWS))) ? 1 : -1];
 #define KT_BLK(j) (SP_KT + (ATTN_STREAM ? ((j) & 1) : (j)) * ROWS8(D, BK))
 #define V_BLK(j)  (SP_V + (ATTN_STREAM ? ((j) % V_BUFS) : (j)) * ROWS8(BK, D))
 
@@ -248,8 +284,8 @@ static int n_mm, mm_next;
 static void gated_load(int n) {   // B-scale slice of the n-th matmul into weight half n % 2
   const mm_t m = sched[n];
   // braced: the gemmini_* macros expand to { ... } blocks
-  if (m.kind == 0) { gemmini_mx_load_scales_2d_gated((uint64_t)&KT_SCALES[0][BOFF(m.j)], BLEN(m.j), D / 32, SK, (n & 1) << 12, 1); }
-  else             { gemmini_mx_load_scales_2d_gated((uint64_t)&V_SCALES[BOFF(m.j) / 32][0], D, BLEN(m.j) / 32, D, (n & 1) << 12, 1); }
+  if (m.kind == 0) { gemmini_mx_load_scales_2d_gated((uint64_t)&ATTN_KTS[0][BOFF(m.j)], BLEN(m.j), D / 32, SK, (n & 1) << 12, 1); }
+  else             { gemmini_mx_load_scales_2d_gated((uint64_t)&ATTN_VS[BOFF(m.j) / 32][0], D, BLEN(m.j) / 32, D, (n & 1) << 12, 1); }
 }
 static void issue_mm(void) {   // issue the next scheduled matmul
   const int n = mm_next++;
@@ -258,16 +294,18 @@ static void issue_mm(void) {   // issue the next scheduled matmul
   // ex/store configs are the same for every matmul (spad stores carry their own row step): once per pass, so between
   // matmuls only the scale config and gated scale load sit outside a loop (both may pass a store-only loop)
   if (n == 0) {
+    // the format first: the scale memory files a scale load in the layout of the live act / weight width
+    gemmini_extended3_config_ex(WEIGHT_STATIONARY, 0, 0, ACC_SCALE_IDENTITY, 1, 1, 0, 0, false, ATTN_FP4 ? 2 : 0,
+                                ATTN_FP4 ? 2 : 0, OUT_BF16, 0);
     gated_load(0);
-    gemmini_extended3_config_ex(WEIGHT_STATIONARY, 0, 0, ACC_SCALE_IDENTITY, 1, 1, 0, 0, false, 0, 0, OUT_BF16, 0);
     gemmini_config_st(N * sizeof(uint16_t));
   }
-  gemmini_mxquant_config_mvout_managed((uint64_t)scale_sink, M / DIM, N / DIM, K / DIM, m.kind ? 0 : 1, n & 1, 1, 1);
+  gemmini_mxquant_config_mvout_managed((uint64_t)scale_sink, M / (QT * DIM), N / (QT * DIM), K / DIM, m.kind ? 0 : 1, n & 1, 1, 1);
   if (n + 1 < n_mm) gated_load(n + 1);   // waits for this config to free its half; lands under this matmul
   const uint32_t a = m.kind ? P_BUF(m.j) : SP_Q;
   const uint32_t b_arg = m.kind ? V_BLK(m.j) + ROWS8(BLEN(m.j), D) : KT_BLK(m.j) + ROWS8(D, BLEN(m.j));
   const uint32_t c = m.kind ? OJ_BUF(m.j) : S_BUF(m.j);
-  gemmini_loop_ws_spad(M / DIM, N / DIM, K / DIM, 0, 0, 0, a, b_arg, 0, c,
+  gemmini_loop_ws_spad(M / (QT * DIM), N / (QT * DIM), K / DIM, 0, 0, 0, a, b_arg, 0, c,
                        false, false, false, false, false, NO_ACTIVATION, 0, 0, false, SPAD_STORE | INC_ACC);
 }
 
@@ -277,10 +315,15 @@ static void softmax_block(int j) {
   const int bk = BLEN(j), rows = SQ * bk / 8, rlen = bk / 8;
   const uint32_t S = S_BUF(j), m = ST_M(j & 1), m_old = ST_M((j & 1) ^ 1);
   if (!ATTN_FOLD_SCALE) gemmini_vpu_scalar(VPU_MULS, S, S, sc, rows);
-  if (ATTN_CAUSAL && j == NB - 1)   // query r's row of S: mask its last SQ keys (the chunk's own tokens)
-    for (int r = 0; r < SQ; r++)
-      gemmini_vpu_binary(VPU_ADD, S + r * (bk / 8) + (bk - SQ) / 8, S + r * (bk / 8) + (bk - SQ) / 8,
-                         SP_MASK + r * (SQ / 8), SQ / 8);
+  if (ATTN_CAUSAL && j == NB - 1) {   // query r's row of S: mask its last ATTN_CH keys (the chunk's own tokens)
+    if (bk == ATTN_CH) {   // the whole last block is the chunk
+      gemmini_vpu_binary(VPU_ADD, S, S, SP_MASK, rows);
+    } else {
+      for (int r = 0; r < SQ; r++)
+        gemmini_vpu_binary(VPU_ADD, S + r * (bk / 8) + (bk - ATTN_CH) / 8, S + r * (bk / 8) + (bk - ATTN_CH) / 8,
+                           SP_MASK + r * (ATTN_CH / 8), ATTN_CH / 8);
+    }
+  }
   if (j == 0) {
     gemmini_vpu_reduce(VPU_RMAX, m, S, rows, rlen);
   } else {
@@ -304,18 +347,47 @@ static void softmax_block(int j) {
   }
 }
 static void requant_block(int j) {
+#if ATTN_FP4
+  gemmini_spad_requant_fp4(P_BUF(j), S_BUF(j), SQ, BLEN(j), 1, (uint64_t)p_scales[j & 1], 1);
+#else
   gemmini_spad_requant(P_BUF(j), S_BUF(j), SQ, BLEN(j), 1, (uint64_t)p_scales[j & 1], 1);
+#endif
 }
 static void update_block(int j) {   // O = O * a_j + O_j
   const int rows = SQ * D / 8;
   gemmini_vpu_bcast(VPU_MUL, SP_O, SP_O, ST_AJ(j), rows, D / 8);
   gemmini_vpu_binary(VPU_ADD, SP_O, SP_O, OJ_BUF(j), rows);
 }
+#ifndef ATTN_STATS_OUT
+#define ATTN_STATS_OUT 0   // 1: also store the stats in the pipelined pass (the binaries of the 10-04..10-06 VCS runs)
+#endif
+static void store_o(void) {
+#ifdef ATTN_STORE_O   // the includer takes O from SP_O (llama_layer_e2e.c: requantized for o_proj)
+  ATTN_STORE_O();
+#else
+  mvout_rows(O_hw, SP_O, ROWS16(SQ, D));
+  if (ATTN_SERIAL || ATTN_STATS_OUT) mvout_rows(st_hw, ST, ST_ROWS * SQ);   // m x2, mt, a x2, 1/l, lt (, a2): for diff_report
+#endif
+}
 static void finalize(void) {
   gemmini_vpu_unary(VPU_RCP, ST_L, ST_L, SQ);
   gemmini_vpu_bcast(VPU_MUL, SP_O, SP_O, ST_L, SQ * D / 8, D / 8);
-  mvout_rows(O_hw, SP_O, ROWS16(SQ, D));
-  mvout_rows(st_hw, ST, ST_ROWS * SQ);   // m x2, mt, a x2, 1/l, lt (, a2) (debug)
+  store_o();
+}
+// ATTN_FOLD_FINAL: the last O update with 1/l folded in, O = O * (a / l) + O_j * (1 / l). l is final once the last
+// softmax has run, so 1/l and O * (a / l) run while the last PV still computes; after it only O_j * (1/l) and the add
+// remain (one 1024-row pass less after the last matmul). Rounds differently from (O * a + O_j) / l: its own hash.
+#ifndef ATTN_FOLD_FINAL
+#define ATTN_FOLD_FINAL 0
+#endif
+static void finalize_folded(void) {
+  const int rows = SQ * D / 8, j = NB - 1;
+  gemmini_vpu_unary(VPU_RCP, ST_L, ST_L, SQ);
+  gemmini_vpu_binary(VPU_MUL, ST_AJ(j), ST_AJ(j), ST_L, SQ);
+  gemmini_vpu_bcast(VPU_MUL, SP_O, SP_O, ST_AJ(j), rows, D / 8);
+  gemmini_vpu_bcast(VPU_MUL, OJ_BUF(j), OJ_BUF(j), ST_L, rows, D / 8);
+  gemmini_vpu_binary(VPU_ADD, SP_O, SP_O, OJ_BUF(j), rows);
+  store_o();
 }
 
 // mismatches of O_hw vs the serial O per 16x16 tile, and which stats rows differ
@@ -342,13 +414,17 @@ static int diff_report(const char *name) {
 }
 
 static void load_q(void) {
-  mvin_tiles((const uint8_t *)Q_IN, D, SQ, D, SP_Q);
+#ifdef ATTN_LOAD_Q   // the includer fills SP_Q (llama_layer_e2e.c: from the device's own RoPE output)
+  ATTN_LOAD_Q();
+#else
+  mvin_tiles((const uint8_t *)ATTN_Q, D, SQ / QT, D, SP_Q);
+#endif
 #if ATTN_CAUSAL
-  mvin_tiles((const uint8_t *)MASK_BF16, DIM, ROWS16(SQ, SQ), DIM, SP_MASK);   // BF16 rows, 16 B each
+  mvin_tiles((const uint8_t *)MASK_BF16, DIM, ROWS16(SQ, ATTN_CH), DIM, SP_MASK);   // BF16 rows, 16 B each
 #endif
 }
-static void load_k(int j) { if (j < NB) mvin_tiles(&KT_IN[0][BOFF(j)], SK, D, BLEN(j), KT_BLK(j)); }
-static void load_v(int j) { if (j < NB) mvin_tiles(&V_IN[BOFF(j)][0], D, BLEN(j), D, V_BLK(j)); }
+static void load_k(int j) { if (j < NB) mvin_tiles(&ATTN_KT[0][BOFF(j) / QT], SK / QT, D, BLEN(j) / QT, KT_BLK(j)); }
+static void load_v(int j) { if (j < NB) mvin_tiles(&ATTN_V[BOFF(j)][0], D / QT, BLEN(j), D / QT, V_BLK(j)); }
 static void loads(void) {   // everything up front (resident K/V)
   load_q();
   for (int j = 0; j < NB; j++) { load_k(j); load_v(j); }
@@ -416,17 +492,26 @@ static uint64_t run_pipelined(void) {
     if (!ATTN_QK_FIRST && j + 2 < NB) { issue_mm(); FENCE_IF(4); } // QK(j+2)
     if (!ATTN_VPU_EARLY && j > 0) { update_block(j); FENCE_IF(16); }
   }
+#if ATTN_FOLD_FINAL
+  typedef char flash_fold_final_ok[(ATTN_VPU_EARLY && ATTN_UPD_LATE && NB > 1) ? 1 : -1];
+  finalize_folded();
+#else
   if (ATTN_VPU_EARLY && ATTN_UPD_LATE && NB > 1) { update_block(NB - 1); FENCE_IF(16); }
   finalize();
+#endif
+#ifdef ATTN_PASS_TAIL   // the includer's CPU work while the pass drains (llama_layer_e2e.c: the next kv head's cache)
+  ATTN_PASS_TAIL();
+#endif
   gemmini_fence();
   return read_cycles() - t0;
 }
 
-int main() {
+static void attn_print_config(void) {
   if (BK_FIRST != BK || BK_LAST != BK) printf("key blocks: first %d, last %d, middle %d\n", BK_FIRST, BK_LAST, BK);
-  printf("attn_flash: Sq=%d Sk=%d d=%d, Bk=%d (%d key blocks), online softmax on the VPU, K/V %s\n", SQ, SK, D, BK, NB,
+  printf("attn_flash: %s, Sq=%d Sk=%d d=%d, Bk=%d (%d key blocks), online softmax on the VPU, K/V %s\n",
+         ATTN_FP4 ? "FP4 x FP4 (quad mesh)" : "E4M3", SQ, SK, D, BK, NB,
          !ATTN_STREAM ? "resident" : ATTN_V3 ? "streamed (K x2, V x3 block buffers)" : "streamed (K x2, V x2 block buffers)");
-  printf("mask: %s\n", ATTN_CAUSAL ? "causal (queries are the last Sq keys)" : "none (every key precedes every query)");
+  printf("mask: %s\n", ATTN_CAUSAL ? "causal (each head's queries are the last keys)" : "none (every key precedes every query)");
   printf("mesh order: %s\n", ATTN_QK_FIRST ? "QK(j+2) before PV(j)" : "PV(j) before QK(j+2)");
   printf("vector order: %s\n", ATTN_VPU_EARLY ? ATTN_UPD_LATE ? "softmax(j+1) before PV(j); loads, update(j-1), SR(j+1) after it" : "softmax(j+1) before PV(j); loads, update(j), SR(j+1) after it" : "softmax(j+1) after PV(j), update(j) last");
   printf("softmax: %s\n", ATTN_EXPSUM ? "fused EXPSUM (exp(S - m) and its row sums in one pass)" :
@@ -434,16 +519,46 @@ int main() {
   printf("spad layout: %s\n", !ATTN_SPLIT ? "packed" : ATTN_O_LOW ? "bank split, O + stats in bank 0 (S / O_j in banks 2-3)" :
          ATTN_ST_B2 ? "bank split, stats in bank 2 (banks 0-1 only mesh operands)" :
          ATTN_ST_LOW ? "bank split, stats in bank 0 (S / O_j / O in banks 2-3)" : "bank split (mesh operands banks 0-1, VPU buffers banks 2-3)");
-  gemmini_flush(0);
-  const uint8_t *q_sc = &Q_SCALES[0][0];
+  printf("1/sqrt(d): %s\n", ATTN_SCALE_IN_Q ? "carried by Q (folded into Wq; no VPU pass)" :
+         ATTN_FOLD_SCALE ? "folded into Q's scales (no VPU pass)" : "VPU multiply");
+}
+static void attn_load_q_scales(void) {   // the pass's Q scales -> act half 1
+  const uint8_t *q_sc = &ATTN_QS[0][0];
+#if ATTN_FP4   // quad act: the scale memory takes the load in the 32-row layout only once the format is FP4
+  gemmini_extended3_config_ex(WEIGHT_STATIONARY, 0, 0, ACC_SCALE_IDENTITY, 1, 1, 0, 0, false, 2, 2, OUT_BF16, 0);
+#endif
   if (ATTN_FOLD_SCALE) {   // Q * 2^-log4(d): every E8M0 byte - log4(d)
     for (int g = 0; g < D / 32; g++)
-      for (int m = 0; m < SQ; m++) q_scales_folded[g][m] = Q_SCALES[g][m] - FOLD_SHIFT;
+      for (int m = 0; m < SQ; m++) q_scales_folded[g][m] = ATTN_QS[g][m] - FOLD_SHIFT;
     q_sc = &q_scales_folded[0][0];
   }
-  printf("1/sqrt(d): %s\n", ATTN_FOLD_SCALE ? "folded into Q's scales (no VPU pass)" : "VPU multiply");
-  gemmini_mx_load_scales_2d((uint64_t)q_sc, SQ, D / 32, SQ, 4096, 0);   // Q -> act half 1
+  gemmini_mx_load_scales_2d((uint64_t)q_sc, SQ, D / 32, SQ, 4096, 0);
   gemmini_fence();
+}
+// per-head O hashes, the check against Spike's hash, per-head accuracy vs fp64 attention; returns 1 on a mismatch
+static int attn_report(uint64_t h_pip, uint64_t expect) {
+  if (ATTN_HEADS > 1)   // per packed head: equals that head run alone with the same key blocks (rows are independent)
+    for (int h = 0; h < ATTN_HEADS; h++)
+      printf("O hash head %d: %016llx\n", h, (unsigned long long)fnv(&O_hw[h * (SQ / ATTN_HEADS)][0], sizeof(O_hw) / ATTN_HEADS));
+  printf("check O hash vs Spike: %s (%016llx)\n", h_pip == expect ? "match" : "MISMATCH", (unsigned long long)h_pip);
+  for (int h = 0; h < ATTN_HEADS; h++) {   // accuracy over each packed head's first 16 rows (fp64 attention reference)
+    float num = 0, den = 0;
+    const int r0 = h * (SQ / ATTN_HEADS) * D;
+    for (int i = r0; i < r0 + 16 * D; i++) {
+      float r; memcpy(&r, &((const uint32_t *)ATTN_OREF)[i], 4);
+      const float o = bf(((const uint16_t *)O_hw)[i]);
+      num += (o - r) * (o - r); den += r * r;
+    }
+    printf("accuracy O head %d (16 rows): rel_fro %d ppm vs fp64 attention\n", h, (int)(sqrtf(num / den) * 1e6f));
+  }
+  return h_pip != expect;
+}
+
+#ifndef ATTN_LAYER   // attn_flash_layer.c has its own main (all passes of a layer)
+int main() {
+  attn_print_config();
+  gemmini_flush(0);
+  attn_load_q_scales();
 
 #include ATTN_EXPECT
   uint64_t c_ser = 0, h_ser = 0;
@@ -455,8 +570,8 @@ int main() {
   } else {   // L2 warm-up, as the serial pass did: every Q/K/V load once, and the K/V scale arrays (CPU reads)
     if (ATTN_STREAM) { load_q(); for (int j = 0; j < NB; j++) { load_k(j); load_v(j); } } else loads();
     volatile uint32_t sink = 0;
-    for (size_t i = 0; i < sizeof(KT_SCALES); i += 64) sink += ((const volatile uint8_t *)KT_SCALES)[i];
-    for (size_t i = 0; i < sizeof(V_SCALES); i += 64) sink += ((const volatile uint8_t *)V_SCALES)[i];
+    for (size_t i = 0; i < sizeof(ATTN_KTS); i += 64) sink += ((const volatile uint8_t *)ATTN_KTS)[i];
+    for (size_t i = 0; i < sizeof(ATTN_VS); i += 64) sink += ((const volatile uint8_t *)ATTN_VS)[i];
     gemmini_fence();
   }
   memset(O_hw, 0xa5, sizeof(O_hw));
@@ -481,23 +596,9 @@ int main() {
   if (ATTN_SERIAL)
     printf("check O hash: serial %016llx, pipelined %016llx (%s)\n", (unsigned long long)h_ser,
            (unsigned long long)h_pip, h_ser == h_pip ? "equal" : "DIFFER");
-  if (ATTN_HEADS > 1)   // per packed head: equals that head run alone with the same key blocks (rows are independent)
-    for (int h = 0; h < ATTN_HEADS; h++)
-      printf("O hash head %d: %016llx\n", h, (unsigned long long)fnv(&O_hw[h * (SQ / ATTN_HEADS)][0], sizeof(O_hw) / ATTN_HEADS));
-  printf("check O hash vs Spike: %s (%016llx)\n", h_pip == EXP_FLASH_HASH_O ? "match" : "MISMATCH", (unsigned long long)h_pip);
-  fail |= h_pip != EXP_FLASH_HASH_O;
-  for (int h = 0; h < ATTN_HEADS; h++) {   // accuracy over each packed head's first 16 rows (O_REF_F: fp64 attention)
-    float num = 0, den = 0;
-    const int r0 = h * (SQ / ATTN_HEADS) * D;
-    for (int i = r0; i < r0 + 16 * D; i++) {
-      float r; memcpy(&r, &((const uint32_t *)O_REF_F_F32)[i], 4);
-      const float o = bf(((const uint16_t *)O_hw)[i]);
-      num += (o - r) * (o - r); den += r * r;
-    }
-    printf("accuracy O head %d (16 rows): rel_fro %d ppm vs fp64 attention\n", h, (int)(sqrtf(num / den) * 1e6f));
-  }
+  fail |= attn_report(h_pip, EXP_FLASH_HASH_O);
 
-  const uint64_t mesh = 2ULL * SQ * SK * D / (DIM * DIM);
+  const uint64_t mesh = 2ULL * SQ * SK * D / (DIM * DIM) / (QT * QT);   // FP4: the quad mesh's 4x rate
   if (ATTN_SERIAL) {
     printf("PERF serial    %6llu cycles: loads %llu | QK %llu | softmax %llu | requant %llu | PV %llu | O update %llu | final %llu\n",
            (unsigned long long)c_ser, (unsigned long long)stage[0], (unsigned long long)stage[1], (unsigned long long)stage[2],
@@ -511,4 +612,5 @@ int main() {
   printf("attn_flash %s\n", fail ? "FAILED" : "PASSED");
   return fail;
 }
+#endif   // ATTN_LAYER
 #endif
