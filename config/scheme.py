@@ -213,4 +213,4 @@ def scheme(recipe: Hardware, run: Run, *, compiled: bool = False):
     else:
         raise RecipeError(f"reduce {reduce!r}; choose from {', '.join(REDUCERS)}")
     return Scheme(recipe.name if reduce == "hardware" else f"{recipe.name}/{reduce}", a=q, b=q, reduce=r,
-                  rows=rows(run))
+                  rows=rows(run), block_size=recipe.block)
