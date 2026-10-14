@@ -45,6 +45,21 @@ VPU_TESTS = [("chain_pipelined", ISA / "chain_pipelined-baremetal", "chain_pipel
              ("attn_flash_llama_2h_fused", KER / "attn_flash_llama_2h_fused", "attn_flash_llama_2h_fused"),
              ("mx_bench_matmul_m64_proj", KER / "mx_bench_matmul_m64_proj", "mx_bench_matmul_m64_proj"),
              ("llama_e2e_elemwise", KER / "llama_e2e_elemwise", "llama_e2e_elemwise")]
+# FP6 E3M2 LUT config (MxE3M2PerfGemminiRocketConfig, preset e3m2_lut): load / compute / mvout / total of every
+# "PERF <name> ... key=value" line.
+CFG_LUT = "chipyard.harness.TestHarness.MxE3M2PerfGemminiRocketConfig"
+LUT_TESTS = [("fp6 requant 128x128x512", ISA / "matmul_tiled_fp6_128x128x512_requant-baremetal",
+              "matmul_tiled_fp6_128x128x512_requant-baremetal"),
+             ("fp6 chain 128x128", ISA / "matmul_tiled_fp6_128x128_chain-baremetal", "matmul_tiled_fp6_128x128_chain-baremetal")]
+
+
+def perf_kv_lines(text):
+    out = []
+    for ln in text.splitlines():
+        if ln.startswith("PERF ") and "=" in ln:
+            name, d = ln.split()[1], kv(ln)
+            out += [(f"{name.split('_')[-1]} {k}", d[k]) for k in ("load", "compute", "mvout", "total") if k in d]
+    return out
 
 
 def same_binary(elf, dump):
@@ -158,6 +173,20 @@ def main():
         mod = perf_cycles(run(a.so, elf, "perf", dict(extra, GEMMINI_PERF_CONFIG="e4m3_vpu")))
         for (k, v), (_, m) in zip(vcs, mod):
             rows.append((name, k, v, m, ""))
+    for name, elf, log in LUT_TESTS:
+        if a.only and a.only not in name:
+            continue
+        logf = VCS / CFG_LUT / f"{log}.log"
+        if not elf.exists() or not logf.exists():
+            continue
+        if same_binary(elf, VCS / CFG_LUT / f"{log}.dump") is False:
+            rows.append((name, "(ELF rebuilt since the VCS run)", 0, 0, "binary differs: not compared"))
+            continue
+        vcs = perf_kv_lines(logf.read_text(errors="replace"))
+        mod = dict(perf_kv_lines(run(a.so, elf, "perf", dict(extra, GEMMINI_PERF_CONFIG="e3m2_lut"))))
+        for k, v in vcs:
+            if k in mod:
+                rows.append((name, k, v, mod[k], ""))
     w = max(len(r[0]) for r in rows) if rows else 10
     print(f"{'test':{w}}  {'phase':28} {'VCS':>9} {'model':>9}   error")
     for name, k, v, m, note in rows:

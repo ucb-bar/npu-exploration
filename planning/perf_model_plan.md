@@ -778,3 +778,49 @@ In the model the same store's last read lands 4 cycles before the accumulates st
 chain does not form. These are ±15-cycle coincidences; reproducing them would need a cycle-exact mesh / store
 pipeline. **Result: FP4 109,479 (−2.4 %), steady-state blocks within ~20 cycles; tail and last block unchanged.**
 Regression unchanged within 0.4 % (chain fenced +1.5 %, pipelined −0.9 %; 2h_fused 154,186).
+
+### 13.17 rmsnorm1 −16 % (llama_e2e_elemwise, 2026-10-08)
+VCS rmsnorm1 129,344 / residual 112,078. The phase is 4 load bursts (~268 mvins, one per ~50 cycles, reader
+latency-bound at the 32-Get cap) separated by ~19k-cycle VPU + SPAD_REQUANT + mvout stretches. Model before:
+108,653 (−16.0 %) / 108,633 (−3.1 %): bursts −17 %, gaps −16 %. New scripts (waveform-debug/mxgemmini_debug_scripts):
+`perf_get_latency.py` (Get latency first-touch / repeat, in-flight histogram), `perf_get_stream.py`,
+`perf_line_resp_offsets.py`, `perf_reissue.py`, `perf_mvin_life.py`, `perf_l2_fill_latency.py` (L2 DRAM-side fill
+latency vs fills outstanding, inter-arrival), `perf_dram_stalls.py`, `perf_axi_reads.py`.
+1. **Gaps: SPAD_REQUANT <-> store order was one-way.** RTL (ReservationStation.scala:503-520): a store that is not a
+   BF16 StCSpad store (raw mvout, DRAM loop store, quantized spad store) waits for every older SPAD_REQUANT, and
+   SPAD_REQUANT for every older such store; a CONFIG_SCALE_MEM that may read act half 0 waits for an older SR. The
+   model only had SR-after-quantized-loop-store, so 124 mvouts overlapped the second SR. `rs_cmd_t::sr_ordered_store`,
+   `scale_cfg_act0`. Gaps −16 -> −5 %; rmsnorm1 −16.0 -> −9.6 %.
+2. **DRAM latency to the last beat**: unloaded fill (nothing else outstanding) = 32 at the L2 DRAM side = 8 + 24;
+   `mem.dram_latency` 20 -> **24** (the 20 came from a first-beat median).
+3. **Reader frees tracker slots in arrival order** (XactTracker pop at the beat packer, DMA.scala:84-85), not request
+   order: `dma.ooo_free` 1; the next Get leaves `dma.free_latency` 3 after a response at the cap (290/293); a freed
+   load-command slot starts the next mvin `ld.start_latency` 6 later (last response -> next Get 7). RTL reader sits at
+   the cap 35 % of the time.
+4. **DRAM refresh**: stalls of 57-104 cycles every ~3,900 (perf_dram_stalls.py over the whole phase):
+   `mem.dram_refresh_interval` 3900 / `mem.dram_refresh_cycles` 85; the DRAM port is claimed lazily per window.
+5. **Write-backs break the read stream's open row**: the RTL fill latency grows ~8.5 cycles per fill outstanding beyond
+   2 (DRAMSim2 itself: AXI shows up to 8 reads outstanding, no AR backpressure, same 43-cycle latency). A cap of 3
+   reads fit elemwise (−4.0 / −0.3 %) but broke the read-only streams (mx_mem_bw A_cold +28.6 %) — rejected. Each
+   burst interleaves ~63 dirty write-backs with ~1,009 fills (RTL C7 / A6 counts; model 58 / 1,006): an L2 write-back
+   now goes through the open-row bank model (`dram_ready(victim)`), and **`mem.dram_model` defaults to 1**.
+Result (defaults): **rmsnorm1 122,863 (−5.0 %), residual 116,074 (+3.6 %)**; mx_mem_bw B_cold −5.6 -> +0.9 %,
+mvout_16B −15.8 -> −8.4 %; llama_mlp mesh −16 -> −14 %; dramloop unchanged except kt −6.8 -> −8.8 %; chain fenced
++1.8 %; attn_vpu_fa −6.4 %; 2h_fused −1.3 % (154,375); FP4 −2.3 % (109,513). Preset `firesim` keeps dram_model 0 and
+no refresh (FASED, 13.9); there the reader changes move element-wise phases +6.5 % (rmsnorm1 114.5k -> 122.0k), the
+layer +0.3 %.
+Open: per-burst still −8 % (RTL mean Get latency 86 vs model ~80; mvout 44 vs 39 cyc each); the residual overshoot.
+
+### 13.18 Two-phase cycles: same-cycle races (2026-10-13)
+Events in one cycle ran in insertion order, so a decision could see a state change made earlier in its own cycle --
+which clocked RTL never does (every block reads the registers of t-1). The case that bit (13.16.1): store A releases
+its pending bank, a VPU issue check runs, store B claims the bank -- all at t; the VPU saw a one-cycle hole and
+issued. `event_queue_t` now has two phases per cycle: `at()` events (evaluate) run before `commit()` events (register
+updates); anything a commit schedules for its own cycle runs the next one; outside event dispatch (the instruction
+stream) scheduling is an evaluate. `store_unit_t`'s pending-bank claims and releases are commits, so the vector issue
+gate sees the previous cycle's set whatever the order. Only that state is converted; other same-cycle interactions
+(RS completion -> dependent issue, port grants) keep their calibrated lags and should move to commit() one at a
+time, each checked against the Scala (some paths do forward a freed slot combinationally).
+Result: neutral -- every regression row within +-1 cycle; FP4 109,513 -> 109,526; attn 7b_fused / vb_fused / 2h /
+2h_fused (model only, ELFs rebuilt since VCS) within 10 cycles. `st.pending_delay` / `st.pending_tail` stay as
+measured; whether pending_tail can now shrink is untested.
