@@ -207,3 +207,32 @@ Work branch: libgemmini `cyclotron-integration` (checkout: `cyclotron/libgemmini
   was 6k), but kernel_cycles 403,536 (+15.5 %): the O-normalize warps' global stores / loads (and the final verify,
   82.9k RTL vs 142.2k) are slower than the RTL -> the gmem latencies / miss handling need their own calibration:
   RTL trace has dmem req/resp per lane; cyclotron's trace has no resp cycle yet (next: record gmem completions).
+- 2026-10-14 **S6 gmem calibration** (cyclotron gmem completions recorded: `gmem_req` table, uncommitted; L0 MSHR
+  1 -> 8 in radiance/gmem.toml, uncommitted). FSDB (NPI): the L0d is `l0d.tlnbdCache.nbdCache` with **4 MSHRs**.
+  * RTL levels by address replay (scratch s6/rtl_levels.py: L0 64x64 B direct-mapped per core, L1 64 KiB, L2 512 KiB;
+    the replay agrees with the model's own hit flags on its trace): unloaded (min / p10) L0 hit 6 (9 multi-line),
+    L1 17-19, L2 ~34, DRAM p10 96 / p25 112. Model: L0 13 (floor 10 with tag/data 0 -- coalescer + links), L1 23, L2
+    36, **DRAM 243**. New user runs (mt_new2 / mt_fa / silufuse, HBM simv, killed at 14:02 exit=255, ~40-107k cycles,
+    runtime-assembled code -> PCs unmappable): used for latency only; L0 6/9 confirmed, prologue stores p50 440-570.
+  * Prototyped in a scratch copy (s6/cyproto), fa_mxfp8_sr (RTL kernel_cycles 349,281):
+    - DRAM base 200 -> 60 (model DRAM 103), L0 MSHRs 4: model DRAM stores p90 1,569 -> still queueing.
+    - **in-order global stores** (RTL LSU.scala:550-643: a warp's stores issue in order and the queue head advances
+      only on the memory response; loads wait for older stores): hazards.rs `store_in_order` + hooks in gmem/issue.rs
+      (block a warp's gmem request while it has a store out) and gmem/completions.rs (store answered). Store DRAM
+      p90 110. 333.3k.
+    - **vx_join** is never issued in the RTL (0 in its trace, cyclotron 11,095): costs +3 on the preceding redirect.
+      hazards.rs `Join` class + `join` hold (default 8 = old behavior; radiance 3). 329.1k; warp 0's 476-cycle
+      command intervals +342 -> +46.
+    - icache `hit_rate = 0.98` (probabilistic, ~80-cycle misses) -> 1.0: the RTL loop has no icache misses
+      (long prologue gaps are not at line crossings). 326.8k.
+  * Remaining: (a) prologue -18k: the 16 warp stacks are 128 KiB apart -> same set at L0 / L1 / L2; each RTL stack
+    store evicts a dirty line and refills (~630 cycles, 4 in flight per core); cyclotron's writebacks are by fixed
+    rate (l1/l2_writeback_rate), not by dirty state; (b) main loop +15k: the intervals where Muon waits on Gemmini
+    (+600-800 per block) -> S6c.
+- 2026-10-15 **The 4 fixes landed in cyclotron** (user-approved; as prototyped): radiance/gmem.toml DRAM 60 + L0 MSHRs
+  4; hazards.rs `store_in_order` (+ hooks gmem/issue.rs, gmem/completions.rs); hazards.rs `Join` class + `join` hold
+  (default 8 = old behavior, radiance 3); new radiance/icache.toml (hit_rate 1.0) used by config/radiance_e4m3_gemmini.toml.
+  fa_mxfp8_sr on the SoC config: 387,298 cycles, kernel_cycles 326,766 (−6.4 %), exact 32,768 / 32,768; identical in
+  4/4 runs. cargo test: 192 pass. Non-radiance configs (no [hazards]): same results as HEAD; note the default
+  config is NOT deterministic run to run (fa_vcs.toml: 429,662 or 429,669, at HEAD too -- pre-existing).
+  Docs: docs/radiance_perf_model.md (design + charts); project log ~/project-logs/radiance-perf-model.md.
