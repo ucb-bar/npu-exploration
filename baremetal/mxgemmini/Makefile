@@ -27,6 +27,17 @@ OBJCOPY   := riscv$(XLEN)-unknown-elf-objcopy
 BENCH     := $(ROCC)/riscv-tests/benchmarks/common
 OUT       := $(REPO)/out/baremetal
 
+# FP6 E3M2 LUT MLP projections, one build per LUT update granularity G (src/mlp_proj_fp6_g<G>.c, data blob of the same name)
+FP6_MLP   := mlp_proj_fp6_g0 mlp_proj_fp6_g1 mlp_proj_fp6_g2 mlp_proj_fp6_g3 mlp_proj_fp6_g4 mlp_proj_fp6_g5
+# The same on the 8x8 mesh (MxDim8{E3M2,Fp4}PerfGemminiRocketConfig): DIM=8 params header via -iquote dim8/<fmt>
+FP6_MLP_DIM8 := mlp_proj_fp6_dim8_g0 mlp_proj_fp6_dim8_g1 mlp_proj_fp6_dim8_g2 mlp_proj_fp6_dim8_g3 mlp_proj_fp6_dim8_g4 mlp_proj_fp6_dim8_g5
+FP6_MLP   += $(FP6_MLP_DIM8) mlp_proj_fp4_short_dim8
+FP6_CHAIN := mlp_proj_fp6_chain_g1 mlp_proj_fp6_chain_g3
+FP6_CHAIN_DIM8 := mlp_proj_fp6_dim8_chain_g1 mlp_proj_fp6_dim8_chain_g3
+FP6_MLP   += $(FP6_CHAIN) $(FP6_CHAIN_DIM8)
+VPU_DIM8  := vpu_ops_dim8 vpu_softmax_dim8 spad_requant_dim8 spad_requant_fp4_dim8 spad_requant_lut_fp6_dim8
+# 32x32 mesh + VPU (MxDim32{E4M3,E3M2,Fp4}VpuGemminiRocketConfig): DIM=32 params header via -iquote dim32/vpu
+VPU_DIM32 := vpu_ops_dim32 vpu_softmax_dim32 spad_requant_dim32 spad_requant_fp4_dim32 spad_requant_lut_fp6_dim32
 KERNELS   := llama_mlp llama_mlp_small llama_mlp_tiny llama_mlp_tiny_t1 llama_mlp_tiny_db llama_mlp_tiny_native llama_mlp_small_native llama_mlp_tiny_native_ua llama_mlp_native llama_mlp_full \
              llama_attention llama_attention_small llama_attention_tiny llama_attention_tiny_t1 llama_attention_tiny_native llama_attention_small_native llama_attention_native llama_attention_full \
              llama_attention_full_dgb \
@@ -34,15 +45,16 @@ KERNELS   := llama_mlp llama_mlp_small llama_mlp_tiny llama_mlp_tiny_t1 llama_ml
              llama_layer_full llama_layer_full_native llama_layer_full_native_gh \
              mx_bench_matmul mx_bench_matmul_m32 mx_bench_matmul_m32_blk mx_bench_matmul_m64_proj \
              attn_vpu attn_vpu_mid attn_vpu_fa attn_flash attn_flash_mid attn_flash_llama attn_flash_llama_wide attn_flash_llama_causal attn_flash_llama_vb attn_flash_llama_2h attn_flash_llama_vb_fused attn_flash_llama_2h_fused attn_flash_llama_vb_fused_dbg attn_flash_layer5 attn_flash_layer5_fused attn_flash_llama7b attn_flash_llama7b_fused mx_fp4_dramloop attn_flash_llama_2h_fused_fp4 attn_flash_llama7b_fused_fp4 llama_mlp_e2e llama_mlp_e2e_fp4 mlp_proj_fp4 mlp_proj_fp4_short mlp_proj_fp4_ares mlp_proj_fp4_short_ares mlp_proj_fp4_short_chain mlp_proj_fp4_short_m128_chain \
-             llama_layer_e2e llama_e2e_elemwise
+             $(FP6_MLP) $(VPU_DIM8) $(VPU_DIM32) llama_layer_e2e llama_e2e_elemwise
 
 # Kernels whose data is a linked binary blob rather than C initializers, and the blob each uses.
 # See the objcopy rule below for why the basenames matter.
 BLOB_KERNELS := llama_attention_full llama_attention_full_dgb llama_mlp_full llama_layer_full llama_layer_full_native \
                 llama_layer_full_native_gh mx_bench_matmul mx_bench_matmul_m32 mx_bench_matmul_m32_blk mx_bench_matmul_m64_proj llama_model llama_model_l2 \
-                llama_model_m64 llama_model_m64l2 mx_bench llama_layer_e2e llama_e2e_elemwise llama_mlp_e2e llama_mlp_e2e_fp4 mlp_proj_fp4 mlp_proj_fp4_short mlp_proj_fp4_ares mlp_proj_fp4_short_ares mlp_proj_fp4_short_chain mlp_proj_fp4_short_m128_chain
+                llama_model_m64 llama_model_m64l2 mx_bench llama_layer_e2e llama_e2e_elemwise llama_mlp_e2e llama_mlp_e2e_fp4 mlp_proj_fp4 mlp_proj_fp4_short mlp_proj_fp4_ares mlp_proj_fp4_short_ares mlp_proj_fp4_short_chain mlp_proj_fp4_short_m128_chain \
+                $(FP6_MLP)
 BLOBS        := llama_attn_full llama_mlp_full llama_layer_full llama_model llama_model_l2 \
-                llama_model_m64 llama_model_m64l2 mx_bench llama_layer_e2e llama_mlp_fp4 mlp_proj_fp4 mlp_proj_fp4_short mlp_proj_fp4_short_m128
+                llama_model_m64 llama_model_m64l2 mx_bench llama_layer_e2e llama_mlp_fp4 mlp_proj_fp4 mlp_proj_fp4_short mlp_proj_fp4_short_m128 $(FP6_MLP)
 blob_llama_attention_full := llama_attn_full
 blob_llama_attention_full_dgb := llama_attn_full
 blob_llama_mlp_full       := llama_mlp_full
@@ -69,6 +81,15 @@ blob_mlp_proj_fp4_short_chain := mlp_proj_fp4_short
 blob_mlp_proj_fp4_short_m128_chain := mlp_proj_fp4_short_m128
 $(foreach d,spike mx_rocket,$(foreach k,mlp_proj_fp4_ares mlp_proj_fp4_short_ares mlp_proj_fp4_short_chain mlp_proj_fp4_short_m128_chain,$(eval $(OUT)/$(d)/$(k): $(CURDIR)/src/mlp_proj_fp4.c $(CURDIR)/include/mx_native.h)))
 $(foreach d,spike mx_rocket,$(eval $(OUT)/$(d)/mlp_proj_fp4_short: $(CURDIR)/src/mlp_proj_fp4.c))
+$(foreach k,$(FP6_MLP),$(eval blob_$(k) := $(k)))
+$(foreach k,$(FP6_CHAIN) $(FP6_CHAIN_DIM8),$(eval blob_$(k) := $(subst chain_,,$(k))))
+$(foreach k,$(FP6_CHAIN_DIM8),$(eval EXTRA_$(k) := -DMP_DIM8 -iquote $(CURDIR)/dim8/e3m2))
+$(foreach k,$(VPU_DIM8),$(eval EXTRA_$(k) := -iquote $(CURDIR)/dim8/e3m2_vpu))
+$(foreach k,$(VPU_DIM32),$(eval EXTRA_$(k) := -iquote $(CURDIR)/dim32/vpu))
+$(foreach k,$(FP6_MLP_DIM8),$(eval EXTRA_$(k) := -DMP_DIM8 -iquote $(CURDIR)/dim8/e3m2))
+EXTRA_mlp_proj_fp4_short_dim8 := -DMP_DIM8 -iquote $(CURDIR)/dim8/fp4
+$(foreach d,spike mx_rocket,$(eval $(OUT)/$(d)/mlp_proj_fp4_short_dim8: $(CURDIR)/src/mlp_proj_fp4.c $(CURDIR)/include/mx_native.h))
+$(foreach d,spike mx_rocket,$(foreach k,$(FP6_MLP),$(eval $(OUT)/$(d)/$(k): $(CURDIR)/src/mlp_proj_fp6.c $(CURDIR)/include/mx_native.h)))
 blob_of = $(blob_$(1))
 
 # `llama_model_l2` is llama_model.c against a 2-layer data header -- the bring-up build. The layer

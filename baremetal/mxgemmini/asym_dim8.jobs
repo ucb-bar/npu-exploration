@@ -11,6 +11,7 @@
 #
 # EXCLUDED (same as dim32 -- weight=E4M3 x fp4/fp6 activation, never worked, out of scope): fp4_e4m3,
 # fp4_e4m3s, e3m2_e4m3, e3m2_e4m3s, e2m3_e4m3.
+# EXCLUDED (2026-10-18): e5m2_e4m3s -- act-quad x wei-single (mode5) is unsupported at DIM8, as at DIM16.
 
 # --- quad x quad combos (both operands nibble/LUT) ---
 matmul_tiled_asym_fp4_fp6_64x64_dim8
@@ -35,4 +36,3 @@ matmul_tiled_asym_fp4_e5m2_64x64_dim8
 matmul_tiled_asym_e4m3s_fp4_64x64_dim8
 matmul_tiled_asym_e4m3s_e3m2_64x64_dim8
 matmul_tiled_asym_e4m3s_e5m2_64x64_dim8
-matmul_tiled_asym_e5m2_e4m3s_64x64_dim8

@@ -335,7 +335,7 @@ def _mesh_cols(args):
     from rtl_exact import rtl_datapath as RD
     torch.set_num_threads(1)
     n0, PA, XA, PB, XB = args
-    cfg = RD.load_config()
+    cfg = RD.load_config(Path(os.environ["MXG_RTL_CONFIG"]) if os.environ.get("MXG_RTL_CONFIG") else None)   # e.g. the DIM=8 variant
     FM = RD._golden(cfg)
     PA, XA, PB, XB = (torch.from_numpy(np.ascontiguousarray(t)) for t in (PA, XA, PB, XB))
     K, M = PA.shape

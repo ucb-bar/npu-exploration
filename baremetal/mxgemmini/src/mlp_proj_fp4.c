@@ -15,9 +15,11 @@
 int main() { printf("skipped: needs MX_ROCKET or Spike\n"); return 0; }
 #else
 
+#ifndef MP_DIM8   // DIM=8 builds take DIM / BANK_ROWS / ACC_ROWS from the DIM=8 params header (-iquote dim8/<fmt>)
 #define DIM 16
 #undef BANK_ROWS
 #define BANK_ROWS 4096
+#endif
 #include "mx_native.h"
 
 static uint16_t Gs[MP_M * MP_NG] __attribute__((aligned(64)));

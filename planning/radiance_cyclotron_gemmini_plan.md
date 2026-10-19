@@ -236,3 +236,97 @@ Work branch: libgemmini `cyclotron-integration` (checkout: `cyclotron/libgemmini
   4/4 runs. cargo test: 192 pass. Non-radiance configs (no [hazards]): same results as HEAD; note the default
   config is NOT deterministic run to run (fa_vcs.toml: 429,662 or 429,669, at HEAD too -- pre-existing).
   Docs: docs/radiance_perf_model.md (design + charts); project log ~/project-logs/radiance-perf-model.md.
+- 2026-10-15 **S6c Gemmini-side calibration** (fa_mxfp8_sr; RTL = FSDB via NPI; model = GEMMINI_PERF_TRACE).
+  * New RTL extractors (waveform-debug/mxgemmini_debug_scripts): perf_radiance_retire.py (gemmini.retired changes),
+    perf_radiance_rs.py (RS alloc / issue per queue / completions), perf_radiance_tl.py <port> (TileLink A/D fires).
+    Fixed an off-by-one in their handshake sampling (and perf_radiance_cmds.py): a fire is an edge whose PRECEDING
+    cycle has valid & ready (lo < edge <= hi); counts were right, cycles / sampled fields could be one off.
+    RTL gemmini.io_cmd_bits_inst_funct is 0 on every command (funct is not carried there); pair commands by index.
+  * libgemmini trace additions (uncommitted, trace-only): `ev,loopdone,<cycle>,<loop>` (a loop's last RS entry done,
+    model.cc), `ev,get|sget|lget,<cycle>,<line addr>` (address added) and `ev,data|cdata,<cycle>,<addr>` (response,
+    memory_system.cc). Timing unchanged (387,298 / 365,257 identical with and without the trace).
+  * Counts match: 728 cmds (rs1/rs2 identical), 140 loops, RS ex 32,874 / st 776 / vec 32; data Gets 33,792
+    (gemmini.auto_spad_id_out; auto_tl_out = scale loader 1,056 = model sget; spad_writer_out = 12,415 Puts).
+    RS ld: RTL 2,114 vs model 1,058 (each model loop_lda/ldb = 2 RTL entries) -- not yet explained, small effect.
+  * Found 1: acc -> scratchpad stores (loop_stspad, 776): RTL reads the accumulator 1 row/cycle (acc_mems_0
+    read_req ready every cycle; next store 19 cycles later, 520 of 776); model st.spad_read_interval 4 (Rocket
+    requant-to-FP8 measurement) -> 67 cycles each. With 1: steady-state RS drift flat (was +17.7k over the loop),
+    store gaps 19. kernel_cycles 326,766 -> 304,797.
+  * Found 2: DMA Gets (RTL latency, by source; first touch of a 32 B line / repeat): RTL first mean 159 (p50 147,
+    p90 262), repeat min 8 p50 20 mean 38; model first fixed ~125 (bandwidth-bound: 32 in flight x 4 cycles/line;
+    mem.dram_latency has no effect), repeat 12. mem.dram_bytes_per_cycle 6.4 (5 cycles/line) -> first mean 158;
+    mem.l2_hit_latency 8 -> repeat p50 8. kernel_cycles 306,505.
+  * Phase breakdown (RTL / model with 1+2): START -> first Gemmini cmd 24,468 / 2,281 (−22.2k: Muon prologue);
+    first cmd -> last loop 308,497 / 298,601 (−9.9k, all in the first ~50k: compute-only loops 0x3b8 −440..−1,312,
+    Muon issues the first commands earlier); last loop -> END 16,316 / 5,623 (−10.7k: Muon's O stores).
+  * cyclotron DRAM bytes_per_cycle 32 -> 8 and writeback rates 1.0: no effect on prologue / tail (2.5k / 6k).
+    RTL prologue stack stores cost ~630 each: 16 stacks in one set at L0/L1/L2 -> dirty victim writebacks down to
+    DRAM + refill, 4 MSHRs per core for 8 warps. Needs deterministic dirty tracking in cyclotron's caches.
+- 2026-10-17 **libgemmini radiance preset committed** (cc9d917; cyclotron submodule bump 400953e): st.spad_read_interval 1,
+  mem.dram_bytes_per_cycle 6.4, mem.l2_hit_latency 8 + trace events. fa_mxfp8_sr kernel_cycles 306,505, exact.
+- 2026-10-17 **RTL memory path facts (simv 2026-10-07 = radiance-hbm-cy source; FSDB + NPI)** for the Muon prologue / tail:
+  * L1 = TLNBDCache (Rocket NonBlockingDCache) 512 x 4 x 32 B, 8 MSHRs (FSDB l1cache.nbdCache.mshrs_0..7); L0d same cache
+    type 64 x 1 x 64 B, 4 MSHRs. Write-back, write-allocate (no_alloc false). Dirty evictions = C Release, TLCToTLULNode
+    -> A PutFullData to the level below; the MSHR does not wait for its ack.
+  * L1 write-allocate confirmed: Puts that miss (address replay) are followed by an AcquireBlock of the line in 92 %
+    (33/36, lag p50 4). But 3,204 of 3,240 Puts hit in the L1.
+  * **MemParallelism (the prologue bottleneck)**: l0dInFlight 3 per core and l1InFlight 3 per cluster (DepthHellaCacheIF:
+    a request held from A to D). FSDB: L1 input never above 3 (prologue: at 3 for 56 % of cycles, >= 2 for 76 %); core 0
+    L0d input never above 3 (prologue at 3 for 69 %). L0d Acquire->Grant prologue p50 75 / mean 93, in flight mean 0.66.
+  * Prologue L1 input: 796 Gets (mean 57) + 516 Puts (mean 21); an L0 miss = 2 L1 Gets (64 B / 32 B lines), a dirty L0
+    eviction = 2 Puts. L1 -> L2 AcquireBlock p50 38 (L2 hits). Model: 85 / 127 prologue stores go to DRAM (its L2 thrashes:
+    16 stacks in one 8-way set) -- RTL may hash L2 sets (radiance memory/AddressHash.scala), to check.
+  * Prototype (scratch s6/cyproto2): MSHR same-set nack rule (l0/l1_mshr_set_conflict) -- no effect alone; in-flight caps
+    l0_inflight_limit 3 / l1_inflight_limit 3 (cluster.rs admission + release at completion): tail 5,623 -> 10,497 (RTL
+    16,316), prologue 2,281 -> 3,058 (RTL 24,468), kernel 306,505 -> 312,469. Prologue model stores n 127 p50 399 vs RTL
+    n 290 p50 627.
+- 2026-10-17 **Step A landed in cyclotron (uncommitted): in-flight caps** -- policy l0_inflight_limit / l1_inflight_limit
+  (default 0 = off; radiance/gmem.toml 3 / 3): cluster.rs refuses a request while its core's L0 adapter (or, for an L0
+  miss, its cluster's L1 adapter) holds the limit, takes the slots when accepted (also on an MSHR merge), releases them
+  at completion (push_completion); request.rs inflight_held; cache.rs contains() (no LRU update).
+  fa_mxfp8_sr: kernel 312,469 (RTL 349,281, −10.5 %), prologue 3,058 (24,468), Gemmini phase 298,914 (308,497), tail
+  10,497 (16,316); exact, identical over 2 runs; per-level unloaded latencies unchanged (L0 13, L1 23, L2 36, DRAM 103).
+  Default config identical to HEAD (409,985 -- HEAD changed from 429,662 with the libgemmini radiance preset of cc9d917,
+  which the default [gemmini] uses). cargo test 192 pass.
+  Worker warps' first barrier: RTL 21.7-23.4k, model 6.8-10.6k (was 1.4-5k). Warp 0 (Gemmini driver) first MMIO
+  model ~3k vs RTL 24.5k. RTL prologue L1 input by region: stack 693 Gets (mean 61) + 512 Puts (22); code 103 Gets.
+- 2026-10-18 Step A committed (cyclotron f40779a). **Steps B + C (uncommitted)**:
+  * B `l1_inflight_per_line`: an L0 miss holds l0_line/l1_line (2) L1 slots. First version (wait for both) allowed one
+    L0 miss at a time and starved core 1 (core 0 took every freed slot: workers 15.9k vs 30.1k). Refined: admitted with
+    one free slot, the rest owed and granted in order as slots free; refused cores served oldest-waiter-first (a waiter
+    counts only while still retrying: a stale stamp deadlocked the run at 40 Gemmini commands).
+  * C `l0_writeback_model` (new gmem/dirty.rs): dirty L0 lines (store completions); an evicting fill or an L0 flush
+    queues l0_line/l1_line Puts per dirty line; each takes an L1 slot for l0_writeback_cycles 22 (RTL L1 Put mean,
+    99 % L1 hits); cache.rs fill() returns the evicted line.
+  * fa_mxfp8_sr: A 312,469 -> B 322,164 -> C 324,406 (RTL 349,281, −7.1 %); prologue (warp 0 first cmd) 6,124 (24,468);
+    workers' first barrier 16.4-17.4k (RTL 21.7-23.4k); Gemmini 303,765 (308,497); tail 14,517 (16,316). Exact, 2 runs
+    identical, default config = HEAD (409,985), cargo test 192.
+  * Still missing: RTL every warp's stack stores 597-658 apart (warp 0 too), per core ~1 L0 miss at a time (163 cycles
+    per store per core; Acquire in flight mean 0.66). Model warp 0 89-103, workers 301-396. Candidate: the L0d nack --
+    a miss to a set with an outstanding miss of another line is nacked, and with nackBlocksSetOnly = false (default,
+    simv build) a nack blocks EVERY new request to that L0 until its replay succeeds.
+- 2026-10-18 B + C committed (cyclotron 792c5aa). **Step E (uncommitted): l0_nack_blocks_all** -- mshr.rs conflicts()
+  (no entry and table full, or another line of its set outstanding); cluster.rs: such an L0 miss is refused and
+  recorded, and until a request for that line is accepted every other request of the core is refused.
+  fa_mxfp8_sr 324,406 -> 324,061 (small); exact, deterministic, default config = HEAD, cargo test 192.
+  Why small: model warp 0 runs its spill block before the workers' stores and finishes it uncontended. RTL warp 0 also
+  starts first (latencies 157, 149, 6, 6), but once the workers store (~900) core 1's store latencies run 241 -> 909:
+  the core clears ~one miss per 150-200 cycles; warp 0 then waits 1,172 -> 2,969 and stores ~600 apart. Model: one
+  miss holds the L0 MSHR ~100 (the RTL's miss is serial: release, Acquire -> Grant ~93, refill, replay).
+- 2026-10-18/19 Step E (L0 nack blocks all) and the l0_dirty_miss_cycles knob tried and **dropped** (user): E changed
+  nothing measurable; the knob (FSDB: dirty-victim store miss +164 prologue / +64 Gemmini phase / +109 tail over a clean
+  one; Release -> Acquire p50 65) fixed the Gemmini phase (−0.3 %) but pushed the tail +7..+22k and left the prologue.
+  **Baseline = C (792c5aa).**
+  * Prologue = known deviation, accepted: the slow RTL prologue is the kernels' callee-saved register spill to per-warp
+    stacks that alias to one cache set; across ~25 traced kernels the stack-store burst runs 65-95 cycles per store
+    per cluster (p50 latency 400-600; exceptions m0/m1 ~55-60, flash_attention_mx none). Cold L2: yes (670 of 833
+    prologue stack fetches miss), but the L2 -> DRAM fetch is ~40 cycles, so not the cause. Model (C): 50 cycles/store.
+  * Tail (last loop -> END = core 0 warp 0's path): RTL warps queue a burst of ~9 stores in ~40 cycles and then wait
+    ~1.1-3.1k at the next load (lw ra / epilogue restores lw s0..s8) while the stores drain one at a time; the model
+    stalled the warp at every store. Global-store memUpdate does not exist (LSU.scala:1446-1457: shared memory only).
+- 2026-10-19 **store_in_order revised, committed (cyclotron 1b77626)**: stores queue without stalling the warp, go to
+  memory one at a time per warp (pending.rs), loads wait for older stores; store-data entries held until the store
+  issues; split-store counter bug fixed. fa_mxfp8_sr: kernel 330,801 (−5.3 %), prologue 8,268, Gemmini 303,637
+  (−1.6 %), tail 18,896 (+2.6k). Remaining tail cause: four workers queue their bursts at once and block on the 8
+  per-core store-data entries (RTL warps drift apart). Variants: global_stq 16 per warp: no change; 16 store-data
+  entries: tail 17,547 -- not adopted (RTL value is 8).

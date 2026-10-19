@@ -103,7 +103,7 @@ static int mxn_matmul(const uint8_t *A, int lda, const uint8_t *B, int ldb, uint
 // half the spad rows of E4M3, the accumulator the same. config_st is two C rows (an acc row holds two).
 static int mxn_pick_kt_fp4(int M, int K, int NC) {
   for (int kt = 512; kt >= 32; kt >>= 1)
-    if (K % kt == 0 && M * kt / 32 + kt * NC / 32 <= MXN_HALF_ROWS && (kt / 32) * NC <= 4096 &&
+    if (K % kt == 0 && M * kt / (2 * DIM) + kt * NC / (2 * DIM) <= MXN_HALF_ROWS && (kt / 32) * NC <= 4096 &&
         (kt / 32) * M <= 4096) return kt;
   return 0;
 }
@@ -139,6 +139,55 @@ static int mxn_matmul_fp4(const uint8_t *A, int lda, const uint8_t *B, int ldb, 
   return 0;
 }
 
+// LUT x LUT (FP6 E3M2/E2M3, FP8 E4M3-quad/E5M2) on the quad mesh: operands are 4-bit codebook indices packed like FP4
+// (A [M/2][K] row pairs, B [K][N/2]); scales and C as mxn_matmul_fp4. The caller has set config_ex (format + LUT), the
+// LUT granularity G (CONFIG_SCALE_MEM) and loaded the act codebooks flat (MX_LOAD_LUT sel 1). Weight codebooks are
+// loop-managed: N-chunk c's loops load B_lut + ((c*NC) >> G) codebooks of lut_bytes (12 FP6, 16 FP8) into their
+// slot's weight-LUT half (32 codebooks), so NC <= 32 << G.
+// _ex: A_lut != NULL makes the act-in codebooks loop-managed too (each loop loads its M >> G <= 32 into its slot's act
+// half), so the caller need not load them flat and back-to-back matmuls can use different codebooks with no fence;
+// set_st = 0 skips config_st (it waits for every loop to finish), the caller having set the store stride (2 * ldc * 2).
+static int mxn_matmul_lut_ex(const uint8_t *A, int lda, const uint8_t *B, int ldb, uint16_t *C, int ldc,
+                             const uint8_t *A_sc, int sc_lda, const uint8_t *B_sc, int sc_ldb,
+                             const uint8_t *B_lut, int lut_bytes, int G, int M, int K, int N,
+                             const uint8_t *A_lut, int set_st) {
+  int NC = 0;
+  for (int nc = 512; nc >= 2 * DIM; nc >>= 1)
+    if (N % nc == 0 && M * nc / (DIM * 4) <= ACC_ROWS / 2 && (nc >> G) <= 32) { NC = nc; break; }
+  const int Kt = NC ? mxn_pick_kt_fp4(M, K, NC) : 0;
+  if (!NC || !Kt || M % (2 * DIM) || ((uintptr_t) B_lut & 7) || (((NC >> G) * lut_bytes) & 7) ||
+      (((uintptr_t) A_sc | (uintptr_t) B_sc | (uintptr_t) sc_lda | (uintptr_t) sc_ldb) & 7)) {
+    printf("mxn_matmul_lut: unsupported shape/alignment M=%d K=%d N=%d G=%d (Kt=%d NC=%d)\n", M, K, N, G, Kt, NC);
+    return 1;
+  }
+  gemmini_extended3_config_ld(lda, MVIN_SCALE_IDENTITY, false, 0);
+  gemmini_extended3_config_ld(ldb, MVIN_SCALE_IDENTITY, false, 1);
+  if (A_lut && (((M >> G) > 32) || ((uintptr_t) A_lut & 7) || (((M >> G) * lut_bytes) & 7))) {
+    printf("mxn_matmul_lut: loop-managed act codebooks need M >> G <= 32 (M=%d G=%d)\n", M, G);
+    return 1;
+  }
+  if (set_st) gemmini_config_st(2 * ldc * sizeof(uint16_t));
+  const int kts = K / Kt;
+  for (int c = 0; c < N / NC; c++)
+    for (int t = 0; t < kts; t++) {
+      const int h = 1 + (int) (mxn_loops++ & 1);
+      gemmini_loop_ws_mx_lut(M / (2 * DIM), NC / (2 * DIM), Kt / DIM,
+                             A + (size_t) t * Kt, B + (size_t) t * Kt * ldb + (size_t) c * NC / 2,
+                             t == kts - 1 ? C + (size_t) c * NC : NULL,
+                             lda, ldb, ldc,
+                             A_sc + (size_t) (t * Kt / 32) * sc_lda,
+                             B_sc + (size_t) (t * Kt / 32) * sc_ldb + (size_t) c * NC, sc_lda, sc_ldb,
+                             A_lut, B_lut + (size_t) ((c * NC) >> G) * lut_bytes,
+                             /*accumulate*/ t > 0, h, h);
+    }
+  return 0;
+}
+static int mxn_matmul_lut(const uint8_t *A, int lda, const uint8_t *B, int ldb, uint16_t *C, int ldc,
+                          const uint8_t *A_sc, int sc_lda, const uint8_t *B_sc, int sc_ldb,
+                          const uint8_t *B_lut, int lut_bytes, int G, int M, int K, int N) {
+  return mxn_matmul_lut_ex(A, lda, B, ldb, C, ldc, A_sc, sc_lda, B_sc, sc_ldb, B_lut, lut_bytes, G, M, K, N, NULL, 1);
+}
+
 // mxn_matmul_fp4 with A RESIDENT ("A anywhere"): A is loaded into the scratchpad ONCE, K-tile t as one block of
 // (M/32) x (Kt/16) tiles at row (a_base + t * blk) mod the scratchpad, and every loop reads its K-tile there (A = NULL:
 // no A load, a_spad_id 0 -> the loop's a_addr_start from LOOP_WS_CONFIG_SPAD_AB). B double-buffers in two explicit
@@ -160,12 +209,12 @@ static int mxn_fp4_plan(mxn_fp4_mm *p, const uint8_t *A, int lda, const uint8_t 
   for (int nc = 512; nc >= 2 * DIM && !NC; nc >>= 1)
     if (N % nc == 0 && M * nc / (DIM * 4) <= ACC_ROWS / 2) NC = nc;
   for (int kt = 512; kt >= 32 && NC && !Kt; kt >>= 1)
-    if (K % kt == 0 && b_base + 2 * (kt * NC / 32) <= spad_rows && (kt / 32) * NC <= 4096 && (kt / 32) * M <= 4096)
+    if (K % kt == 0 && b_base + 2 * (kt * NC / (2 * DIM)) <= spad_rows && (kt / 32) * NC <= 4096 && (kt / 32) * M <= 4096)
       Kt = kt;
   if (!NC || !Kt || M % (2 * DIM) || (((uintptr_t) A_sc | (uintptr_t) B_sc | (uintptr_t) sc_lda | (uintptr_t) sc_ldb) & 7))
     return 1;
   *p = (mxn_fp4_mm) {A, B, A_sc, B_sc, C, lda, ldb, ldc, sc_lda, sc_ldb, M, K, N, a_base, b_base, NC, Kt,
-                     M / (2 * DIM), Kt / DIM, K / Kt, M / (2 * DIM) * (Kt / DIM) * DIM, Kt * NC / 32};
+                     M / (2 * DIM), Kt / DIM, K / Kt, M / (2 * DIM) * (Kt / DIM) * DIM, Kt * NC / (2 * DIM)};
   for (int t = 0; t < p->kts; t++) {   // every A block inside the scratchpad, clear of the B buffers
     const int r = (a_base + t * p->blk) % spad_rows;
     if (r + p->blk > spad_rows || (r < b_base + 2 * p->b_rows && b_base < r + p->blk)) return 1;
