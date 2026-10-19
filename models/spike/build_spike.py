@@ -291,6 +291,9 @@ def build(recipe, *, force: bool = False, gxx: str | None = None, quiet: bool = 
         "glibcxx_max": ours,
         "cycle_model": has_cycle_model(so),
     }, indent=2) + "\n", encoding="utf-8")
+    if not quiet:
+        print(f"[built     ] {so} ({so.stat().st_size} B, needs GLIBCXX_{ours})")
+    return so
 
 
 def has_cycle_model(so: Path) -> bool:
@@ -300,10 +303,6 @@ def has_cycle_model(so: Path) -> bool:
         return b"GEMMINI_MODE" in so.read_bytes()
     except OSError:
         return False
-
-    if not quiet:
-        print(f"[built     ] {so} ({so.stat().st_size} B, needs GLIBCXX_{ours})")
-    return so
 
 
 def program(recipe) -> str:
