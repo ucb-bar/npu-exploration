@@ -206,6 +206,37 @@ $(OUT)/mx_rocket/%: $(CURDIR)/src/%.c $(DEPS)
 	$(CC) $(CFLAGS_BM) -DMX_ROCKET $(EXTRA_$*) $< -o $@ $(RUNTIME) \
 		$(if $(filter $(BLOB_KERNELS),$*),$(OUT)/mx_rocket/$(call blob_of,$*)_blob.o,) $(LIBS)
 
+# llama_layer_mx: one decoder layer of a 7-13B model, one ELF per (model, projection format, mesh):
+# src/llama_layer_mx.c against data/llama_mx_<model>_<fmt>.{h,bin} (gen/gen_llama_layer_mx.py) and the rtl_exact
+# golden's data/llama_mx_<model>_<fmt>_d<dim>_expect.h (gen/golden_llama_layer_mx.py). Kept out of KERNELS (the blobs
+# are 0.1-0.35 GB each): `make llama-mx` builds them all, `make llama-mx-tiny` the bring-up shape.
+# DIM != 16 takes DIM / BANK_ROWS / ACC_ROWS from that mesh's VPU params header (-iquote dim<N>/<cfg>).
+LMX_MODELS   := llama31_8b llama2_7b llama2_13b qwen25_7b mistral_7b
+LMX_DIMS_fp8 := 16 8 32
+LMX_DIMS_fp4 := 16 8 4
+LMX_DIMS_fp6 := 16 8 4
+LMX_PARAMS_4  := dim4/vpu
+LMX_PARAMS_8  := dim8/e3m2_vpu
+LMX_PARAMS_32 := dim32/vpu
+# the 4x4 mesh's 128 KB scratchpad: attention in the packed layout with V double-buffered
+LMX_FLAGS_4   := -DATTN_V3=0 -DATTN_ST_BANK2=0
+lmx_elfs = $(foreach m,$(1),$(foreach f,fp8 fp4 fp6,$(foreach d,$(LMX_DIMS_$(f)),llama_mx_$(m)_$(f)_d$(d))))
+define LMX_RULE
+$(OUT)/$(1)/llama_mx_$(2)_$(3)_d$(4): $(CURDIR)/src/llama_layer_mx.c $(CURDIR)/src/attn_flash.c $(CURDIR)/include/mx_native.h \
+    $(CURDIR)/data/llama_mx_$(2)_$(3).h $(CURDIR)/data/llama_mx_$(2)_$(3)_d$(4)_expect.h $(OUT)/$(1)/llama_mx_$(2)_$(3)_blob.o
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS_BM) $(if $(filter spike,$(1)),-DSPIKE_SIM,-DMX_ROCKET) \
+	  $(if $(filter-out 16,$(4)),-DATTN_PARAMS_DIM -iquote $(CURDIR)/$(LMX_PARAMS_$(4))) $(LMX_FLAGS_$(4)) \
+	  -DLMX_DATA_H='"llama_mx_$(2)_$(3).h"' -DLMX_EXPECT_H='"llama_mx_$(2)_$(3)_d$(4)_expect.h"' \
+	  $$< -o $$@ $(RUNTIME) $(OUT)/$(1)/llama_mx_$(2)_$(3)_blob.o $(LIBS)
+endef
+$(foreach t,spike mx_rocket,$(foreach m,$(LMX_MODELS) tiny,$(foreach f,fp8 fp4 fp6,\
+  $(eval $(call BLOB_RULE,$(t),llama_mx_$(m)_$(f)))\
+  $(foreach d,$(LMX_DIMS_$(f)),$(eval $(call LMX_RULE,$(t),$(m),$(f),$(d)))))))
+.PHONY: llama-mx llama-mx-tiny
+llama-mx:      $(addprefix $(OUT)/spike/,$(call lmx_elfs,$(LMX_MODELS))) $(addprefix $(OUT)/mx_rocket/,$(call lmx_elfs,$(LMX_MODELS)))
+llama-mx-tiny: $(addprefix $(OUT)/spike/,$(call lmx_elfs,tiny))
+
 # The stacked-model kernels are kept OUT of the default KERNELS list: the full one carries ~1 GB of
 # weights, so `make` should not build it incidentally, and both need data that only
 # `gen_llama_model.py` produces.

@@ -300,6 +300,14 @@ static float mx_rel_fro_bf16_f32(const uint16_t *a, const float *b, int n) {
   return (den > 0.0f) ? sqrtf(num) / sqrtf(den) : 0.0f;
 }
 
+// Requant output scales: the hardware writes them block-major [GN][M] (byte g*M + m); goldens are row-major [M][GN].
+static int mx_count_diff_scales(const uint8_t *hw, const uint8_t *ref, int M, int GN) {
+  int d = 0;
+  for (int m = 0; m < M; m++)
+    for (int g = 0; g < GN; g++) d += hw[(size_t) g * M + m] != ref[(size_t) m * GN + g];
+  return d;
+}
+
 static int mx_count_diff_u8(const uint8_t *a, const uint8_t *b, int n) {
   int d = 0;
   for (int i = 0; i < n; i++) if (a[i] != b[i]) d++;

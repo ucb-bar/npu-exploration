@@ -86,9 +86,10 @@ static void mvin16(const void *src, uint32_t sp, int rows) {
 static void mvout16(void *dst, uint32_t sp, int rows) {
   for (int r = 0; r < rows; r += DIM) gemmini_extended_mvout((uint8_t *) dst + r * DIM, sp + r, DIM, DIM);
 }
-static void scales_t(uint8_t *dst, const uint8_t *src, int rows, int groups) {   // [rows][groups] -> [groups][rows]
-  for (int g = 0; g < groups; g++)
-    for (int m = 0; m < rows; m++) dst[g * rows + m] = src[m * groups + g];
+static void scales_t(uint8_t *dst, const uint8_t *src, int rows, int groups, int ch) {   // ch-row SR chunks [groups][ch] -> [groups][rows]
+  for (int t = 0; t < rows; t += ch)
+    for (int g = 0; g < groups; g++)
+      for (int r = 0; r < ch; r++) dst[g * rows + t + r] = src[t * groups + g * ch + r];
 }
 
 // ---- RMSNorm -> MX: 16 tokens per chunk, stream s in banks 2s (x, weight copy) / 2s+1 (y, stats, codes) ----
@@ -172,15 +173,13 @@ int main() {
 #define PHASE_END(p) do { gemmini_fence(); const uint64_t t_ = read_cycles(); ph[p] = t_ - tm; tm = t_; } while (0)
   rms_phase();
   PHASE_END(PH_RMS);
-  scales_t(xn_s, xn_sr, LM, LD / 32);
+  scales_t(xn_s, xn_sr, LM, LD / 32, 8);
   bad |= MATMUL(xn_c, LD, WG_, LF, Gb, LF, xn_s, WG_S_, LF, LM, LD, LF);
   bad |= MATMUL(xn_c, LD, WU_, LF, Ub, LF, xn_s, WU_S_, LF, LM, LD, LF);
   PHASE_END(PH_GU);
   swiglu_phase();
   PHASE_END(PH_SWIGLU);
-  for (int s = 0; s < 2; s++)
-    for (int g = 0; g < FH / 32; g++)
-      for (int m = 0; m < LM; m++) h_s[(s * (FH / 32) + g) * LM + m] = h_sr[s][m * (FH / 32) + g];
+  for (int s = 0; s < 2; s++) scales_t(h_s + s * (FH / 32) * LM, h_sr[s], LM, FH / 32, 8);
   bad |= MATMUL(h_c, LF, WD_, LD, Ym, LD, h_s, WD_S_, LD, LM, LF, LD);
   PHASE_END(PH_DOWN);
   residual_phase();

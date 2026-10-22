@@ -96,6 +96,9 @@ static void mvout_detile(uint8_t *dst, uint8_t *scratch, uint32_t spad, int M, i
 // requantizer's block scales into the act-scale window as well as to DRAM, and FP8 output is
 // deposited in the operand-A layout -- together, the next matmul's A operand, in place.
 // `accum` is loop_ws's ex_accumulate (rs1 bit 0): 0 OVERWRITES the output region, 1 adds into it.
+// act-scale window half the next mesh_matmul reads: 1 for a matmul that reads a resident producer's scales (a resident
+// matmul writes its output scales into the half it does not read), else 0 (MX_LOAD_SCALES dest 0)
+static int mesh_act_half = 0;
 static void mesh_matmul(int M, int K, int N, uint32_t a_spad, uint32_t b_arg, uint32_t c_spad,
                         int out_fmt, uint64_t scale_dram, int resident, int accum) {
   int I = M / DIM, J = N / DIM, Kt = K / DIM;
@@ -105,9 +108,9 @@ static void mesh_matmul(int M, int K, int N, uint32_t a_spad, uint32_t b_arg, ui
   // Braced: the gemmini_* macros expand to a `{ ... }` block, not a do-while, so an unbraced
   // if/else arm swallows the `else`.
   if (resident) {
-    gemmini_mxquant_config_mvout_resident(scale_dram, I, J, Kt, 0, 0, 1);
+    gemmini_mxquant_config_mvout_resident(scale_dram, I, J, Kt, mesh_act_half, 0, 1);
   } else {
-    gemmini_mxquant_config_mvout(scale_dram, I, J, Kt, 0, 0, 1);
+    gemmini_mxquant_config_mvout(scale_dram, I, J, Kt, mesh_act_half, 0, 1);
   }
   gemmini_loop_ws_spad(I, J, Kt,
                        0, 0, 0,

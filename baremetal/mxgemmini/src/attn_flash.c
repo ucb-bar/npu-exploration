@@ -82,9 +82,14 @@ int main() { printf("skipped: needs the VPU config (MX_ROCKET) or Spike\n"); ret
 #ifndef ATTN_EXPSUM
 #define ATTN_EXPSUM 0   // 1: EXPSUB that also writes the row sums (EXPSUM): no separate RSUM pass
 #endif
+// ATTN_PARAMS_DIM: take DIM / BANK_ROWS / ACC_ROWS from the params header (-iquote dim<N>/<cfg>: the 4x4, 8x8 and
+// 32x32 meshes); otherwise pin the 16x16 mesh against the shared header. One spad row = DIM bytes = VL BF16 VPU lanes.
+#ifndef ATTN_PARAMS_DIM
 #define DIM 16
 #undef BANK_ROWS
 #define BANK_ROWS 4096
+#endif
+#define VL (DIM / 2)
 #define SQ ATTN_SQ
 #define SK ATTN_SK
 #define D  ATTN_D
@@ -104,14 +109,14 @@ typedef char flash_blocks_ok[((SK - BK_FIRST - BK_LAST) % BK == 0 && BK_FIRST <=
 #define OUT_BF16 3
 #define SPAD_STORE 0x38
 #define INC_ACC    0x100   // LOOP_WS rs2[8]: each loop takes the other accumulator half, so back-to-back loops never
-                           // share accumulator rows (a loop's footprint: (M/16) * ceil4(N/16) * 4 rows <= 256)
+                           // share accumulator rows (a loop's footprint: (M/DIM) * ceil4(N/DIM) * DIM/4 rows <= ACC_ROWS/2)
 #define QT (ATTN_FP4 ? 2 : 1)   // operand elements per byte = output tile edge in DIMs (quad: 32 x 32 per pass)
 #if ATTN_FP4
 #define FLASH_ACC_ROWS(m, n) (((m) / (2 * DIM)) * ((n) / (2 * DIM)) * DIM)   // a quad tile: DIM rows
 #else
-#define FLASH_ACC_ROWS(m, n) (((m) / DIM) * ((((n) / DIM) + 3) / 4 * 4) * 4)
+#define FLASH_ACC_ROWS(m, n) (((m) / DIM) * ((((n) / DIM) + 3) / 4 * 4) * (DIM / 4))
 #endif
-typedef char flash_acc_half_fits[(FLASH_ACC_ROWS(SQ, BK) <= 256 && FLASH_ACC_ROWS(SQ, D) <= 256) ? 1 : -1];
+typedef char flash_acc_half_fits[(FLASH_ACC_ROWS(SQ, BK) <= ACC_ROWS / 2 && FLASH_ACC_ROWS(SQ, D) <= ACC_ROWS / 2) ? 1 : -1];
 typedef char flash_shape_ok[(BK % 32 == 0 && (SQ * BK / 32) % 32 == 0 && NB >= 2) ? 1 : -1];
 
 #define ROWS8(m, n)  ((m) * (n) / DIM / QT)   // MX operand rows (E4M3 or FP4)
@@ -120,7 +125,7 @@ typedef char flash_shape_ok[(BK % 32 == 0 && (SQ * BK / 32) % 32 == 0 && NB >= 2
 #define KV_BLK_ROWS (ROWS8(D, BK) + ROWS8(BK, D))
 #define FIXED_ROWS  (ROWS8(SQ, D) + 2 * ROWS16(SQ, BK) + 2 * ROWS8(SQ, BK) + 2 * ROWS16(SQ, D) + ROWS16(SQ, D))
 #ifndef ATTN_STREAM
-#define ATTN_STREAM (FIXED_ROWS + NB * KV_BLK_ROWS > 0x3000)
+#define ATTN_STREAM (FIXED_ROWS + NB * KV_BLK_ROWS > 3 * BANK_ROWS)
 #endif
 // streamed: K double-buffered (its buffer's last reader, QK(j), precedes the softmax ahead of the load), V TRIPLE-
 // buffered (V(j+2) reuses PV(j-1)'s buffer, already done) so a V load never waits on a running PV and never fills
@@ -199,7 +204,7 @@ typedef char flash_shape_ok[(BK % 32 == 0 && (SQ * BK / 32) % 32 == 0 && NB >= 2
 #define SP_P     (SP_S + 2 * ROWS16(SQ, BK))           // 2 x ROWS8(SQ, BK)
 #define SP_OJ    (SP_P + 2 * ROWS8(SQ, BK))            // 2 x ROWS16(SQ, D)
 #define SP_END   (SP_OJ + 2 * ROWS16(SQ, D))
-#define SP_O     (SP_END > 0x3000 ? SP_END : 0x3000)    // O in bank 3 when it fits: the O update reads O and O_j apart
+#define SP_O     (SP_END > 3 * BANK_ROWS ? SP_END : 3 * BANK_ROWS)   // O in bank 3 when it fits: the O update reads O and O_j apart
 #define S_BUF(j)  (SP_S + ((j) & 1) * ROWS16(SQ, BK))
 #define OJ_BUF(j) ((j) == 0 ? SP_O : SP_OJ + ((j) & 1) * ROWS16(SQ, D))
 #endif
@@ -264,9 +269,12 @@ static uint64_t fnv(const void *p, size_t n) {
   return h;
 }
 
-// tile (r,c) -> sp + (r*cols/16 + c)*16; up to 4 tiles per mvin (64-byte rows: 4x fewer RS load entries, faster DMA)
+// tile (r,c) -> sp + (r*cols/DIM + c)*DIM; up to MAX_BYTES / DIM tiles per mvin (64-byte rows: fewer RS load entries,
+// faster DMA)
 static void mvin_tiles(const uint8_t *src, int ld, int rows, int cols, uint32_t sp) {
-  const int tc = cols / DIM, w = tc % 4 == 0 ? 4 : tc % 2 == 0 ? 2 : 1;
+  int w = MAX_BYTES / DIM;
+  const int tc = cols / DIM;
+  while (tc % w) w >>= 1;
   gemmini_config_ld(ld);
   for (int r = 0; r < rows / DIM; r++)
     for (int c = 0; c < tc; c += w)
@@ -312,7 +320,7 @@ static void issue_mm(void) {   // issue the next scheduled matmul
 // ---- VPU stages ----
 static void softmax_block(int j) {
   const uint16_t sc = vpu_f_to_bf16(1.0f / sqrtf((float)D));
-  const int bk = BLEN(j), rows = SQ * bk / 8, rlen = bk / 8;
+  const int bk = BLEN(j), rows = SQ * bk / VL, rlen = bk / VL;
   const uint32_t S = S_BUF(j), m = ST_M(j & 1), m_old = ST_M((j & 1) ^ 1);
   if (!ATTN_FOLD_SCALE) gemmini_vpu_scalar(VPU_MULS, S, S, sc, rows);
   if (ATTN_CAUSAL && j == NB - 1) {   // query r's row of S: mask its last ATTN_CH keys (the chunk's own tokens)
@@ -320,8 +328,8 @@ static void softmax_block(int j) {
       gemmini_vpu_binary(VPU_ADD, S, S, SP_MASK, rows);
     } else {
       for (int r = 0; r < SQ; r++)
-        gemmini_vpu_binary(VPU_ADD, S + r * (bk / 8) + (bk - ATTN_CH) / 8, S + r * (bk / 8) + (bk - ATTN_CH) / 8,
-                           SP_MASK + r * (ATTN_CH / 8), ATTN_CH / 8);
+        gemmini_vpu_binary(VPU_ADD, S + r * (bk / VL) + (bk - ATTN_CH) / VL, S + r * (bk / VL) + (bk - ATTN_CH) / VL,
+                           SP_MASK + r * (ATTN_CH / VL), ATTN_CH / VL);
     }
   }
   if (j == 0) {
@@ -354,8 +362,8 @@ static void requant_block(int j) {
 #endif
 }
 static void update_block(int j) {   // O = O * a_j + O_j
-  const int rows = SQ * D / 8;
-  gemmini_vpu_bcast(VPU_MUL, SP_O, SP_O, ST_AJ(j), rows, D / 8);
+  const int rows = SQ * D / VL;
+  gemmini_vpu_bcast(VPU_MUL, SP_O, SP_O, ST_AJ(j), rows, D / VL);
   gemmini_vpu_binary(VPU_ADD, SP_O, SP_O, OJ_BUF(j), rows);
 }
 #ifndef ATTN_STATS_OUT
@@ -371,7 +379,7 @@ static void store_o(void) {
 }
 static void finalize(void) {
   gemmini_vpu_unary(VPU_RCP, ST_L, ST_L, SQ);
-  gemmini_vpu_bcast(VPU_MUL, SP_O, SP_O, ST_L, SQ * D / 8, D / 8);
+  gemmini_vpu_bcast(VPU_MUL, SP_O, SP_O, ST_L, SQ * D / VL, D / VL);
   store_o();
 }
 // ATTN_FOLD_FINAL: the last O update with 1/l folded in, O = O * (a / l) + O_j * (1 / l). l is final once the last
@@ -381,11 +389,11 @@ static void finalize(void) {
 #define ATTN_FOLD_FINAL 0
 #endif
 static void finalize_folded(void) {
-  const int rows = SQ * D / 8, j = NB - 1;
+  const int rows = SQ * D / VL, j = NB - 1;
   gemmini_vpu_unary(VPU_RCP, ST_L, ST_L, SQ);
   gemmini_vpu_binary(VPU_MUL, ST_AJ(j), ST_AJ(j), ST_L, SQ);
-  gemmini_vpu_bcast(VPU_MUL, SP_O, SP_O, ST_AJ(j), rows, D / 8);
-  gemmini_vpu_bcast(VPU_MUL, OJ_BUF(j), OJ_BUF(j), ST_L, rows, D / 8);
+  gemmini_vpu_bcast(VPU_MUL, SP_O, SP_O, ST_AJ(j), rows, D / VL);
+  gemmini_vpu_bcast(VPU_MUL, OJ_BUF(j), OJ_BUF(j), ST_L, rows, D / VL);
   gemmini_vpu_binary(VPU_ADD, SP_O, SP_O, OJ_BUF(j), rows);
   store_o();
 }

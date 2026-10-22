@@ -321,8 +321,7 @@ int main(void) {
   // Read O back WITHOUT disturbing it, and check the scales the requantizer wrote to DRAM.
   mvout_detile(O_hw, O_scratch, SPAD_O, LAD_M, LAD_N);
   int od = mx_count_diff_u8(O_hw, (const uint8_t *) LAD_O_CODES, LAD_M * LAD_N);
-  int os = mx_count_diff_u8((const uint8_t *) o_scales_dram, (const uint8_t *) LAD_O_SCALES,
-                            LAD_M * LAD_GN);
+  int os = mx_count_diff_scales((const uint8_t *) o_scales_dram, (const uint8_t *) LAD_O_SCALES, LAD_M, LAD_GN);
   printf("mesh  O = A @ B requant->spad : %d/%d codes, %d/%d scales differ  (I=%d J=%d Kt=%d)\n",
          od, LAD_M * LAD_N, os, LAD_M * LAD_GN,
          LAD_M / DIM, LAD_N / DIM, LAD_K / DIM);
@@ -369,8 +368,10 @@ int main(void) {
   gemmini_mx_load_scales((uint64_t) LAD_W2_SCALES, LAD_GN * LAD_N2, 1);
   gemmini_fence();
   mvin_B((const uint8_t *) LAD_W2, LAD_N, LAD_N2, 0, LAD_N2, SPAD_W2);
+  mesh_act_half = 1;   // O's resident scales are in the half the O matmul did not read
   mesh_matmul(LAD_M, LAD_N, LAD_N2, SPAD_O, SPAD_W2ARG, SPAD_Y,
               OUT_BF16, (uint64_t) scale_sink, 0, 0);
+  mesh_act_half = 0;
   mvout_bf16(Y_hw, SPAD_Y, LAD_M, LAD_N2);
   int yd = mx_count_diff_u16(Y_hw, (const uint16_t *) LAD_Y_BF16, LAD_M * LAD_N2);
   printf("mesh  Y = O @ W2 (O + scales resident) : %d/%d differ\n", yd, LAD_M * LAD_N2);

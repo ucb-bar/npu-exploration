@@ -323,6 +323,9 @@ static void mvout_detile(uint8_t *dst, uint32_t spad, int M, int N) {
 // codes in the operand-A layout -- together, the next matmul's A operand, in place.
 // `accum` is loop_ws's ex_accumulate (rs1 bit 0): 0 OVERWRITES the output region, 1 adds into it.
 // Only a K-tile after the first wants 1.
+// act-scale window half the next mesh_matmul reads: 1 for a matmul that reads a resident producer's scales (a resident
+// matmul writes its output scales into the half it does not read), else 0 (MX_LOAD_SCALES dest 0)
+static int mesh_act_half = 0;
 static void mesh_matmul(int M, int K, int N, uint32_t a_spad, uint32_t b_arg, uint32_t c_spad,
                         int out_fmt, uint64_t scale_dram, int resident, int accum) {
   int I = M / DIM, J = N / DIM, Kt = K / DIM;
@@ -332,9 +335,9 @@ static void mesh_matmul(int M, int K, int N, uint32_t a_spad, uint32_t b_arg, ui
   // Braced: the gemmini_* macros expand to a `{ ... }` block, not a do-while, so an unbraced
   // if/else arm swallows the `else`.
   if (resident) {
-    gemmini_mxquant_config_mvout_resident(scale_dram, I, J, Kt, 0, 0, 1);
+    gemmini_mxquant_config_mvout_resident(scale_dram, I, J, Kt, mesh_act_half, 0, 1);
   } else {
-    gemmini_mxquant_config_mvout(scale_dram, I, J, Kt, 0, 0, 1);
+    gemmini_mxquant_config_mvout(scale_dram, I, J, Kt, mesh_act_half, 0, 1);
   }
   gemmini_loop_ws_spad(I, J, Kt,
                        0, 0, 0,
@@ -582,8 +585,7 @@ int main() {
   // Residency check: read O back WITHOUT disturbing it, and check the scales the requantizer wrote.
   mvout_detile(O_hw, SPAD_O, LLAMA_M, LLAMA_H);
   int o_d = mx_count_diff_u8(O_hw, (const uint8_t *) O_OUT, LLAMA_M * LLAMA_H);
-  int o_sd = mx_count_diff_u8((const uint8_t *) o_scales_dram, (const uint8_t *) O_SCALES_OUT,
-                              LLAMA_M * LLAMA_GH);
+  int o_sd = mx_count_diff_scales((const uint8_t *) o_scales_dram, (const uint8_t *) O_SCALES_OUT, LLAMA_M, LLAMA_GH);
   printf("mesh  O = P @ V   : %d/%d codes, %d/%d scales differ from golden (requant -> spad)\n",
          o_d, LLAMA_M * LLAMA_H, o_sd, LLAMA_M * LLAMA_GH);
 
@@ -599,7 +601,7 @@ int main() {
   for (int c = 0; c < NAT_NCH; c++) {
     gemmini_mx_load_scales_2d(&WO_SCALES_COL[0][c * NAT_NC], NAT_NC, LLAMA_GH, LLAMA_D, (c & 1) << 12, 1);
     gemmini_mxquant_config_mvout_wait((uint64_t) nat_sink, LLAMA_M / DIM, NAT_NC / DIM, LLAMA_H / DIM,
-                                      0, c & 1, 1);
+                                      1, c & 1, 1);   // act half 1: O's resident scales
     gemmini_loop_ws(LLAMA_M / DIM, NAT_NC / DIM, LLAMA_H / DIM, 0, 0, 0,
                     NULL, (const uint8_t *) WO_IN + c * NAT_NC, NULL, Y_hw + c * NAT_NC, LLAMA_H, LLAMA_D, 0, LLAMA_D,
                     false, false, false, false, false, NO_ACTIVATION, 1, 1 + (c & 1), false);
@@ -619,8 +621,10 @@ int main() {
     gemmini_mx_load_scales((uint64_t) wo_scales_chunk, sizeof(wo_scales_chunk), 1);
     gemmini_fence();
     mvin_B((const uint8_t *) WO_IN, LLAMA_H, LLAMA_D, c * NCHUNK, NCHUNK, SPAD_WO);
+    mesh_act_half = 1;   // O's resident scales are in the half the P @ V matmul did not read
     mesh_matmul(LLAMA_M, LLAMA_H, NCHUNK, SPAD_O, SPAD_WO_ARG, SPAD_Y,
                 OUT_BF16, (uint64_t) scale_sink, 0, 0);
+    mesh_act_half = 0;
     t_mesh += read_cycles() - t0;
     mvout_bf16(Ychunk, SPAD_Y, LLAMA_M, NCHUNK);
     for (int m = 0; m < LLAMA_M; m++)

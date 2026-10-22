@@ -294,7 +294,7 @@ static void oproj(const uint8_t *o_src, size_t o_stride, const uint8_t *os_src, 
       const uint8_t *osrc = os_src + (size_t) h * os_stride;         // [M][GH]
       for (int g = 0; g < LLAMA_GH; g++)
         for (int m = 0; m < LLAMA_M; m++)
-          o_scales_a[(size_t) g * LLAMA_M + m] = osrc[(size_t) m * LLAMA_GH + g];
+          o_scales_a[(size_t) g * LLAMA_M + m] = osrc[(size_t) g * LLAMA_M + m];   // DRAM scales are [GH][M] already
       uint64_t t0 = read_cycles();
       mvin_A(o_src + (size_t) h * o_stride, LLAMA_M, LLAMA_H, SPAD_OA);
       gemmini_mx_load_scales((uint64_t) o_scales_a, sizeof(o_scales_a), 0);
@@ -543,9 +543,8 @@ int main() {
       mvout_detile(O_hw[h], c_o, LLAMA_M, LLAMA_H);
       o_diff += mx_count_diff_u8(O_hw[h], O_OUT + (size_t) h * LLAMA_M * LLAMA_H,
                                  LLAMA_M * LLAMA_H);
-      os_diff += mx_count_diff_u8((const uint8_t *) o_scales_dram[h],
-                                  O_SCALES + (size_t) h * LLAMA_M * LLAMA_GH,
-                                  LLAMA_M * LLAMA_GH);
+      os_diff += mx_count_diff_scales((const uint8_t *) o_scales_dram[h],
+                                  O_SCALES + (size_t) h * LLAMA_M * LLAMA_GH, LLAMA_M, LLAMA_GH);
 
       // ---- debug: list every bad O code; dump the requant input for the first one ----
       for (int i = 0; i < LLAMA_M * LLAMA_H; i++) {

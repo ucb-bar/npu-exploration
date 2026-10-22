@@ -94,10 +94,13 @@ static void mvin16(const void *src, uint32_t sp, int rows) {
 static void mvout16(void *dst, uint32_t sp, int rows) {
   for (int r = 0; r < rows; r += DIM) gemmini_extended_mvout((uint8_t *) dst + r * DIM, sp + r, DIM, DIM);
 }
-// SR scales [rows][cols/32] -> the native loop's A-scale layout [cols/32][rows]
-static void scales_t(uint8_t *dst, const uint8_t *src, int rows, int groups) {
-  for (int g = 0; g < groups; g++)
-    for (int m = 0; m < rows; m++) dst[g * rows + m] = src[m * groups + g];
+// byte of (row m, group g) in SR scales written by ch-row chunks, each chunk [groups][ch]
+#define SRI(m, g, groups, ch) (((m) - (m) % (ch)) * (groups) + (g) * (ch) + (m) % (ch))
+// chunked SR scales -> the native loop's A-scale layout [cols/32][rows]
+static void scales_t(uint8_t *dst, const uint8_t *src, int rows, int groups, int ch) {
+  for (int t = 0; t < rows; t += ch)
+    for (int g = 0; g < groups; g++)
+      for (int r = 0; r < ch; r++) dst[g * rows + t + r] = src[t * groups + g * ch + r];
 }
 // Free every scale half: software-managed passes (attention) and loop-managed native loops each leave halves INUSE
 // that the other's gated loads would wait on. A legacy config frees the halves it does not select.
@@ -210,12 +213,12 @@ static void cache_append(void) {
         kt[d * ATTN_SK + E2E_SK + t] = k1_c[t * KH + g * 32 + d];
         kt[(32 + d) * ATTN_SK + E2E_SK + t] = k2_c[t * KH + g * 32 + d];
       }
-      kts[E2E_SK + t] = k1_sr[t * (KH / 32) + g];
-      kts[ATTN_SK + E2E_SK + t] = k2_sr[t * (KH / 32) + g];
+      kts[E2E_SK + t] = k1_sr[SRI(t, g, KH / 32, LM / 2)];
+      kts[ATTN_SK + E2E_SK + t] = k2_sr[SRI(t, g, KH / 32, LM / 2)];
       for (int d = 0; d < LHD; d++) v[(E2E_SK + t) * ATTN_D + d] = vt_c[(g * LHD + d) * LM + t];
     }
     for (int b = 0; b < LM / 32; b++)
-      for (int d = 0; d < LHD; d++) vs[(E2E_SK / 32 + b) * ATTN_D + d] = vt_sr[(g * LHD + d) * (LM / 32) + b];
+      for (int d = 0; d < LHD; d++) vs[(E2E_SK / 32 + b) * ATTN_D + d] = vt_sr[b * LKV + g * LHD + d];
   }
 }
 
@@ -236,8 +239,8 @@ static void e2e_store_o(void) {
 static void q_scales_of_pass(int p) {   // [2][128]: row j = head 2p + j/64, token j % 64; group = the rotary half
   for (int j = 0; j < ATTN_SQ; j++) {
     const int hh = ATTN_HEADS * p + j / LM, m = j % LM;
-    q_sc_pass[0][j] = q1_sr[m * (QH / 32) + hh];
-    q_sc_pass[1][j] = q2_sr[m * (QH / 32) + hh];
+    q_sc_pass[0][j] = q1_sr[SRI(m, hh, QH / 32, 8)];
+    q_sc_pass[1][j] = q2_sr[SRI(m, hh, QH / 32, 8)];
   }
 }
 
@@ -309,10 +312,10 @@ static float rel_mx(const float *ref, int n, float (*get)(int)) {
   for (int i = 0; i < n; i++) { const float r = ref[i], v = get(i); num += (v - r) * (v - r); den += r * r; }
   return sqrtf(num / den);
 }
-static float get_xn1(int i) { const int m = i / LD, k = i % LD; return e4m3(xn1_c[i], xn1_sr[m * (LD / 32) + k / 32]); }
+static float get_xn1(int i) { const int m = i / LD, k = i % LD; return e4m3(xn1_c[i], xn1_sr[SRI(m, k / 32, LD / 32, 8)]); }
 static float get_o(int i) {   // REF_O [m][h*64 + d]
   const int m = i / LD, h = (i % LD) / LHD, d = i % LHD;
-  return e4m3(o_c[((size_t) h * LM + m) * LHD + d], o_sr[h / 2][((h % 2) * LM + m) * 2 + d / 32]);
+  return e4m3(o_c[((size_t) h * LM + m) * LHD + d], o_sr[h / 2][(d / 32) * ATTN_SQ + (h % 2) * LM + m]);
 }
 
 enum { PH_RMS1, PH_QKV, PH_ROPE, PH_ATTN, PH_OPROJ, PH_RMS2, PH_GU, PH_SWIGLU, PH_DOWN, PH_RES2, PH_N };
@@ -378,7 +381,7 @@ int main() {
 
   rms_phase(H_PRE, 0, 0, E2E_AT(E2E_OFF_W_IN_LN, uint16_t), xn1_c, xn1_sr);
   PHASE_END(PH_RMS1);
-  scales_t(xn1_s, xn1_sr, LM, LD / 32);
+  scales_t(xn1_s, xn1_sr, LM, LD / 32, 8);
   bad |= mxn_matmul(xn1_c, LD, E2E_AT(E2E_OFF_WQ_CODES, uint8_t), LD, Qb, LD, xn1_s, LM,
                     E2E_AT(E2E_OFF_WQ_SCALES, uint8_t), LD, LM, LD, LD);
   bad |= mxn_matmul(xn1_c, LD, E2E_AT(E2E_OFF_WK_CODES, uint8_t), LKV, Kb, LKV, xn1_s, LM,
@@ -409,10 +412,10 @@ int main() {
   }
   PHASE_END(PH_ATTN);
 
-  for (int p = 0; p < NPASS; p++)   // o_sr[p]: [128][2]; row = head (2p + row/64), token row % 64
+  for (int p = 0; p < NPASS; p++)   // o_sr[p]: [2][128]; row = head (2p + row/64), token row % 64
     for (int hh = 0; hh < ATTN_HEADS; hh++)
       for (int g = 0; g < 2; g++)
-        for (int m = 0; m < LM; m++) o_s[((ATTN_HEADS * p + hh) * 2 + g) * LM + m] = o_sr[p][(hh * LM + m) * 2 + g];
+        for (int m = 0; m < LM; m++) o_s[((ATTN_HEADS * p + hh) * 2 + g) * LM + m] = o_sr[p][g * ATTN_SQ + hh * LM + m];
   scale_halves_reset();
   bad |= mxn_matmul_core(o_c, LHD, E2E_AT(E2E_OFF_WO_CODES, uint8_t), LD, Ya, LD, o_s, LM,
                          E2E_AT(E2E_OFF_WO_SCALES, uint8_t), LD, LM, LD, LD, 0, 0, LHD);
@@ -420,7 +423,7 @@ int main() {
 
   rms_phase(H_PRE, Ya, Hmid, E2E_AT(E2E_OFF_W_POST_LN, uint16_t), xn2_c, xn2_sr);
   PHASE_END(PH_RMS2);
-  scales_t(xn2_s, xn2_sr, LM, LD / 32);
+  scales_t(xn2_s, xn2_sr, LM, LD / 32, 8);
   bad |= mxn_matmul(xn2_c, LD, E2E_AT(E2E_OFF_WG_CODES, uint8_t), LF, Gb, LF, xn2_s, LM,
                     E2E_AT(E2E_OFF_WG_SCALES, uint8_t), LF, LM, LD, LF);
   bad |= mxn_matmul(xn2_c, LD, E2E_AT(E2E_OFF_WU_CODES, uint8_t), LF, Ub, LF, xn2_s, LM,
@@ -429,9 +432,7 @@ int main() {
 
   swiglu_phase();
   PHASE_END(PH_SWIGLU);
-  for (int s = 0; s < 2; s++)
-    for (int g = 0; g < FH / 32; g++)
-      for (int m = 0; m < LM; m++) h_s[(s * (FH / 32) + g) * LM + m] = h_sr[s][m * (FH / 32) + g];
+  for (int s = 0; s < 2; s++) scales_t(h_s + s * (FH / 32) * LM, h_sr[s], LM, FH / 32, 8);
   bad |= mxn_matmul(h_c, LF, E2E_AT(E2E_OFF_WD_CODES, uint8_t), LD, Ym, LD, h_s, LM,
                     E2E_AT(E2E_OFF_WD_SCALES, uint8_t), LD, LM, LF, LD);
   PHASE_END(PH_DOWN);
@@ -485,7 +486,7 @@ int main() {
         const int t = i / LF, c = i % LF;
         printf("  h diff token %2d col %4d: device %02x spike %02x%s  G %04x (%g) U %04x (%g) scale %u\n", t, c, h_c[i],
                E2E_H_EXPECT[i], zero_sign ? " (+0/-0)" : "", Gb[i], bf(Gb[i]), Ub[i], bf(Ub[i]),
-               h_sr[c / FH][t * (FH / 32) + (c % FH) / 32]);
+               h_sr[c / FH][SRI(t, (c % FH) / 32, FH / 32, 8)]);
         shown++;
       }
     }

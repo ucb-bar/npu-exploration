@@ -4,6 +4,10 @@
 > `llama_layer_full_native_gh`, and the `mx_bench_matmul` utilization benchmarks) are listed with their
 > measured RTL utilization in [`README_PERFORMANCE.md`](README_PERFORMANCE.md). The kernels below are the
 > original scratchpad-flow versions, kept as baselines.
+>
+> **Looking for 7–13B models?** One whole decoder layer of Llama-3.1-8B, Llama-2-7B / 13B, Qwen2.5-7B and Mistral-7B in
+> FP8 / FP6-LUT / FP4 on 4×4 … 32×32 meshes, every stage bit-exact against `rtl_exact`:
+> [`README_LLAMA_MX.md`](README_LLAMA_MX.md).
 
 Seven kernels, each one ELF, each carrying real captured TinyLlama weights and activations. The mesh
 does the matmuls in MX fp8 (e4m3 + E8M0); everything else — RMSNorm, RoPE, softmax, SwiGLU, the

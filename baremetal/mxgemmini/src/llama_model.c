@@ -466,8 +466,8 @@ int main() {
       mvout_detile(O_hw[h], A_H2_C_O, LLAMA_M, LLAMA_H);
       STAGE(mesh_d, mx_count_diff_u8(O_hw[h], O_G + (size_t) h * LLAMA_M * LLAMA_H,
                                  LLAMA_M * LLAMA_H));
-      STAGE(mesh_d, mx_count_diff_u8((const uint8_t *) o_scales_dram[h],
-                                 OS_G + (size_t) h * LLAMA_M * LLAMA_GH, LLAMA_M * LLAMA_GH));
+      STAGE(mesh_d, mx_count_diff_scales((const uint8_t *) o_scales_dram[h],
+                                 OS_G + (size_t) h * LLAMA_M * LLAMA_GH, LLAMA_M, LLAMA_GH));
     }
 
     for (int c = 0; c < A_YCHUNKS; c++) {
@@ -478,7 +478,7 @@ int main() {
         const uint8_t *osrc = (const uint8_t *) o_scales_dram[h];
         for (int g = 0; g < LLAMA_GH; g++)
           for (int m = 0; m < LLAMA_M; m++)
-            o_scales_a[(size_t) g * LLAMA_M + m] = osrc[(size_t) m * LLAMA_GH + g];
+            o_scales_a[(size_t) g * LLAMA_M + m] = osrc[(size_t) g * LLAMA_M + m];   // DRAM scales are [GH][M] already
         t0 = read_cycles();
         mvin_A(O_hw[h], LLAMA_M, LLAMA_H, A_SPAD_OA);
         gemmini_mx_load_scales((uint64_t) o_scales_a, sizeof(o_scales_a), 0);

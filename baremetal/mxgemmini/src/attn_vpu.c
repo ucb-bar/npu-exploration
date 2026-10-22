@@ -194,8 +194,11 @@ int main() {
       if (e > p_err) p_err = e;
     }
 #endif
+  static uint8_t p_scales_rm[SQ * SK / 32];   // SR writes [SK/32][SQ]; the recorded hash is over [SQ][SK/32]
+  for (int m = 0; m < SQ; m++)
+    for (int g = 0; g < SK / 32; g++) p_scales_rm[m * (SK / 32) + g] = p_scales[g * SQ + m];
   const uint64_t hS = fnv(S_hw, sizeof(S_hw)), hP = fnv(P_hw, sizeof(P_hw)),
-                 hPc = fnv(p_codes_hw, sizeof(p_codes_hw)) ^ (fnv(p_scales, sizeof(p_scales)) * 3), hO = fnv(O_hw, sizeof(O_hw));
+                 hPc = fnv(p_codes_hw, sizeof(p_codes_hw)) ^ (fnv(p_scales_rm, sizeof(p_scales_rm)) * 3), hO = fnv(O_hw, sizeof(O_hw));
   printf("check S vs mesh golden: %d/%d 4-element words differ\n", s_diff, SQ * SK / 4);
   printf("check hashes: S %016llx  P %016llx  Pq %016llx  O %016llx\n", (unsigned long long)hS,
          (unsigned long long)hP, (unsigned long long)hPc, (unsigned long long)hO);
