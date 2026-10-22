@@ -32,12 +32,24 @@ FP6_MLP   := mlp_proj_fp6_g0 mlp_proj_fp6_g1 mlp_proj_fp6_g2 mlp_proj_fp6_g3 mlp
 # The same on the 8x8 mesh (MxDim8{E3M2,Fp4}PerfGemminiRocketConfig): DIM=8 params header via -iquote dim8/<fmt>
 FP6_MLP_DIM8 := mlp_proj_fp6_dim8_g0 mlp_proj_fp6_dim8_g1 mlp_proj_fp6_dim8_g2 mlp_proj_fp6_dim8_g3 mlp_proj_fp6_dim8_g4 mlp_proj_fp6_dim8_g5
 FP6_MLP   += $(FP6_MLP_DIM8) mlp_proj_fp4_short_dim8
+# The same on the 4x4 mesh (MxDim4{E3M2,Fp4}VpuGemminiRocketConfig): DIM=4 params header via -iquote dim4/<fmt>_vpu
+FP6_MLP_DIM4 := mlp_proj_fp6_dim4_g0 mlp_proj_fp6_dim4_g1 mlp_proj_fp6_dim4_g2 mlp_proj_fp6_dim4_g3 mlp_proj_fp6_dim4_g4 mlp_proj_fp6_dim4_g5
+FP6_MLP   += $(FP6_MLP_DIM4) mlp_proj_fp4_short_dim4
 FP6_CHAIN := mlp_proj_fp6_chain_g1 mlp_proj_fp6_chain_g3
 FP6_CHAIN_DIM8 := mlp_proj_fp6_dim8_chain_g1 mlp_proj_fp6_dim8_chain_g3
-FP6_MLP   += $(FP6_CHAIN) $(FP6_CHAIN_DIM8)
+FP6_CHAIN_DIM4 := mlp_proj_fp6_dim4_chain_g3
+FP6_MLP   += $(FP6_CHAIN) $(FP6_CHAIN_DIM8) $(FP6_CHAIN_DIM4)
 VPU_DIM8  := vpu_ops_dim8 vpu_softmax_dim8 spad_requant_dim8 spad_requant_fp4_dim8 spad_requant_lut_fp6_dim8
 # 32x32 mesh + VPU (MxDim32{E4M3,E3M2,Fp4}VpuGemminiRocketConfig): DIM=32 params header via -iquote dim32/vpu
+# native 8-bit E4M3 quad on the 32x32 mesh (MxDim32E4M3QuadGemminiRocketConfig, branch large-mesh-fp8)
+QUAD_DIM32 := e4m3_quad_64x64_dim32 e4m3_quad_128x128_dim32
+QUAD_RQ_DIM32 := e4m3_quad_requant_64x64_dim32 e4m3_quad_requant_128x128_dim32
+VPU_DIM32Q := vpu_ops_dim32q vpu_softmax_dim32q
+QUAD_CHAIN_DIM32 := e4m3_quad_chain_64x64_dim32 e4m3_quad_chain_128x128_dim32
 VPU_DIM32 := vpu_ops_dim32 vpu_softmax_dim32 spad_requant_dim32 spad_requant_fp4_dim32 spad_requant_lut_fp6_dim32
+DRAM_DIM32 := fp4_dramloop_64x64_dim32 fp4_dramloop_128x128_dim32
+# 4x4 mesh + VPU + SPAD_REQUANT (MxDim4{Fp4,E3M2}VpuGemminiRocketConfig): DIM=4 params header via -iquote dim4/vpu
+VPU_DIM4  := vpu_ops_dim4 vpu_softmax_dim4 spad_requant_dim4 spad_requant_fp4_dim4 spad_requant_lut_fp6_dim4
 KERNELS   := llama_mlp llama_mlp_small llama_mlp_tiny llama_mlp_tiny_t1 llama_mlp_tiny_db llama_mlp_tiny_native llama_mlp_small_native llama_mlp_tiny_native_ua llama_mlp_native llama_mlp_full \
              llama_attention llama_attention_small llama_attention_tiny llama_attention_tiny_t1 llama_attention_tiny_native llama_attention_small_native llama_attention_native llama_attention_full \
              llama_attention_full_dgb \
@@ -45,7 +57,7 @@ KERNELS   := llama_mlp llama_mlp_small llama_mlp_tiny llama_mlp_tiny_t1 llama_ml
              llama_layer_full llama_layer_full_native llama_layer_full_native_gh \
              mx_bench_matmul mx_bench_matmul_m32 mx_bench_matmul_m32_blk mx_bench_matmul_m64_proj \
              attn_vpu attn_vpu_mid attn_vpu_fa attn_flash attn_flash_mid attn_flash_llama attn_flash_llama_wide attn_flash_llama_causal attn_flash_llama_vb attn_flash_llama_2h attn_flash_llama_vb_fused attn_flash_llama_2h_fused attn_flash_llama_vb_fused_dbg attn_flash_layer5 attn_flash_layer5_fused attn_flash_llama7b attn_flash_llama7b_fused mx_fp4_dramloop attn_flash_llama_2h_fused_fp4 attn_flash_llama7b_fused_fp4 llama_mlp_e2e llama_mlp_e2e_fp4 mlp_proj_fp4 mlp_proj_fp4_short mlp_proj_fp4_ares mlp_proj_fp4_short_ares mlp_proj_fp4_short_chain mlp_proj_fp4_short_m128_chain \
-             $(FP6_MLP) $(VPU_DIM8) $(VPU_DIM32) llama_layer_e2e llama_e2e_elemwise
+             $(FP6_MLP) $(VPU_DIM8) $(VPU_DIM32) $(QUAD_DIM32) $(QUAD_RQ_DIM32) $(VPU_DIM32Q) $(QUAD_CHAIN_DIM32) llama_layer_e2e llama_e2e_elemwise
 
 # Kernels whose data is a linked binary blob rather than C initializers, and the blob each uses.
 # See the objcopy rule below for why the basenames matter.
@@ -82,10 +94,23 @@ blob_mlp_proj_fp4_short_m128_chain := mlp_proj_fp4_short_m128
 $(foreach d,spike mx_rocket,$(foreach k,mlp_proj_fp4_ares mlp_proj_fp4_short_ares mlp_proj_fp4_short_chain mlp_proj_fp4_short_m128_chain,$(eval $(OUT)/$(d)/$(k): $(CURDIR)/src/mlp_proj_fp4.c $(CURDIR)/include/mx_native.h)))
 $(foreach d,spike mx_rocket,$(eval $(OUT)/$(d)/mlp_proj_fp4_short: $(CURDIR)/src/mlp_proj_fp4.c))
 $(foreach k,$(FP6_MLP),$(eval blob_$(k) := $(k)))
-$(foreach k,$(FP6_CHAIN) $(FP6_CHAIN_DIM8),$(eval blob_$(k) := $(subst chain_,,$(k))))
+$(foreach k,$(FP6_CHAIN) $(FP6_CHAIN_DIM8) $(FP6_CHAIN_DIM4),$(eval blob_$(k) := $(subst chain_,,$(k))))
+$(foreach k,$(FP6_CHAIN_DIM4) $(FP6_MLP_DIM4),$(eval EXTRA_$(k) := -DMP_DIM8 -iquote $(CURDIR)/dim4/e3m2_vpu))
+EXTRA_mlp_proj_fp4_short_dim4 := -DMP_DIM8 -iquote $(CURDIR)/dim4/fp4_vpu
+$(foreach d,spike mx_rocket,$(eval $(OUT)/$(d)/mlp_proj_fp4_short_dim4: $(CURDIR)/src/mlp_proj_fp4.c $(CURDIR)/include/mx_native.h))
 $(foreach k,$(FP6_CHAIN_DIM8),$(eval EXTRA_$(k) := -DMP_DIM8 -iquote $(CURDIR)/dim8/e3m2))
 $(foreach k,$(VPU_DIM8),$(eval EXTRA_$(k) := -iquote $(CURDIR)/dim8/e3m2_vpu))
 $(foreach k,$(VPU_DIM32),$(eval EXTRA_$(k) := -iquote $(CURDIR)/dim32/vpu))
+$(foreach k,$(DRAM_DIM32),$(eval EXTRA_$(k) := -iquote $(CURDIR)/dim32/vpu))
+$(foreach k,$(VPU_DIM4),$(eval EXTRA_$(k) := -iquote $(CURDIR)/dim4/vpu))
+$(foreach d,spike mx_rocket,$(foreach k,$(DRAM_DIM32),$(eval $(OUT)/$(d)/$(k): $(ROCC)/bareMetalC/matmul_tiled_fp4_dramloop_dim32.c)))
+$(foreach k,$(QUAD_DIM32),$(eval EXTRA_$(k) := -iquote $(CURDIR)/dim32/e4m3_quad))
+$(foreach d,spike mx_rocket,$(foreach k,$(QUAD_DIM32),$(eval $(OUT)/$(d)/$(k): $(ROCC)/bareMetalC/matmul_tiled_fp8_e4m3_quad_dim32.c)))
+$(foreach k,$(QUAD_RQ_DIM32),$(eval EXTRA_$(k) := -iquote $(CURDIR)/dim32/e4m3_quad))
+$(foreach k,$(VPU_DIM32Q),$(eval EXTRA_$(k) := -iquote $(CURDIR)/dim32/e4m3_quad))
+$(foreach k,$(QUAD_CHAIN_DIM32),$(eval EXTRA_$(k) := -iquote $(CURDIR)/dim32/e4m3_quad))
+$(foreach d,spike mx_rocket,$(foreach k,$(QUAD_CHAIN_DIM32),$(eval $(OUT)/$(d)/$(k): $(ROCC)/bareMetalC/matmul_tiled_fp8_e4m3_quad_chain_dim32.c)))
+$(foreach d,spike mx_rocket,$(foreach k,$(QUAD_RQ_DIM32),$(eval $(OUT)/$(d)/$(k): $(ROCC)/bareMetalC/matmul_tiled_fp8_e4m3_quad_requant_dim32.c)))
 $(foreach k,$(FP6_MLP_DIM8),$(eval EXTRA_$(k) := -DMP_DIM8 -iquote $(CURDIR)/dim8/e3m2))
 EXTRA_mlp_proj_fp4_short_dim8 := -DMP_DIM8 -iquote $(CURDIR)/dim8/fp4
 $(foreach d,spike mx_rocket,$(eval $(OUT)/$(d)/mlp_proj_fp4_short_dim8: $(CURDIR)/src/mlp_proj_fp4.c $(CURDIR)/include/mx_native.h))
