@@ -532,9 +532,10 @@ static void attn_print_config(void) {
 }
 static void attn_load_q_scales(void) {   // the pass's Q scales -> act half 1
   const uint8_t *q_sc = &ATTN_QS[0][0];
-#if ATTN_FP4   // quad act: the scale memory takes the load in the 32-row layout only once the format is FP4
-  gemmini_extended3_config_ex(WEIGHT_STATIONARY, 0, 0, ACC_SCALE_IDENTITY, 1, 1, 0, 0, false, 2, 2, OUT_BF16, 0);
-#endif
+  // the format first: the scale memory files the load in the layout of the live act width (FP4 quad 32-row /
+  // E4M3 single 16-row), which an earlier matmul (e.g. FP4 projections) may have left in the other one
+  gemmini_extended3_config_ex(WEIGHT_STATIONARY, 0, 0, ACC_SCALE_IDENTITY, 1, 1, 0, 0, false, ATTN_FP4 ? 2 : 0,
+                              ATTN_FP4 ? 2 : 0, OUT_BF16, 0);
   if (ATTN_FOLD_SCALE) {   // Q * 2^-log4(d): every E8M0 byte - log4(d)
     for (int g = 0; g < D / 32; g++)
       for (int m = 0; m < SQ; m++) q_scales_folded[g][m] = ATTN_QS[g][m] - FOLD_SHIFT;

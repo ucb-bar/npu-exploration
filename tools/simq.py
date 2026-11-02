@@ -60,7 +60,7 @@ that, `--allow-stale` to run the old one anyway, `--rebuild` to re-elaborate reg
 
 The low-level form still takes explicit jobs, for when the cross product is not what you want:
 
-    simq.py MxGemminiRocketConfig:mxl4 MxDim32GemminiRocketConfig:mxl4
+    simq.py MxGemminiRocketConfig:mxl4 MxDim32AllGemminiRocketConfig:mxl4
     simq.py -c MxGemminiRocketConfig mxl0 mxl1 @more.jobs
 
 A job is `CONFIG:BINARY`, or a bare `BINARY` when `-c/--config` gives the default, or `@file` to

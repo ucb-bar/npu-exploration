@@ -38,17 +38,12 @@ LIBG = NPU.parent / "software" / "libgemmini"
 SPIKE_LIB = {16: ("libgemmini.so", "gemmini"), 8: ("libgemmini_dim8.so", "gemmini_dim8"),
              4: ("libgemmini_dim4.so", "gemmini_dim4"), 32: ("libgemmini_dim32.so", "gemmini_dim32")}
 RISCV = os.environ.get("RISCV", "/bwrcq/scratch/nicorakela/radiance-cy-dev/.conda-env/riscv-tools")
-# The perf model's structural parameters default to the 16x16 build (perf/params/config.h); these are the other meshes'
-# (their params headers: BANK_ROWS, ACC_ROWS, MAX_BYTES 64). Measured latencies keep their DIM 16 calibration.
-BANK_ROWS = {4: 8192, 8: 8192, 16: 4096, 32: 2048}
-ACC_ROWS = {4: 2048, 8: 1024, 16: 512, 32: 256}
-
-
-def perf_set(dim: int) -> str:
-    return ",".join([f"mesh.dim={dim}", f"spad.bank_rows={BANK_ROWS[dim]}", f"acc.total_rows={ACC_ROWS[dim]}",
-                     f"acc.bank_rows={ACC_ROWS[dim] // 2}", f"loop.max_block_len={64 // dim}",
-                     f"dma.spad_write_bytes_per_cycle={dim}", f"st.elems_per_acc_read={2 * dim}",
-                     f"sreq.cycles_per_block={64 // dim}"])
+# Perf-model preset (perf/params/config.cc) = the RTL config each (format, mesh) runs on: the mesh-size parameters
+# follow from the library's DIM. FP4 / FP6 at DIM 4: MxDim4Fp4E3M2Vpu has no E4M3, so this kernel's E4M3 attention
+# has no DIM 4 hardware -- its cycles are the model's, not a config's.
+PERF_PRESET = {("fp8", 16): "e4m3_vpu", ("fp8", 8): "dim8_fp4_e3m2_e4m3_vpu", ("fp8", 32): "dim32_e4m3_vpu",
+               ("fp4", 16): "fp4_e3m2_e4m3_vpu", ("fp4", 8): "dim8_fp4_e3m2_e4m3_vpu", ("fp4", 4): "dim4_fp4_e3m2_vpu"}
+PERF_PRESET.update({("fp6", d): p for (f, d), p in PERF_PRESET.items() if f == "fp4"})
 
 
 def elf(model, fmt, dim):
@@ -77,7 +72,7 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="regenerate blobs / goldens that exist")
     ap.add_argument("--rocket", action="store_true", help="also build the MX_ROCKET ELFs")
     ap.add_argument("--jobs", type=int, default=24, help="parallel Spike runs")
-    ap.add_argument("--perf-config", default="e4m3_vpu")
+    ap.add_argument("--perf-config", default=None, help="one preset for every run (default: PERF_PRESET per format and mesh)")
     a = ap.parse_args()
     models = [k for k in C.MODELS if k != "tiny"] if a.model == ["all"] else a.model
     fmts = list(C.FORMATS) if a.fmt == ["all"] else a.fmt
@@ -112,7 +107,7 @@ def main() -> int:
     if "run" in a.steps:
         def one(c):
             lib, ext = SPIKE_LIB[c[2]]
-            e = dict(env(), GEMMINI_MODE="both", GEMMINI_PERF_CONFIG=a.perf_config, GEMMINI_PERF_SET=perf_set(c[2]))
+            e = dict(env(), GEMMINI_MODE="both", GEMMINI_PERF_CONFIG=a.perf_config or PERF_PRESET[c[1], c[2]])
             t0 = time.time()
             with open(LOGS / f"{elf(*c)}.log", "w") as f:
                 r = subprocess.run(["spike", f"--extlib={LIBG / lib}", f"--extension={ext}", str(OUT / "spike" / elf(*c))],
@@ -159,7 +154,9 @@ def report(combos, perf_config):
                     + (f"{100 * att / r['cycles']:.0f}% | " if att and "cycles" in r else "- | ")
                     + (f"{r['acc_update']:.2f}% |" if "acc_update" in r else "- |"))
     md = ("# llama_layer_mx: one decoder layer per (model, format, mesh)\n\n"
-          f"Spike + libgemmini perf model (`GEMMINI_MODE=both`, `GEMMINI_PERF_CONFIG={perf_config}`). "
+          "Spike + libgemmini perf model (`GEMMINI_MODE=both`, `GEMMINI_PERF_CONFIG` = "
+          + (f"`{perf_config}`" if perf_config else "the RTL config of each format and mesh, run_llama_mx.py PERF_PRESET")
+          + "). "
           "`stages` = stage hashes equal to the rtl_exact golden (gen/golden_llama_layer_mx.py). Cycles from the first "
           "command to h_out in DRAM; `ideal` = the layer's mesh-ideal cycles at the format's rate (FP4 / FP6 LUT: the "
           "quad mesh, 4x E4M3). `accuracy` = layer update (h_out - h_pre) vs the fp64 layer on the same BF16 input "

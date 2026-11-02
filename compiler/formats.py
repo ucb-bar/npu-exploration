@@ -246,16 +246,9 @@ def get(dtype: str, *, where: str = "format lookup", proven_only: bool = True) -
 #: format absent here is not slow on that build, it is absent.
 ELABORATIONS: dict[str, tuple[str, ...]] = {
     "MxGemminiRocketConfig":        ("fp8_e4m3",),
-    "MxE5M2GemminiRocketConfig":    ("fp8_e5m2",),
     "MxAllGemminiRocketConfig":     ("fp4_e2m1", "fp6_e3m2", "fp6_e2m3",
                                      "fp8_e4m3", "fp8_e4m3_quad", "fp8_e5m2"),
-    "MxE4M3LutGemminiRocketConfig": ("fp4_e2m1", "fp6_e3m2", "fp6_e2m3",
-                                     "fp8_e4m3", "fp8_e4m3_quad", "fp8_e5m2"),
-    "MxFp4OnlyGemminiRocketConfig": ("fp4_e2m1",),
-    "MxE3M2OnlyGemminiRocketConfig": ("fp6_e3m2",),
-    "MxE2M3OnlyGemminiRocketConfig": ("fp6_e2m3",),
     "MxE4M3OnlyGemminiRocketConfig": ("fp8_e4m3", "fp8_e4m3_quad"),
-    "MxE5M2OnlyGemminiRocketConfig": ("fp8_e5m2",),
 }
 
 #: The elaboration the spike model behaves as. Spike decodes every format regardless of config, so

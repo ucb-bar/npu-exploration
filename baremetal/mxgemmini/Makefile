@@ -39,14 +39,14 @@ FP6_CHAIN := mlp_proj_fp6_chain_g1 mlp_proj_fp6_chain_g3
 FP6_CHAIN_DIM8 := mlp_proj_fp6_dim8_chain_g1 mlp_proj_fp6_dim8_chain_g3
 FP6_CHAIN_DIM4 := mlp_proj_fp6_dim4_chain_g3
 FP6_MLP   += $(FP6_CHAIN) $(FP6_CHAIN_DIM8) $(FP6_CHAIN_DIM4)
-VPU_DIM8  := vpu_ops_dim8 vpu_softmax_dim8 spad_requant_dim8 spad_requant_fp4_dim8 spad_requant_lut_fp6_dim8
+VPU_DIM8  := dma_repro_dim8 vpu_ops_dim8 vpu_softmax_dim8 spad_requant_dim8 spad_requant_fp4_dim8 spad_requant_lut_fp6_dim8
 # 32x32 mesh + VPU (MxDim32{E4M3,E3M2,Fp4}VpuGemminiRocketConfig): DIM=32 params header via -iquote dim32/vpu
 # native 8-bit E4M3 quad on the 32x32 mesh (MxDim32E4M3QuadGemminiRocketConfig, branch large-mesh-fp8)
 QUAD_DIM32 := e4m3_quad_64x64_dim32 e4m3_quad_128x128_dim32
 QUAD_RQ_DIM32 := e4m3_quad_requant_64x64_dim32 e4m3_quad_requant_128x128_dim32
 VPU_DIM32Q := vpu_ops_dim32q vpu_softmax_dim32q
 QUAD_CHAIN_DIM32 := e4m3_quad_chain_64x64_dim32 e4m3_quad_chain_128x128_dim32
-VPU_DIM32 := vpu_ops_dim32 vpu_softmax_dim32 spad_requant_dim32 spad_requant_fp4_dim32 spad_requant_lut_fp6_dim32
+VPU_DIM32 := vpu_ops_dim32 vpu_softmax_dim32 spad_requant_dim32 spad_requant_8x512_dim32 spad_requant_64x128_dim32 spad_requant_fp4_dim32 spad_requant_lut_fp6_dim32
 DRAM_DIM32 := fp4_dramloop_64x64_dim32 fp4_dramloop_128x128_dim32
 # 4x4 mesh + VPU + SPAD_REQUANT (MxDim4{Fp4,E3M2}VpuGemminiRocketConfig): DIM=4 params header via -iquote dim4/vpu
 VPU_DIM4  := vpu_ops_dim4 vpu_softmax_dim4 spad_requant_dim4 spad_requant_fp4_dim4 spad_requant_lut_fp6_dim4

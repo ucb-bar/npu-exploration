@@ -824,3 +824,80 @@ time, each checked against the Scala (some paths do forward a freed slot combina
 Result: neutral -- every regression row within +-1 cycle; FP4 109,513 -> 109,526; attn 7b_fused / vb_fused / 2h /
 2h_fused (model only, ELFs rebuilt since VCS) within 10 cycles. `st.pending_delay` / `st.pending_tail` stay as
 measured; whether pending_tail can now shrink is untested.
+
+## 14. Mesh sizes DIM 4 / 8 / 32 (user, 2026-10-22: "add the different dimension sizes the right way; calibrate on the
+## dim4 / dim8 / dim32 VCS runs")
+Steps, each confirmed: (1) DIM in the model's structure + per-RTL-config presets; (2) check every value against the
+Chisel configs; (3) calibrate DIM 8 from its FSDBs, hold out the 10-22 mlp_proj PERF lines; (4) DIM 4 / 32 from new
+VCS runs (user launches; list below); (5) re-run llama_mx.
+
+### 14.1 Step 1 as built (2026-10-22)
+* `mesh.dim` defaults to the library's `-DGEMMINI_DIM`; `mesh.elem_bytes` 2 in the native-quad build.
+* `[auto]` parameters (0 = derive in `config_t::finalize()`, after preset + GEMMINI_PERF_SET; explicit values win):
+  `loop.max_block_len` 64/row, `spad.bank_rows` capacity/(4*row), `acc.total_rows` 8192/DIM, `acc.bank_rows`
+  total/banks, `mesh.fill_latency` 2*DIM+1, `mesh.commit_latency` 3*DIM+3, `dma.spad_write_bytes_per_cycle` row,
+  `st.elems_per_acc_read` 2*max(DIM,16), `sreq.cycles_per_block` 64/row (row = DIM*elem_bytes). New knobs
+  `spad.capacity_kib` 256, `acc.capacity_kib` 64. Each formula reduces to the old DIM 16 constant.
+* Presets named after the RTL configs (`config.cc vpu_build`): `fp4_e3m2_e4m3_vpu` (16), `dim4_{fp4_e3m2,fp4,e3m2}_vpu`,
+  `dim8_{fp4_e3m2_e4m3,e3m2,fp4}_vpu`, `dim32_{e4m3,e3m2,fp4}_vpu` = e4m3_vpu + frontend depth 10 (LoopConv present),
+  DIM 4 spad 128 KiB, DIM 32 one acc bank. A preset for another DIM than the library aborts.
+* `run_llama_mx.py` uses `PERF_PRESET` per (format, mesh) instead of GEMMINI_PERF_SET overrides.
+* Gate: 14 DIM 16 kernels (same ELFs, old vs new .so, scratchpad `same_elf_gate.py`) bit-identical, incl.
+  llama_layer_e2e 15,195,700; tiny llama_mx fp8 d16 1,597,964 unchanged; other tiny configs within 0.5 %.
+* DIM 4/8 mlp_proj vs VCS 10-22 (held out): fp4 d4 -0.6/-0.3 %, fp6 d4 g3 +0.3/+0.6 %, chain +0.7 %; fp4 d8
+  -1.8/-0.9 %, fp6 d8 g3 +3.5/+4.9 %, chain +5.6 %.
+
+### 14.2 Step 2 findings (RTL configs, 2026-10-22)
+* No DIM 4 build elaborates E4M3 (MxDim4Fp4E3M2Vpu = FP4 + E3M2, modes 0/4): the llama_mx fp4/fp6 d4 kernels'
+  E4M3 attention has no DIM 4 hardware.
+* DIM 32 builds: acc_banks 1 (C:351). DIM 4/8/32 VPU builds: LoopConv/Im2Col/transposer present, 4-bank L2 with
+  outerLatencyCycles 128 (the model's L2 has no MSHR limit, so this is not modelled either way).
+* Code that is still DIM 16-only (audit vs LoopMatmul / SpadRequant / Scratchpad / ReservationStation; to verify and
+  fix as the next step, none touches DIM 16): StC chunking uses `loop.max_block_len` where the RTL groups 4 tiles in
+  32/DIM-tile chunks; `MxAccWiden` (W = 16/DIM acc tiles folded per row at DIM < 16, store unrollers step j by W) not
+  modelled; SPAD_REQUANT writes `blocks*2` rows (RTL 32/DIM E4M3, 16/DIM 4-bit) and pads tiled M to 16/32 (RTL DIM /
+  2*DIM); RS ranges +8/+16 (RTL +16/+128 at DIM 4); single-throughput StCSpad offsets/cstride at DIM 8;
+  `st.spad_read_interval` 4 (writes per read + 2, to calibrate).
+* Possibly wrong at DIM 16 too (verify on a waveform before touching; would move DIM 16 numbers): quad StC command
+  count, quad acc reads per store (rows vs rows/2), acc-mvin element bytes (8, model 4), the LUT-nibble SR flag
+  (rs2[33]) not decoded.
+* RTL oddities to confirm: DIM 32 StC issues 4 chunks per group but the acc row has 2 (chunks 2-3 re-read 0-1);
+  DIM 32 BF16 StC j-offset (bf16_j_bytes) 512 B per group vs 256 natural.
+* Provenance: every mx_rocket kernel was rebuilt 10-22 01:58, so the DIM 16 VPU rows of tools/perf_regress.py
+  (incl. attn_flash_llama_vb_fused, the validation) no longer match their VCS .dump and are skipped.
+
+### 14.3 VCS runs requested (user launches, 2026-10-22)
+DIM 32, MxDim32E4M3VpuGemminiRocketConfig, FSDB: matmul_tiled_fp8_128x128x256_requant_dim32 (build_mx_rocket),
+vpu_ops_dim32, vpu_softmax_dim32, spad_requant_dim32; log only: llama_mx_tiny_fp8_d32 (~1.1M cycles).
+DIM 4, MxDim4Fp4E3M2VpuGemminiRocketConfig, FSDB: matmul_tiled_fp4_64x64_requant_dim4,
+matmul_tiled_fp6_e3m2_lut_64x64_requant_dim4, vpu_ops_dim4, vpu_softmax_dim4, spad_requant_fp4_dim4,
+spad_requant_lut_fp6_dim4. DIM 8, MxDim8Fp4E3M2E4M3VpuGemminiRocketConfig, log only: llama_mx_tiny_fp8_d8,
+llama_mx_tiny_fp4_d8. Do not rebuild these ELFs until the runs are in.
+
+### 14.4 DIM 4 deferred (user, 2026-10-22)
+The user is adding FP8 (E4M3) to the 4x4 hardware for consistency; DIM 4 is done last, on that new config. Until then:
+no DIM 4 calibration, the 14.3 DIM 4 VCS runs are dropped (redo them on the new config), and the llama_mx fp4/fp6 d4
+results stay spike-only. Order now: DIM-only model code (14.2) -> DIM 8 calibration -> DIM 32 (new runs) -> DIM 4.
+
+### 14.5 DIM-only model code (2026-10-22, user: "start on the DIM-16-only code fixes")
+RTL-read fixes, each reduces to the old DIM 16 code (gate: 14 DIM 16 kernels, same ELFs, bit-identical):
+* StC (DRAM): LoopMatmulStC is built with max_block_len 1 (LoopMatmul.scala:1185) -> 4-tile j groups, numChunks
+  2 at DIM >= 16, DIM/8 below (:573), not `mbl`/`mbl/2` (DIM 32 had 2x the stores). DIM < 16 quad: one store per
+  W = MxAccWiden tiles (dim8_fold, :696-734).
+* StCSpad: DIM < 16 steps j by W (:984) for single (compressed groups) and quad (W tiles per store, ej_high = last
+  folded tile); single BF16 group offset 8 rows at every DIM (model had DIM/2), chunk stride 4 at DIM >= 16 / 2*tpb
+  below; FP8 flat chunk stride tpb at DIM < 16 (:849-853).
+* RS StCSpad range tails: bf16 max(8, 64/DIM), tiled DIM >= 8 ? 16 : 32/DIM*16 (ReservationStation.scala:333-335).
+* SPAD_REQUANT footprints in spad row bytes R: src M*N*2/R, dst M*N/R (pad R) / M*N/2R (pad 2R); writes 32/R rows a
+  block.
+Not changed (move DIM 16; verify on a waveform first): StC order is j outer / i inner in the RTL (model i outer);
+quad DRAM StC is one store per tile (model 2-tile chunks); 4-bit SPAD_REQUANT writes 16/R rows a block (model 32/R)
+and the LUT flag rs2[33] also selects it (nib = fp4 | lut, not decoded).
+Effect, VCS 10-22 23:xx (DIM 8; DIM 4 vs the step-1 references), before -> after:
+| run | gate | down / chain |
+|---|---|---|
+| fp4 d8 | -1.8 -> -1.2 % | -0.9 -> -0.6 % |
+| fp6 d8 g3 | +3.5 -> +4.1 % | +4.9 -> +5.5 %; chain +5.6 -> +6.2 % |
+| fp4 d4 | -0.6 -> -0.5 % | -0.3 -> -0.2 % |
+| fp6 d4 g3 | +0.3 -> +0.4 % | +0.6 -> +0.8 %; chain +0.7 -> +0.9 % |
+Tiny llama_mx (spike only) layer totals move <= 0.6 % (fp6 d8 +0.6 %, others +-0.1 %); single phases up to 2.4 %.
