@@ -383,7 +383,7 @@ def merge_measured(perf: dict, timing: dict | None, *, clock_ns: float, recipe=N
 
 
 def line(perf: dict) -> str:
-    """The PERF line run_kernel.py prints: measured time first, this model's estimate and energy after."""
+    """The PERF line npu.py prints: measured time first, this model's estimate and energy after."""
     e = perf.get("energy")
     est = perf.get("estimate")
     if est is None:                                   # a record before merge_measured (standalone use)

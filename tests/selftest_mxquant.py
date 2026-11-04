@@ -1,12 +1,8 @@
-"""models/mxquant (the reference on mxq) must reproduce the legacy tier, follow the recipe, and degrade honestly.
+"""models/mxquant (the reference on mxq) must follow the recipe, and degrade honestly.
 
-  1. Legacy equivalence. For every registry kernel shape (linear, mlp2, mlp3, attention) and every operand
-     format, with the edges the pipeline's own lowering builds (fused chain with codebooks, graph),
-     models.mxquant.run(...).y and every intermediate equal grade/mxquant_ref.simulate(rtl_exact=True)
-     element for element. Skipped, and said so, when the MXQuant clone is absent.
   2. Recipe-aware. For each of the four recipes, the model equals the extracted hardware model
      (rtl_exact/mxmesh/fp8.tiled_matmul_hwlike) driven with that recipe's product and accumulator lists on the
-     same wire operands. The legacy tier could not do this: it hardcoded the tapeout ladder.
+     same wire operands.
   3. Degrade. An edge the requantizer cannot reproduce raises Unavailable, so the pipeline grades on the
      fp32 tier instead of inventing a reference.
   4. As-shipped self-consistency: the informational number is mxq's MXQuant mode.
@@ -72,42 +68,6 @@ def main() -> int:
     recipes = {n: load_hardware(n) for n in
                ("baseline", "flat_acc4", "wide_acc", "narrow_prod")}
     base = recipes["baseline"]
-
-    print("\n[1] legacy equivalence: models.mxquant == grade.mxquant_ref, every kernel x format ---")
-    try:
-        from grade import mxquant_ref as legacy
-        ok, why = legacy.available()
-    except Exception as exc:
-        ok, why = False, str(exc)
-    if not ok:
-        print(f"  skip  legacy tier unavailable ({why}); needs the MXQuant clone (--with-mxquant)")
-    else:
-        n_pairs = 0
-        for kname in KERNELS:
-            for dtype in FORMATS:
-                spec = build(kname)
-                try:
-                    edges = edges_for(pipeline, spec, dtype)
-                except Exception as exc:
-                    print(f"  skip  {kname}/{dtype}: lowering refused ({type(exc).__name__}: {str(exc)[:70]})")
-                    continue
-                try:
-                    old = legacy.simulate(spec, rtl_exact=True, dtype=dtype, edges=edges, lut=luts.settings(dtype))
-                except legacy.MxQuantUnavailable as exc:
-                    old = None
-                try:
-                    new = mxquant.run(spec, base, dtype=dtype, edges=edges, shipped=False, lut=luts.settings(dtype))
-                except mxquant.Unavailable as exc:
-                    new = None
-                if old is None or new is None:
-                    check(f"{kname}/{dtype}: both refuse or both model", (old is None) == (new is None))
-                    continue
-                n_pairs += 1
-                y_ok = same(old.y, new["y"])
-                st_ok = all(same(old.stages[k], new["stages"][k]) for k in old.stages)
-                check(f"{kname}/{dtype}: y and every stage identical", y_ok and st_ok,
-                      "" if y_ok and st_ok else f"y {'ok' if y_ok else 'DIFF'} stages {'ok' if st_ok else 'DIFF'}")
-        print(f"  ({n_pairs} kernel x format pairs compared)")
 
     print("\n[2] recipe-aware: model == mxmesh.fp8 with the recipe's lists, on wire operands ---")
     spec = build("linear")
@@ -222,7 +182,7 @@ def main() -> int:
     if FAILURES:
         print(f"FAILED {len(FAILURES)}: {', '.join(FAILURES)}")
         return 1
-    print("ALL CHECKS PASSED -- models.mxquant is the legacy reference, made recipe-aware.")
+    print("ALL CHECKS PASSED -- models.mxquant follows the recipe bit for bit.")
     return 0
 
 

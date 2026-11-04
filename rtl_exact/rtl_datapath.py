@@ -239,7 +239,7 @@ def install(eval_complete_module, cfg: RtlConfig | None = None) -> None:
             # format reaches this datapath only as wire operands, built by the compiler's chip rule.
             raise RuntimeError(
                 "rtl_exact: MXQuant's lut_weight is not the chip's LUT; pass the compiler's wire "
-                "operands (grade/mxquant_ref._matmul) instead")
+                "operands instead")
 
         C = torch.zeros((M, N), dtype=torch.float32, device=device)
         window = self.window

@@ -287,7 +287,7 @@ _SUMMARY_LINES = {
 _PORT = re.compile(r"(sp(\d+) r(\d+)/w(\d+))|(acc(\d+) (\d+))")
 _NOT_MODELLED = re.compile(r"not modelled: (\S+) x(\d+)")
 _CONFIG_LINE = re.compile(r"^\s+(?P<name>[a-z_]+\.[a-z0-9_]+)\s+(?P<value>-?[\d.e+-]+)(?P<star>\s\*)?\s", re.M)
-_CONFIG_PRESET = re.compile(r"gemmini perf config \(preset (\w+)\)")
+_CONFIG_PRESET = re.compile(r"gemmini perf config \(preset (\w+)[,)]")
 
 
 def parse_timing_summary(text: str) -> dict[str, Any]:

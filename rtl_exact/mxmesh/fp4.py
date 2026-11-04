@@ -1,6 +1,6 @@
 """The bit-exact FP4/FP6 mesh. 32x32 tiles (gemmini.cc:1519) and PROD_MANT_BITS=3, which is the whole difference from the FP8 model.
 
-EXTRACTED VERBATIM from ``fp4_matmul_model.py`` by ``tools/extract_model.py`` — do not edit.
+EXTRACTED VERBATIM from ``fp4_matmul_model.py`` by ``rtl_exact/extract_model.py`` — do not edit.
 Entry points: tiled_matmul_hwlike, matrix_mx_requantize, tensor_to_custom_fp_codes
 Closure: 39 definitions.
 """

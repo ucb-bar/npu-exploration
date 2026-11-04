@@ -36,3 +36,9 @@ matmul_tiled_asym_fp4_e5m2_64x64_dim8
 matmul_tiled_asym_e4m3s_fp4_64x64_dim8
 matmul_tiled_asym_e4m3s_e3m2_64x64_dim8
 matmul_tiled_asym_e4m3s_e5m2_64x64_dim8
+# --- tiled requant chain (E4M3 single, operand-A tiled output reused in place) ---
+matmul_tiled_fp8_64x64_chain_dim8
+# --- DRAM-out (StC) native loop + N=96 (odd j-group count: padded acc layout) ---
+matmul_tiled_fp8_64x64_dramloop_dim8
+matmul_tiled_fp8_64x96x64_dramloop_dim8
+matmul_tiled_fp8_64x96x64_dim8

@@ -11,7 +11,7 @@ makes "is our copy still correct?" a diff rather than a judgement — see
 `tests/selftest_extracted.py`, which re-runs this and requires a textual match plus elementwise
 agreement.
 
-    python tools/extract_model.py <source.py> <out.py> <entry> [<entry> ...] [--header TEXT]
+    python rtl_exact/extract_model.py <source.py> <out.py> <entry> [<entry> ...] [--header TEXT]
 """
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ QuantFn = Optional[Callable[[Tensor], Tensor]]
 def render(src: Path, entries: list[str], *, header: str = "") -> str:
     body, names = closure(src.read_text(), entries)
     doc = (f'"""{header.rstrip()}\n\n'
-           f"EXTRACTED VERBATIM from ``{src.name}`` by ``tools/extract_model.py`` — do not edit.\n"
+           f"EXTRACTED VERBATIM from ``{src.name}`` by ``rtl_exact/extract_model.py`` — do not edit.\n"
            f"Entry points: {', '.join(entries)}\n"
            f"Closure: {len(names)} definitions.\n"
            f'"""\n')

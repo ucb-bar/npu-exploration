@@ -1,7 +1,7 @@
-"""compile_kernel.py: the same C as the graded path, an ELF that prints the expected bits, refusals.
+"""npu.py's compile step: the same C as the graded path, an ELF that prints the expected bits, refusals.
 
 Claims:
-1. For every kernel x format the graded path builds, ``compile_kernel.compile`` writes a ``main.c``
+1. For every kernel x format the graded path builds, ``npu.compile`` writes a ``main.c``
    byte-identical to the one ``pipeline.run(build_only=True)`` writes -- same lowering, same
    emitter -- for BOTH targets, whose C is identical to each other.
 2. The spike-target ELF, run through the backend runner, prints ``expected.npy`` bit for bit
@@ -9,7 +9,7 @@ Claims:
 3. Refusals happen before any build and need no toolchain: a shape violation, a graph kernel in a
    non-fp8 format, a host stage with a Python function, an unknown target, a bad ``--module`` or
    ``--input``.
-4. ``--module FILE.py:Name`` compiles a plain PyTorch module (tests/fixtures/modules.py: attention,
+4. ``--model FILE.py:Name`` compiles a plain PyTorch module (tests/fixtures/modules.py: attention,
    SwiGLU, a RoPE chain): the spike ELF prints its ``expected.npy`` bit for bit.
 
 Needs the RISC-V toolchain for 1 and spike for 2; each SKIPs with a reason otherwise.
@@ -55,7 +55,7 @@ def main() -> int:
         return 0
     from compiler.lower import wire_paths
     wire_paths()
-    import compile_kernel as ck
+    import npu as ck
     from backend import runner
     import dataclasses
     from config.recipe import load_hardware
@@ -69,17 +69,17 @@ def main() -> int:
     quiet = Quiet()
 
     print("[3] refusals, before any build ------------------------------------")
-    check("shape violation -> exit 2", ck.main(["--kernel", "linear", "--m", "60", "--out", "/nonexistent/x"]) == 2)
+    check("shape violation -> exit 2", ck.main(["--only", "compile", "--kernel", "linear", "--m", "60", "--out", "/nonexistent/x"]) == 2)
     check("graph kernel in fp8_e5m2 -> exit 2",
-          ck.main(["--kernel", "attention", "--hw", "lut_fp8e5m2", "--run", "fp8_e5m2", "--out", "/nonexistent/x"]) == 2)
+          ck.main(["--only", "compile", "--kernel", "attention", "--hw", "lut_fp8e5m2", "--run", "fp8_e5m2", "--out", "/nonexistent/x"]) == 2)
     check("graph kernel in fp4_e2m1 -> exit 2",
-          ck.main(["--kernel", "attention", "--run", "fp4_e2m1", "--out", "/nonexistent/x"]) == 2)
+          ck.main(["--only", "compile", "--kernel", "attention", "--run", "fp4_e2m1", "--out", "/nonexistent/x"]) == 2)
     check("--dtype is refused (the run recipe's operand_fmt now) -> exit 2",
-          ck.main(["--kernel", "linear", "--dtype", "fp4_e2m1", "--out", "/nonexistent/x"]) == 2)
+          ck.main(["--only", "compile", "--kernel", "linear", "--dtype", "fp4_e2m1", "--out", "/nonexistent/x"]) == 2)
     check("a run the kernel path cannot follow (reduce exact) -> exit 2",
-          ck.main(["--kernel", "linear", "--run", "exact", "--out", "/nonexistent/x"]) == 2)
+          ck.main(["--only", "compile", "--kernel", "linear", "--run", "exact", "--out", "/nonexistent/x"]) == 2)
     check("an unknown run recipe -> exit 2",
-          ck.main(["--kernel", "linear", "--run", "nope", "--out", "/nonexistent/x"]) == 2)
+          ck.main(["--only", "compile", "--kernel", "linear", "--run", "nope", "--out", "/nonexistent/x"]) == 2)
     torch.manual_seed(0)
     fn_spec = KernelSpec("fnhost", torch.randn(64, 64), [
         Stage("L0", weight=torch.randn(64, 64)),
@@ -90,24 +90,28 @@ def main() -> int:
     check("unknown target -> ValueError",
           _raises(lambda: ck.compile(build("linear"), base, target="fpga", out=Path("/nonexistent/x"),
                                      tel=quiet), "fpga"))
-    check("unknown kernel -> exit 2", ck.main(["--kernel", "nope"]) == 2)
+    check("unknown kernel -> exit 2", ck.main(["--only", "compile", "--kernel", "nope"]) == 2)
     check("--module with a missing attribute -> exit 2",
-          ck.main(["--module", "tests/fixtures/modules.py:Nope", "--out", "/nonexistent/x"]) == 2)
+          ck.main(["--only", "compile", "--module", "tests/fixtures/modules.py:Nope", "--out", "/nonexistent/x"]) == 2)
     check("--module with a missing file -> exit 2",
-          ck.main(["--module", "tests/fixtures/none.py:Attn", "--out", "/nonexistent/x"]) == 2)
+          ck.main(["--only", "compile", "--module", "tests/fixtures/none.py:Attn", "--out", "/nonexistent/x"]) == 2)
     check("--module without a colon -> exit 2",
-          ck.main(["--module", "tests/fixtures/modules.py", "--out", "/nonexistent/x"]) == 2)
+          ck.main(["--only", "compile", "--module", "tests/fixtures/modules.py", "--out", "/nonexistent/x"]) == 2)
     check("--input without --module -> exit 2",
-          ck.main(["--kernel", "linear", "--input", "x.npy", "--out", "/nonexistent/x"]) == 2)
+          ck.main(["--only", "compile", "--kernel", "linear", "--input", "x.npy", "--out", "/nonexistent/x"]) == 2)
     with tempfile.TemporaryDirectory() as td:
         bad = Path(td) / "x.npy"
         np.save(bad, np.zeros((2, 64, 64), np.float32))
         check("--input with the wrong rank -> exit 2",
-              ck.main(["--module", "tests/fixtures/modules.py:Attn", "--input", str(bad),
+              ck.main(["--only", "compile", "--module", "tests/fixtures/modules.py:Attn", "--input", str(bad),
                        "--out", "/nonexistent/x"]) == 2)
     check("--module that the tracer refuses (bias) -> exit 2",
-          ck.main(["--module", "tests/fixtures/modules.py:Biased", "--out", "/nonexistent/x"]) == 2)
-    check("merlin is not loaded in a compile_kernel process",
+          ck.main(["--only", "compile", "--module", "tests/fixtures/modules.py:Biased", "--out", "/nonexistent/x"]) == 2)
+    check("evaluate without compile -> exit 2", ck.main(["--kernel", "linear", "--skip", "compile"]) == 2)
+    check("an unknown step -> exit 2", ck.main(["--kernel", "linear", "--skip", "spike"]) == 2)
+    check("--skip and --only together -> exit 2",
+          ck.main(["--kernel", "linear", "--skip", "cost", "--only", "compile"]) == 2)
+    check("merlin is not loaded in an npu.py process",
           sys.modules.get("merlin") is None and not any(m.startswith("merlin.") for m in sys.modules))
 
     print("\n[1] main.c identical to the graded path, both targets --------------")
@@ -164,7 +168,7 @@ def main() -> int:
     print("\n[4] --module: a plain PyTorch module, traced, compiled, run ---------------")
     for name in ("Attn", "SwiGLU", "RopeChain"):
         with tempfile.TemporaryDirectory() as td:
-            rc = ck.main(["--module", "tests/fixtures/modules.py:" + name, "--out", td])
+            rc = ck.main(["--only", "compile", "--module", "tests/fixtures/modules.py:" + name, "--out", td])
             if rc != 0:
                 check(f"{name}: compiled", False, f"exit {rc}")
                 continue
@@ -177,7 +181,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         xin = Path(td) / "x.npy"
         np.save(xin, np.random.default_rng(1).standard_normal((64, 64)).astype(np.float32))
-        rc = ck.main(["--module", "tests/fixtures/modules.py:Attn", "--input", str(xin), "--out", td])
+        rc = ck.main(["--only", "compile", "--module", "tests/fixtures/modules.py:Attn", "--input", str(xin), "--out", td])
         saved = np.load(Path(td) / "operands.npz")["x"] if rc == 0 else None
         check("--input is the spec's x", rc == 0 and np.array_equal(saved, np.load(xin)))
     return _finish()

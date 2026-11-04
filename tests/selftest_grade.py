@@ -84,7 +84,7 @@ def main() -> int:
         check("as-shipped delta cannot fail a run", g_ship["pass"] is True,
               f"differs on {g_ship['delta_vs_mxquant_as_shipped']['n_mismatch']}, still PASS")
 
-        # No hardware (run_kernel.py --models mxquant): the model is recorded, nothing is graded.
+        # No hardware (npu.py --skip evaluate): the model is recorded, nothing is graded.
         g_only = mxquant_only(exact, ref, shipped_reference=off)
         check("without hardware there is no verdict", g_only["pass"] is None)
         check("the tier says so", g_only["tier"] == "mxquant_recipe_exact (no hardware)")

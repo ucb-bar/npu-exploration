@@ -1,8 +1,7 @@
 # Runtime dependencies of the framework itself (see scripts/setup.sh, phase `python`).
 torch
 numpy
-# The legacy reference (grade/mxquant_ref.py, --legacy-mxquant) imports these; without any one of them
-# it reports "[mxquant] UNAVAILABLE -- No module named ..." and the run grades on the fp32 tier.
+# The perplexity path and rtl_exact/ (with the optional MXQuant clone) use these.
 qtorch
 transformers
 datasets

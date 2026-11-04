@@ -219,7 +219,7 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
         build_only: bool = False, artifacts: bool = False,
         workdir: Path | None = None, results_dir: Path | None = None,
         repo: Path | None = None, telemetry=None,
-        models: tuple[str, ...] | None = None, legacy_mxquant: bool = False) -> dict:
+        models: tuple[str, ...] | None = None) -> dict:
     """Build, run and grade one KernelSpec (1..N stages) on the hardware recipe ``recipe`` driven by the run
     recipe ``run_recipe`` (default: config/hardware/baseline.json, config/run/default.json). Returns the run
     record. A pair the kernel path cannot follow is refused before anything is built (config.recipe.check).
@@ -228,8 +228,6 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
     ``models.DEFAULT``): the fp32 ``reference`` always; ``spike`` builds and runs the ELF; ``mxquant``
     computes the bits it must match; ``ppa`` and ``perf`` are fail-soft extras. Without
     ``spike`` there is no VERDICT: the record carries the model's numbers and ``pass = None``.
-    ``legacy_mxquant`` grades against grade/mxquant_ref.py (MXQuant's simulator, patched; recipe-blind)
-    for the equivalence test; it disappears in the next PR.
 
     ``per_stage_elf`` forces a chain onto the one-ELF-per-matmul path it would otherwise skip. The
     two are meant to agree bit-for-bit -- fusing changes how many programs run, not what is computed
@@ -247,9 +245,6 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
             raise ValueError(f"unknown model {_m!r}; choose from {', '.join(models_pkg.NAMES)}")
     if build_only and "spike" not in models:
         raise ValueError("--build-only builds the ELF, which is the spike model: add spike to --models")
-    legacy = None
-    if legacy_mxquant:
-        from . import mxquant_ref as legacy          # MXQuant-patching implementation, until PR 2
     from .telemetry import Telemetry
 
     repo = repo or REPO
@@ -369,13 +364,9 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
 
     def start_models(edges, shapes):
         if "mxquant" in models:
-            ok, why = (legacy or mxquant_model).available()
+            ok, why = mxquant_model.available()
             if not ok:
                 pending["mxquant"] = why                     # a string: unavailable, say why
-            elif legacy is not None:
-                pending["mxquant"] = pool.submit(lambda: (
-                    legacy.simulate(spec, rtl_exact=True, dtype=dtype, edges=edges, lut=lut),
-                    legacy.simulate(spec, rtl_exact=False, dtype=dtype, edges=edges, lut=lut)))
             else:
                 pending["mxquant"] = pool.submit(mxquant_model.run, spec, recipe,
                                                  dtype=dtype, edges=edges, lut=lut)
@@ -632,21 +623,14 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
     mxq_out = shipped = mxq_info = None
     tier = mxquant_model.TIER
     if "mxquant" in models:
-        not_modelled = ((mxquant_model.Unavailable, RecipeError)
-                        + ((legacy.MxQuantUnavailable,) if legacy else ()))
+        not_modelled = (mxquant_model.Unavailable, RecipeError)
         if isinstance(pending["mxquant"], str):
             tel.log("mxquant", f"UNAVAILABLE -- {pending['mxquant']}; "
                                "grading falls back to the fp32 tier")
         else:
             try:
-                if legacy is not None:
-                    g, sh = pending["mxquant"].result()
-                    y_model, y_ship, tier = g.y, sh.y, "mxquant_rtl_exact"
-                    mxq_info = {"source": "MXQuant prodacc via grade/mxquant_ref.py (legacy)",
-                                "recipe_aware": False, "recipe": recipe.name, "dtype": dtype}
-                else:
-                    r = pending["mxquant"].result()
-                    y_model, y_ship, mxq_info, tier = r["y"], r["shipped_y"], r["model"], r["tier"]
+                r = pending["mxquant"].result()
+                y_model, y_ship, mxq_info, tier = r["y"], r["shipped_y"], r["model"], r["tier"]
             except not_modelled as exc:
                 # An edge the model cannot reproduce degrades the TIER, never the numbers.
                 # A confident wrong reference would be worse than none.

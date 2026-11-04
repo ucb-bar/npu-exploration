@@ -10,7 +10,7 @@ mxquant has a second path, ``evaluate(workload, recipe)``: a whole language mode
 arithmetic in its linear layers, measured as perplexity (GPU, minutes; ``python -m models.mxquant``).
 
 Each folder exposes ``run(...) -> dict`` and ``line(metrics) -> str``, the one terminal line it prints.
-``run_kernel.py --models`` picks which ones run; all five take seconds.
+``npu.py`` picks which ones run from its steps (quantize: mxquant; evaluate: spike; cost: ppa, perf).
 
 The mxq library (git submodule ``microscaling-quant/``) is put on ``sys.path`` HERE and nowhere else.
 The directory is hyphenated on purpose: a directory called ``mxq`` at the repo root would shadow the

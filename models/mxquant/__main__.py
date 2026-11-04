@@ -9,7 +9,7 @@
     .venv/bin/python -m models.mxquant --workload tinyllama --hw none --gpus 0,1,2,3 --nsamples 0          # bf16 model, whole split
 
 Any other operand format, rounding, scale floor or reducer is a run recipe: copy config/run/default.json and
-pass --run <file>. For one kernel's bits (the same model's other path) use run_kernel.py.
+pass --run <file>. For one kernel's bits (the same model's other path) use npu.py --only quantize.
 """
 from __future__ import annotations
 

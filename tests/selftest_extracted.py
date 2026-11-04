@@ -41,7 +41,7 @@ if not ROCC.is_dir():
     ROCC = REPO.parent / "software" / "gemmini-rocc-tests"
 
 #: every extracted module: (upstream file, our copy, entry points). Keep in step with the
-#: `tools/extract_model.py` invocations recorded in planning/merlin_glue_port_plan.md section 4.16.
+#: `rtl_exact/extract_model.py` invocations; the entry lists below are the record.
 MODULES = [
     (ROCC / "fp8_matmul_model.py", REPO / "rtl_exact" / "mxmesh" / "fp8.py",
      ["tiled_matmul_hwlike", "matrix_mx_requantize", "tensor_to_custom_fp_codes",
@@ -52,7 +52,7 @@ MODULES = [
 ]
 
 
-sys.path.insert(0, str(REPO / "tools"))
+sys.path.insert(0, str(REPO / "rtl_exact"))
 from extract_model import closure                      # noqa: E402
 
 
@@ -100,7 +100,7 @@ def main(argv: list[str]) -> int:
         fails += not ok
         print(f"  {'PASS' if ok else 'FAIL'}  {ours.relative_to(REPO)} == extract({up.name})")
         if not ok:
-            print("        upstream changed; re-extract with tools/extract_model.py, "
+            print("        upstream changed; re-extract with rtl_exact/extract_model.py, "
                   "then re-check the numbers below")
 
     print("\n[2] behavioural: elementwise identity on edge cases + random ----")
