@@ -5,7 +5,7 @@
 #   bash scripts/setup.sh --check         # doctor only: PASS/FAIL per requirement
 #   bash scripts/setup.sh --phase <name>  # one phase: merlin mxq python toolchain spike
 #                                         #            gemmini libgemmini ppa mxquant
-#   bash scripts/setup.sh --with-mxquant  # also clone MXQuant (optional: capture scripts, legacy tier)
+#   bash scripts/setup.sh --with-mxquant  # also clone MXQuant (optional: capture scripts, rtl_exact verification)
 #
 # Idempotent: every phase checks its postcondition first and skips if satisfied,
 # so re-running after a failure resumes where it left off.
@@ -15,7 +15,7 @@
 #   mxq        <repo>/microscaling-quant        git submodule, pinned: the quantization library the
 #                                                mxquant model runs on (models/, config/scheme.py)
 #   mxquant    <repo>/MXQuant checkout          OPTIONAL (--with-mxquant): kernels/captures/*.py load the
-#                                                model through it; grade/mxquant_ref.py (legacy) reads
+#                                                model through it; tests/verify_rtl_exact.py reads
 #                                                origin/chloe-branch-all. Nothing graded needs it.
 #   toolchain  <root>/.conda-env with riscv64-unknown-elf-gcc, dtc, and a host g++
 #                                               (runner.py gate; spike shells out to dtc)
@@ -39,9 +39,9 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ---- The one place each external's origin is defined. -------------------------------
 # Quantizer: the mxq library is the git submodule microscaling-quant/ (pinned SHA in .gitmodules;
-# HTTPS fallback in phase_mxq). MXQuant is optional now: capture scripts and the legacy tier only.
+# HTTPS fallback in phase_mxq). MXQuant is optional now: capture scripts and tests/verify_rtl_exact.py only.
 MXQUANT_URL="git@github.com:chooper1/MXQuant.git"
-MXQUANT_BRANCH="chloe-branch-all"    # grade/mxquant_ref.py extracts files from origin/<this>
+MXQUANT_BRANCH="chloe-branch-all"    # tests/verify_rtl_exact.py extracts files from origin/<this>
 # Public repos over HTTPS so no SSH keys are needed for them.
 GEMMINI_URL="https://github.com/ucb-bar/gemmini.git"
 GEMMINI_REF="gemmini-mx-cleanup"
@@ -99,8 +99,8 @@ have_python()     { "$REPO/.venv/bin/python" -c 'import torch, numpy' >/dev/null
 # MXQuant is OPTIONAL (--with-mxquant) since 2026-09-24: compiler/operands.py takes the block quantizer
 # from models/mxquant/block.py (mxq). The clone serves the capture scripts and
 # tests/selftest_block.py --update, which import end_to_end_linear/mx_block_quant.py from the
-# WORKING TREE (present on MXQuant main, NOT on every branch), and grade/mxquant_ref.py
-# (--legacy-mxquant), which reads prodacc files from the origin/chloe-branch-all REF via git show.
+# WORKING TREE (present on MXQuant main, NOT on every branch), and tests/verify_rtl_exact.py,
+# which reads prodacc files from the origin/chloe-branch-all REF via git show.
 have_mxquant()    { [ -f "$REPO/MXQuant/end_to_end_linear/mx_block_quant.py" ]; }
 have_mxq_branch() { git -C "$REPO/MXQuant" rev-parse --verify -q "origin/$MXQUANT_BRANCH" >/dev/null 2>&1; }
 have_toolchain()  { [ -x "$RISCV_DIR/bin/riscv64-unknown-elf-gcc" ] \
@@ -142,7 +142,7 @@ phase_python() {
 
 phase_mxquant() {
     if [ "$WITH_MXQUANT" != 1 ]; then
-        say mxquant "skipped (optional; --with-mxquant clones it for the capture scripts and the legacy tier)"
+        say mxquant "skipped (optional; --with-mxquant clones it for the capture scripts and tests/verify_rtl_exact.py)"
         return
     fi
     if have_mxquant && have_mxq_branch; then skip mxquant; return; fi
@@ -160,7 +160,7 @@ phase_mxquant() {
 tests/selftest_block.py --update import it). Its working tree must be on a branch that carries it -- \
 MXQuant main does; a fresh clone (drop --mxquant) is the easy fix."
     if ! have_mxq_branch; then
-        say mxquant "fetching origin/$MXQUANT_BRANCH (grade/mxquant_ref.py reads from it)"
+        say mxquant "fetching origin/$MXQUANT_BRANCH (tests/verify_rtl_exact.py reads from it)"
         git -C "$REPO/MXQuant" fetch origin "$MXQUANT_BRANCH"
     fi
 }
@@ -282,12 +282,12 @@ doctor() {
     row 1 "$(have_python && echo 1)"                                      ".venv (torch, numpy)"  "$REPO/.venv"
     row 0 "$(have_ppa && echo 1)"                                         "PPA workspace (optional)" "${MX_PPA_ROOT:-$PPA_DIR/ppa}"
     row 0 "$(command -v nvidia-smi >/dev/null 2>&1 && echo 1)"            "GPU (optional: perplexity)" "nvidia-smi"
-    row 0 "$(have_mxquant && have_mxq_branch && echo 1)"                  "MXQuant (optional: capture, legacy)" "$REPO/MXQuant  (--with-mxquant)"
+    row 0 "$(have_mxquant && have_mxq_branch && echo 1)"                  "MXQuant (optional: capture, verify)" "$REPO/MXQuant  (--with-mxquant)"
     echo
     if [ "$bad" = 0 ]; then
         echo "All required checks pass. Next:"
         echo "    source scripts/env.sh${ROOT:+ $ROOT}"
-        echo "    .venv/bin/python run_kernel.py --kernel linear --hw baseline"
+        echo "    .venv/bin/python npu.py --hw baseline --model examples/mlp.py:MLP"
     else
         echo "FAIL above. Re-run 'bash scripts/setup.sh' (idempotent) or the named phase:"
         echo "    bash scripts/setup.sh --phase <merlin|mxq|python|toolchain|spike|gemmini|libgemmini|ppa|mxquant>"

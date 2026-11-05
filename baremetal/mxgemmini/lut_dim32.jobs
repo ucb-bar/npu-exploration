@@ -2,7 +2,7 @@
 # in the bareMetalC ISA suite (software/gemmini-rocc-tests/bareMetalC); simq resolves the names against
 # build_mx_rocket/bareMetalC/<name>-baremetal. Feed it to simq:
 #
-#   tools/simq run CONFIG=MxDim32AllGemminiRocketConfig BINARY=baremetal/mxgemmini/lut_dim32.jobs JOBS=8
+#   sim/simq run CONFIG=MxDim32AllGemminiRocketConfig BINARY=baremetal/mxgemmini/lut_dim32.jobs JOBS=8
 #
 # IMPORTANT: run under CONFIG=MxDim32AllGemminiRocketConfig (the 32x32 all-format LUT mesh), NOT the
 # DIM=16 MxGemminiRocketConfig that ladder.jobs uses -- these tests hardcode DIM=32 and need the 32x32 simv.
@@ -11,7 +11,7 @@
 # Spike cross-check (bit-exact with RTL; all rungs PASS on spike as of 2026-09-21):
 #   spike --extension=gemmini_dim32 build_spike/bareMetalC/<name>-baremetal
 # Goldens come from gen_mx_lut.py (DIM-aware, Spike-consistent). The 32x32 LUT deproject needed the
-# QuantLut.scala DIM-general fix (see planning/mxgemmini_rocket_standalone_plan.md).
+# QuantLut.scala DIM-general fix (a planning note that was never committed to this repo).
 #
 # The 4 LUT formats: E4M3-quad (fp8/altfmt0), E5M2 (fp8/altfmt1), E2M3 (fp6/altfmt1), E3M2 (fp6/altfmt0).
 

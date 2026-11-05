@@ -18,5 +18,8 @@ parked/
 
 # Generated kernel data: regenerate with `make -C baremetal/mxgemmini data`.
 # ~22 MB of derived bytes, and tracking them is how llama_attn.h sat stale through a
-# rounding-mode change while every test still passed (planning/llama_layer_hw_plan.md 9.1).
+# rounding-mode change while every test still passed (26dc11e:planning/llama_layer_hw_plan.md 9.1).
 baremetal/*/data/
+
+# local sim queue (restored from history, not tracked)
+tools

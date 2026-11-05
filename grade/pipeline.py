@@ -9,7 +9,7 @@ length 1, so nothing special-cases it. Two lowerings sit behind that entry:
   the seam the backend emits (``mxgemm_emit._emit_seam``) — today a scale-byte
   transpose, which exists only because the requantizer writes ``[row][block]`` and
   the A-side scale memory reads ``[group][row]``. Step 3 of
-  ``planning/merlin_glue_port_plan.md`` removes even that, by having the hardware
+  ``26dc11e:planning/merlin_glue_port_plan.md`` removes even that, by having the hardware
   write the scales resident and transposed.
 * **per-stage** — one command buffer per matmul, intermediates carried through the
   host as float. Required by any graph that is not a straight chain (attention
@@ -21,8 +21,8 @@ on the recipe's product format and accumulator ladder, fed the operands the ELF 
 not fp32, so the verdict is bit-identity with no tolerance in it. A second run in mxq's
 MXQuant mode (*as shipped*) reports how far the published simulator sits from the
 silicon. The fp32 comparison stays as a labelled context line — it measures the cost of
-the format, not correctness. ``--models`` selects which models run; without spike there
-is no verdict.
+the format, not correctness. ``models`` (npu.py's steps) selects which models run; without
+spike there is no verdict.
 
 Every hardware step is a call into this repo's own modules (``compiler/operands.py``
 for quantization — MXQuant, never transcribed — ``compiler/lower.py`` for lowering,
@@ -219,7 +219,7 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
         build_only: bool = False, artifacts: bool = False,
         workdir: Path | None = None, results_dir: Path | None = None,
         repo: Path | None = None, telemetry=None,
-        models: tuple[str, ...] | None = None, legacy_mxquant: bool = False) -> dict:
+        models: tuple[str, ...] | None = None) -> dict:
     """Build, run and grade one KernelSpec (1..N stages) on the hardware recipe ``recipe`` driven by the run
     recipe ``run_recipe`` (default: config/hardware/baseline.json, config/run/default.json). Returns the run
     record. A pair the kernel path cannot follow is refused before anything is built (config.recipe.check).
@@ -228,8 +228,6 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
     ``models.DEFAULT``): the fp32 ``reference`` always; ``spike`` builds and runs the ELF; ``mxquant``
     computes the bits it must match; ``ppa`` and ``perf`` are fail-soft extras. Without
     ``spike`` there is no VERDICT: the record carries the model's numbers and ``pass = None``.
-    ``legacy_mxquant`` grades against grade/mxquant_ref.py (MXQuant's simulator, patched; recipe-blind)
-    for the equivalence test; it disappears in the next PR.
 
     ``per_stage_elf`` forces a chain onto the one-ELF-per-matmul path it would otherwise skip. The
     two are meant to agree bit-for-bit -- fusing changes how many programs run, not what is computed
@@ -246,10 +244,7 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
         if _m not in models_pkg.NAMES:
             raise ValueError(f"unknown model {_m!r}; choose from {', '.join(models_pkg.NAMES)}")
     if build_only and "spike" not in models:
-        raise ValueError("--build-only builds the ELF, which is the spike model: add spike to --models")
-    legacy = None
-    if legacy_mxquant:
-        from . import mxquant_ref as legacy          # MXQuant-patching implementation, until PR 2
+        raise ValueError("build_only builds the ELF, which is the spike model: add spike to models")
     from .telemetry import Telemetry
 
     repo = repo or REPO
@@ -369,13 +364,9 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
 
     def start_models(edges, shapes):
         if "mxquant" in models:
-            ok, why = (legacy or mxquant_model).available()
+            ok, why = mxquant_model.available()
             if not ok:
                 pending["mxquant"] = why                     # a string: unavailable, say why
-            elif legacy is not None:
-                pending["mxquant"] = pool.submit(lambda: (
-                    legacy.simulate(spec, rtl_exact=True, dtype=dtype, edges=edges, lut=lut),
-                    legacy.simulate(spec, rtl_exact=False, dtype=dtype, edges=edges, lut=lut)))
             else:
                 pending["mxquant"] = pool.submit(mxquant_model.run, spec, recipe,
                                                  dtype=dtype, edges=edges, lut=lut)
@@ -632,21 +623,14 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
     mxq_out = shipped = mxq_info = None
     tier = mxquant_model.TIER
     if "mxquant" in models:
-        not_modelled = ((mxquant_model.Unavailable, RecipeError)
-                        + ((legacy.MxQuantUnavailable,) if legacy else ()))
+        not_modelled = (mxquant_model.Unavailable, RecipeError)
         if isinstance(pending["mxquant"], str):
             tel.log("mxquant", f"UNAVAILABLE -- {pending['mxquant']}; "
                                "grading falls back to the fp32 tier")
         else:
             try:
-                if legacy is not None:
-                    g, sh = pending["mxquant"].result()
-                    y_model, y_ship, tier = g.y, sh.y, "mxquant_rtl_exact"
-                    mxq_info = {"source": "MXQuant prodacc via grade/mxquant_ref.py (legacy)",
-                                "recipe_aware": False, "recipe": recipe.name, "dtype": dtype}
-                else:
-                    r = pending["mxquant"].result()
-                    y_model, y_ship, mxq_info, tier = r["y"], r["shipped_y"], r["model"], r["tier"]
+                r = pending["mxquant"].result()
+                y_model, y_ship, mxq_info, tier = r["y"], r["shipped_y"], r["model"], r["tier"]
             except not_modelled as exc:
                 # An edge the model cannot reproduce degrades the TIER, never the numbers.
                 # A confident wrong reference would be worse than none.
@@ -671,9 +655,14 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
         metrics = compare(hw, ref_fp32, mxq_out, tol_rel_fro=tol, shipped_reference=shipped, tier=tier)
     elif mxq_out is not None:
         metrics = mxquant_only(mxq_out, ref_fp32, shipped_reference=shipped, tier=tier)
+    elif "ppa" in models or "perf" in models:
+        # The cost step alone: nothing ran that produces bits, so there is nothing to grade; the record
+        # carries the cost and NO VERDICT.
+        metrics = {"tier": "cost only", "accuracy_vs_fp32_reference": None, "finite": None,
+                   "correctness_vs_mxquant": None, "pass": None}
     else:
-        raise RuntimeError("nothing to grade: neither spike ran nor the mxquant model was available "
-                           "(--models must include spike or mxquant)")
+        raise RuntimeError("nothing to grade or cost: neither spike ran nor the mxquant model was "
+                           "available (run the evaluate, quantize or cost step)")
     metrics["mxquant"] = mxq_info
     metrics["stages"] = stage_records
     if hw is not None:
@@ -729,11 +718,12 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
     pool.shutdown(wait=False)
 
     acc = metrics["accuracy_vs_fp32_reference"]
-    tel.log("grade", f"tier={metrics['tier']}  "
-                     f"finite {metrics['finite']['n_finite']}/{metrics['finite']['total']}  "
-                     f"cycles {metrics['total_cycles']}")
-    tel.log("fp32", f"rel_fro={acc['rel_fro']:.4%}  mae={acc['mae']:.4g}  "
-                    f"max_abs={acc['max_abs']:.4g}   (context only -- the cost of the format)")
+    if acc is not None:
+        tel.log("grade", f"tier={metrics['tier']}  "
+                         f"finite {metrics['finite']['n_finite']}/{metrics['finite']['total']}  "
+                         f"cycles {metrics['total_cycles']}")
+        tel.log("fp32", f"rel_fro={acc['rel_fro']:.4%}  mae={acc['mae']:.4g}  "
+                        f"max_abs={acc['max_abs']:.4g}   (context only -- the cost of the format)")
 
     # --- (4) record -------------------------------------------------------------------
     _mesh = spec.mesh_stages

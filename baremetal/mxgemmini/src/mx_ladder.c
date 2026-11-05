@@ -347,7 +347,7 @@ int main(void) {
     }
     // Two layout hypotheses, tested rather than eyeballed. TRANSPOSED: the requantizer wrote
     // [GN][M] (which is the layout the A-side scale WINDOW wants, so confusing the two is a real
-    // and already-recorded hazard -- planning/llama_layer_hw_plan.md 10.4). PITCHED: it wrote
+    // and already-recorded hazard -- 26dc11e:planning/llama_layer_hw_plan.md 10.4). PITCHED: it wrote
     // [M][GN] but strided rows by J*GN instead of GN, i.e. it took the row pitch from the output
     // TILE count rather than the block count.
     int t = 0, p = 0, n = LAD_M * LAD_GN;

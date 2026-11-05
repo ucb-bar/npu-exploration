@@ -13,7 +13,7 @@ tiling does not fault, it returns plausible wrong numbers.
 A chained stage's operand does not come back to the host: the requantizer's FP8 write-back is drained
 to a DRAM array and moved straight back in as the next stage's A. What the driver must do at that
 join — "the seam" — is deliberately as close to nothing as the hardware permits; see
-``planning/chain_seam_hw_notes.md`` for every part of it that exists only because of a hardware
+``26dc11e:planning/chain_seam_hw_notes.md`` for every part of it that exists only because of a hardware
 property, and what would remove it.
 
 Interface follows the other merlin backends: ``generate_driver(cb, ...) -> str`` (cf.

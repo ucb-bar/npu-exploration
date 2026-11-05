@@ -7,7 +7,7 @@
 // hands its result back to the mesh.
 //
 // The quantizer follows MXQuant's END-TO-END convention, which is what the FP8 datapath was
-// migrated to (npu-exploration/planning/chain_seam_hw_notes.md section 8, and gemmini.cc's FP8
+// migrated to (26dc11e:planning/chain_seam_hw_notes.md section 8, and gemmini.cc's FP8
 // post-pass):
 //
 //     X    = 2^floor(log2(max(amax, FLT_EPSILON)))     per 32-element block, no `- log2_pmax` term
@@ -31,7 +31,7 @@
 // These routines are NOT mirrored bit-for-bit in the Python golden -- the generated header carries
 // the golden's own codes so a test can report how far its fp32 differs, and the expectation is
 // zero, because E4M3 keeps 3 mantissa bits and absorbs a last-ulp difference between newlib and
-// numpy. See planning/llama_layer_hw_plan.md section 4.
+// numpy. See 26dc11e:planning/llama_layer_hw_plan.md section 4.
 
 #ifndef INCLUDE_MX_HOST_H
 #define INCLUDE_MX_HOST_H

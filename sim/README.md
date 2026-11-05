@@ -11,7 +11,7 @@ here plus a small branch in the backend's `run_elf`.
 
 ## What has actually run on RTL
 
-The compiler path (`run_kernel.py`) has **not** run on RTL. Its C compiles for `-DMX_ROCKET` and its
+The compiler path (`npu.py`) has **not** run on RTL. Its C compiles for `-DMX_ROCKET` and its
 instruction stream matches the baremetal tests', but no simulator is driven from here yet.
 
 The hand-written application kernels in [`../baremetal/mxgemmini/`](../baremetal/mxgemmini/README.md)
@@ -46,11 +46,11 @@ grades against TinyLlama's own output rather than a reimplementation. It passes 
 every mesh matmul bit-exact. **It depends on a fix to the functional model** (`mx_loop_ws_spad` now
 honours `loop_ws`'s `ex_accumulate` bit, which it previously discarded), and whether the MX RTL
 honours that bit is unverified — so treat it as a spike result until that is checked.
-[`../planning/llama_layer_hw_plan.md`](../planning/llama_layer_hw_plan.md) §10.3 has the detail.
+`26dc11e:planning/llama_layer_hw_plan.md` §10.3 has the detail.
 
 `llama_attention_small` is a real TinyLlama attention head — six mesh matmuls including the resident
 `P@V → o_proj` seam — on a hidden size sliced to 256. It passes on spike with every mesh stage
-bit-exact. See [`../planning/llama_layer_hw_plan.md`](../planning/llama_layer_hw_plan.md) §9 for what the slice
+bit-exact. See `26dc11e:planning/llama_layer_hw_plan.md` §9 for what the slice
 costs and how to regenerate its data header.
 
 ## Planned
@@ -68,3 +68,11 @@ Until Verilator or VCS is driven from here, spike is a functional model — `der
 bootstrap only. Cycle counts from it are instruction counts, not hardware claims.
 
 See [`../README.md`](../README.md) for install and the run command.
+
+## simq and the RTL regression jobs
+
+`sim/simq` queues and runs RTL simulations (VCS, Verilator, FireSim) of the same ELFs spike runs:
+`sim/simq run CONFIG=<chipyard config> BINARY=<elf | file.jobs> JOBS=n`. It finds chipyard from
+`$CHIPYARD_ROOT` or the nearest checkout above this repo. `sim/rtl_regress/*.jobs` are the BF16
+flat-drain regressions (dims 8, 16, 32); the baremetal suites live next to their kernels in
+`baremetal/mxgemmini/*.jobs`.

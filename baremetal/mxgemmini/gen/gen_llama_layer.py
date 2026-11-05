@@ -4,7 +4,7 @@
 Operands come from `npu-exploration/kernels/captures/llama_layer.py`, which captures one real decoder
 layer from one real forward pass: the residual stream, both RMSNorm weights, and the actual
 gate/up/down weights, all index-consistent (unlike the `data_evalrun_512` tiles, whose random
-per-projection offsets cannot be composed -- see `planning/llama_layer_hw_plan.md` section 1).
+per-projection offsets cannot be composed -- see `26dc11e:planning/llama_layer_hw_plan.md` section 1).
 
 By default the hidden size D = 2048 is kept FULL, so RMSNorm and every projection *input* are
 exact; the slice is on the output side, F of the 5632 FFN neurons. `gate`/`up` are therefore exact

@@ -1,9 +1,9 @@
 # The MX bisection ladder, in bisection order. Feed it to simq:
-#   tools/simq run-debug CONFIG=MxGemminiRocketConfig BINARY=baremetal/mxgemmini/ladder.jobs JOBS=8
+#   sim/simq run-debug CONFIG=MxGemminiRocketConfig BINARY=baremetal/mxgemmini/ladder.jobs JOBS=8
 #
 # mxl9 is EXCLUDED: it is the no-mesh host-glue rung and costs 10.65M cycles on spike, i.e. more
 # than the default +max-cycles=10000000, so it can never finish at the default. On its own:
-#   tools/simq run-debug CONFIG=MxGemminiRocketConfig BINARY=mxl9 MAX_CYCLES=40000000 TIMEOUT=14400
+#   sim/simq run-debug CONFIG=MxGemminiRocketConfig BINARY=mxl9 MAX_CYCLES=40000000 TIMEOUT=14400
 mxl0            # control: 64x64x64, the shape the ISA test already passes
 mxl1            # non-square tile grid, I=2 J=4
 mxl2            # TK=16

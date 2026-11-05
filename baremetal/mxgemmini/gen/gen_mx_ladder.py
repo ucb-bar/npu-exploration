@@ -103,7 +103,7 @@ RUNGS = [
     Rung("mxl5", "ktile", 32, 2048, 64,
          "the SAME matmul as mxl4, split into 2 accumulating K-tiles of 1024 (ex_accumulate = 0 "
          "then 1). Graded against mxl4's golden, so it tests ex_accumulate on RTL -- unverified "
-         "per planning/llama_layer_hw_plan.md 10.3. This is the schedule a BANK_ROWS=2048 build "
+         "per 26dc11e:planning/llama_layer_hw_plan.md 10.3. This is the schedule a BANK_ROWS=2048 build "
          "picks for every projection.", ktiles=2),
     Rung("mxl6", "reuse", 32, 64, 64,
          "output-region REUSE: two different matmuls into one C_spad, both with ex_accumulate = 0. "
@@ -277,7 +277,7 @@ def _scale_arrays(name: str, a_scales: np.ndarray, b_scales: np.ndarray, M: int,
     The A window is indexed `a_off = group * M + row`, so it is [K/32][M] -- the TRANSPOSE of the
     [M][K/32] the quantizer returns. The B window is `b_off = group * N + col`, i.e. [K/32][N],
     which is already the quantizer's shape for axis="col". Getting this backwards is the bug
-    planning/llama_layer_hw_plan.md 10.4 records, so both are spelled out rather than inferred.
+    26dc11e:planning/llama_layer_hw_plan.md 10.4 records, so both are spelled out rather than inferred.
     """
     return f"""static const uint8_t {name}_A_SCALES[{GK}][{M}] = {{
 {r(a_scales.T, 2)}

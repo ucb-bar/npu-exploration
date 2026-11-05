@@ -1,7 +1,7 @@
 // The same real TinyLlama attention head as `llama_attention.c`, on a hidden size sliced to 256.
 //
 // WHY THIS EXISTS. `llama_attention` at the captured D = 2048 spends 12.6 M cycles on the host's
-// fp32 glue and 15 K on the mesh (planning/llama_layer_hw_plan.md section 8.3). On spike that is
+// fp32 glue and 15 K on the mesh (26dc11e:planning/llama_layer_hw_plan.md section 8.3). On spike that is
 // seconds; on an RTL simulator at ~5 K cycles/s it is hours, and it overruns the +max-cycles=10000000
 // that run_mx_vcs.sh passes. The host cost is linear in D, so a 256-wide slice is ~8x less
 // simulation while keeping every structural feature of the full kernel: six mesh matmuls, the

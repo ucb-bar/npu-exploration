@@ -155,7 +155,7 @@ RTL config implements which combination has not been checked here, and none of t
   "massive activation" pattern), Qwen's biases N(0, 0.5) on Q/K. The cache is the fp64 layer's own K / V of 2048
   earlier tokens. Bit-exactness and timing do not depend on the values; the accuracy column does.
 * **FP4 / FP6 accuracy is low by construction here.** Every SPAD_REQUANT and the weights use the shipped scale
-  convention (`log2_pmax = 0`, decided 2026-09-09: `planning/merlin_glue_port_plan.md` §4.11), which puts a block's max
+  convention (`log2_pmax = 0`, decided 2026-09-09: `26dc11e:planning/merlin_glue_port_plan.md` §4.11), which puts a block's max
   in [1, 2): E2M1 then uses only ±{0, 0.5, 1, 1.5, 2}, and the ×20 outlier channels flatten everything else in their
   blocks. FP6's activation tables are one per tensor, k-means over the fp64 reference activation's E3M2 codes (a static
   calibration on the same input); weight tables one per 16 columns (`mxq.lut`).

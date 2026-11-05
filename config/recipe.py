@@ -8,7 +8,7 @@ scale floor, reducer and the grading tolerance, and, for a LUT format, how its L
 (``lut``); ``run_id`` hashes it the same way. A run recipe never triggers a build.
 The hardware recipe says what LUT unit was built (``mx.lut``, the RTL's GemminiLUTConfig); the run recipe
 says how it is used (``lut``). Every LUT setting is written in one of the two files: the code holds no
-default for any of them (planning/LUT_integration.md). The run recipe's optional ``vector`` block says at
+default for any of them (26dc11e:planning/LUT_integration.md). The run recipe's optional ``vector`` block says at
 what precision the perplexity path computes the vector ops between the matmuls (softmax, RMSNorm); absent,
 they run as transformers computes them.
 
@@ -492,7 +492,7 @@ def _parse_lut(obj, path: Path | None) -> Lut | None:
     for k, choices in LUT_CHOICES.items():
         if obj[k] not in choices:
             raise RecipeError(f"lut.{k} {obj[k]!r}: implemented today: {', '.join(choices)} "
-                              "(planning/LUT_integration.md lists the rest)")
+                              "(26dc11e:planning/LUT_integration.md lists the rest)")
     fit = obj["fit"]
     if not isinstance(fit, dict):
         raise RecipeError(f"lut.fit: an object with {', '.join(sorted(_FIT_KEYS))}")

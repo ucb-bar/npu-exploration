@@ -13,7 +13,7 @@ seed-to-seed band (merlin_glue_port_plan.md section 4.2). It stays as a labelled
 context line so a weaker grade is never mistaken for a stronger one, and the
 verdict keys off bit-identity whenever a reference is available.
 
-When spike did not run (``run_kernel.py --models mxquant``) there is no hardware output and so no
+When spike did not run (``npu.py --skip evaluate``) there is no hardware output and so no
 verdict: :func:`mxquant_only` records the model against fp32 and as-shipped with ``pass = None``.
 """
 

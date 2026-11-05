@@ -1,6 +1,6 @@
 """
 
-EXTRACTED VERBATIM from ``fp8_matmul_model.py`` by ``tools/extract_model.py`` — do not edit.
+EXTRACTED VERBATIM from ``fp8_matmul_model.py`` by ``rtl_exact/extract_model.py`` — do not edit.
 Entry points: tiled_matmul_hwlike, matrix_mx_requantize, tensor_to_custom_fp_codes, make_fp_quantizer, parse_fp_spec, mx_product_quantize_trunc, fp_quantize_rne, fp_add_exact, q_bf16_rne, bf16_accum_add
 Closure: 41 definitions.
 """

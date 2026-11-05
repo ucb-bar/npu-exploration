@@ -21,7 +21,7 @@
 //
 // 2. THE SCALE WINDOW caps the CONTRACTION. `ScaleFactorMem` holds 256 rows per double-buffer half
 //    and one matmul needs N*K/512 of them on the B side, M*K/512 on the A side
-//    (planning/rtl_fault_b_kdepth.md). down_proj contracts over K = 5632, which needs 704 B-side
+//    (26dc11e:planning/rtl_fault_b_kdepth.md). down_proj contracts over K = 5632, which needs 704 B-side
 //    rows at N = 64 and 352 A-side rows at M = 32 -- BOTH over. Past the ceiling the row address
 //    truncates silently and the upper K-groups reuse lower rows: right sign, right magnitude,
 //    5-60% wrong. So down_proj MUST be split into accumulating K-tiles. This is the first kernel

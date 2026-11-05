@@ -34,7 +34,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 BUILD_ROOT = REPO / "out" / "builds"
 
-#: The files that make up the model (gemmini_perf.* is the timing model, planning/perf_model_plan.md).
+#: The files that make up the model (gemmini_perf.* is the timing model, 26dc11e:planning/perf_model_plan.md).
 SOURCES = ("gemmini.cc", "gemmini.h", "gemmini_params.h", "mx_fp_math.h", "gemmini_perf.h", "gemmini_perf.cc")
 #: The timing model's own directory: every file in it is part of the model.
 PERF_DIR = "perf"

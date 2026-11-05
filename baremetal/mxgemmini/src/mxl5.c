@@ -1,5 +1,5 @@
 // mxl4's matmul split into two accumulating K-tiles of 1024 (ex_accumulate = 0 on
-// the first, 1 on the second), graded against mxl4's golden. planning/llama_layer_hw_plan.md 10.3
+// the first, 1 on the second), graded against mxl4's golden. 26dc11e:planning/llama_layer_hw_plan.md 10.3
 // records that the ex_accumulate fix was made to the FUNCTIONAL MODEL and never verified on RTL.
 // This is also the schedule a BANK_ROWS=2048 build picks for every projection, so it decides
 // whether such a build can work at all.

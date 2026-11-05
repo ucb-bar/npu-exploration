@@ -1,6 +1,6 @@
-"""Plain PyTorch modules the compile selftest traces and compiles (``compile_kernel.py --module``).
+"""Plain PyTorch modules the compile selftest traces and compiles (``npu.py --model``).
 
-    .venv/bin/python compile_kernel.py --module tests/fixtures/modules.py:Attn
+    .venv/bin/python npu.py --model tests/fixtures/modules.py:Attn
 """
 from __future__ import annotations
 

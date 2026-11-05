@@ -2,7 +2,7 @@
 //
 // The MLP had no sliced variant at any size, unlike attention. This is the counterpart of
 // `llama_attention_small.c`, and it exists for the same two reasons: an RTL run at the captured
-// D = 2048 is dominated by the host's fp32 glue (planning/llama_layer_hw_plan.md 8.3), and a
+// D = 2048 is dominated by the host's fp32 glue (26dc11e:planning/llama_layer_hw_plan.md 8.3), and a
 // header small enough to read is what makes a hardware mismatch tractable.
 //
 // WHAT THE SLICE COSTS. RMSNorm now normalizes over 256 features instead of 2048, so `xn` is not

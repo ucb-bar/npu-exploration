@@ -106,14 +106,14 @@ Correct if that header is set for another bitstream; -DLLAMA_BANK_ROWS=N to reta
 // contraction is SPLIT instead: each K-tile is its own matmul accumulating into the same output
 // region, the first overwriting and the rest adding. That is exactly what loop_ws's ex_accumulate
 // bit is for, and it only became usable once the MX path stopped discarding rs1 (see
-// planning/llama_layer_hw_plan.md 10.3). Take the largest tile that fits; at 16384 rows that is
+// 26dc11e:planning/llama_layer_hw_plan.md 10.3). Take the largest tile that fits; at 16384 rows that is
 // the whole of D and the loop runs once, so the schedule is unchanged on the big config.
 //
 // THE SCALE WINDOW IS A SECOND BUDGET, and on a deep contraction it binds before the scratchpad
 // does. `ScaleFactorMem` holds 256 rows x 16 B per double-buffer half, and one matmul needs
 // (N/16) * (K/32) = N*K/512 of them. Past that the row address TRUNCATES and the upper K-groups
 // silently reuse lower rows: right sign, right magnitude, 5-60% wrong. That is Fault B
-// (planning/rtl_fault_b_kdepth.md) -- the reason this kernel failed on hardware while passing on
+// (26dc11e:planning/rtl_fault_b_kdepth.md) -- the reason this kernel failed on hardware while passing on
 // spike. The RTL does not signal the overflow, so the kernel must not emit one.
 //
 // This REPLACES the `LLAMA_KTILE_MAX = 1024` workaround of 2026-09-20, which was expressed in K

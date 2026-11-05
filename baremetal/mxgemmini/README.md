@@ -94,7 +94,7 @@ pick one K-tile spanning all of D, so the larger config runs the original schedu
 `llama_attention_full` depends on a fix to the functional model: `mx_loop_ws_spad` now honours
 `loop_ws`'s `ex_accumulate` bit (rs1 bit 0), which it previously discarded. Whether the MX **RTL**
 honours that bit is unverified, so treat that kernel as a spike result until it is checked —
-[`../../planning/llama_layer_hw_plan.md`](../../planning/llama_layer_hw_plan.md) §10.3.
+`26dc11e:planning/llama_layer_hw_plan.md` §10.3.
 
 See [`../../README.md`](../../README.md) for install, and [`../README.md`](../README.md) for why
 these live here rather than in the ISA test suite.

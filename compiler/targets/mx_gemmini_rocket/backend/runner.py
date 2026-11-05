@@ -151,7 +151,7 @@ def compile_command_buffer(cb: dict[str, Any], workdir: str | Path, *,
     identical (same seam merlin's gemmini backend offers for certifying a hand-written kernel).
 
     ``target`` selects the substrate define only. The generated source is byte-identical either way;
-    that is the property Step 4 of ``planning/merlin_glue_port_plan.md`` set out to establish, and
+    that is the property Step 4 of ``26dc11e:planning/merlin_glue_port_plan.md`` set out to establish, and
     ``tests/selftest_mx_rocket_build.py`` asserts it.
     """
     if target not in TARGET_DEFINE:
@@ -287,7 +287,7 @@ _SUMMARY_LINES = {
 _PORT = re.compile(r"(sp(\d+) r(\d+)/w(\d+))|(acc(\d+) (\d+))")
 _NOT_MODELLED = re.compile(r"not modelled: (\S+) x(\d+)")
 _CONFIG_LINE = re.compile(r"^\s+(?P<name>[a-z_]+\.[a-z0-9_]+)\s+(?P<value>-?[\d.e+-]+)(?P<star>\s\*)?\s", re.M)
-_CONFIG_PRESET = re.compile(r"gemmini perf config \(preset (\w+)\)")
+_CONFIG_PRESET = re.compile(r"gemmini perf config \(preset (\w+)[,)]")
 
 
 def parse_timing_summary(text: str) -> dict[str, Any]:

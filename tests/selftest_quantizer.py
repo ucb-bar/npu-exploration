@@ -13,7 +13,7 @@ Two claims, checked against two independent artifacts rather than asserted:
 
 Claim 2 is the load-bearing one. It is what makes "the ELF our compiler emits" and "the ELF in
 gemmini-rocc-tests" numerically the same program, which is the premise of the whole port
-(``planning/merlin_glue_port_plan.md`` D1/D3).
+(``26dc11e:planning/merlin_glue_port_plan.md`` D1/D3).
 
 Needs the captured tiles (``python3 -m tests.fixtures.llama_tiles``); skips cleanly without them.
 

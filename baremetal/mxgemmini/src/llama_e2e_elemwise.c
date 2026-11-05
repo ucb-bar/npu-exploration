@@ -1,4 +1,4 @@
-// Element-wise phases of llama_layer_e2e on their own (perf-model calibration, npu-exploration/planning/
+// Element-wise phases of llama_layer_e2e on their own (perf-model calibration, 26dc11e:planning/
 // perf_model_plan.md 13.13): the layer's rms_phase (VPU + SPAD_REQUANT: h_pre -> xn1 codes + scales) and
 // residual_phase (VPU only: h_out = a + b), exactly as the layer runs them, on the layer's data blob. The layer's
 // file is included with its main renamed, so its functions and DRAM/scratchpad layout are used unchanged.
