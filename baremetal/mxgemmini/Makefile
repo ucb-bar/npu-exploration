@@ -237,6 +237,55 @@ $(foreach t,spike mx_rocket,$(foreach m,$(LMX_MODELS) tiny,$(foreach f,fp8 fp4 f
 llama-mx:      $(addprefix $(OUT)/spike/,$(call lmx_elfs,$(LMX_MODELS))) $(addprefix $(OUT)/mx_rocket/,$(call lmx_elfs,$(LMX_MODELS)))
 llama-mx-tiny: $(addprefix $(OUT)/spike/,$(call lmx_elfs,tiny))
 
+# moe_layer_mx: the MoE block of a gpt-oss-20b layer, one ELF per (input, expert format, mesh): src/moe_layer_mx.c
+# against data/moe_in_<cfg>.{h,bin} and data/moe_experts_<fmt>.{h,bin} (gen/gen_moe_mx.py; the experts are 0.4 / 0.8
+# GB) and the rtl_exact golden's data/moe_mx_<cfg>_<fmt>_d<dim>_expect.h (gen/golden_moe_mx.py). `make moe-mx`.
+MOE_CFGS     := gptoss20b_t1 gptoss20b_t2 gptoss20b_t4 gptoss20b_t8 gptoss20b_t16 \
+                gptoss20b_t4_r50 gptoss20b_t8_r50 gptoss20b_t16_r50
+MOE_DIMS_fp8 := 8 16 32
+MOE_DIMS_fp4 := 4 8 16
+moe_elfs = $(foreach c,$(1),$(foreach f,fp8 fp4,$(foreach d,$(MOE_DIMS_$(f)),moe_mx_$(c)_$(f)_d$(d))))
+define MOE_RULE
+$(OUT)/$(1)/moe_mx_$(2)_$(3)_d$(4): $(CURDIR)/src/moe_layer_mx.c $(CURDIR)/include/mx_native.h \
+    $(CURDIR)/data/moe_in_$(2).h $(CURDIR)/data/moe_experts_$(3).h $(CURDIR)/data/moe_mx_$(2)_$(3)_d$(4)_expect.h \
+    $(OUT)/$(1)/moe_in_$(2)_blob.o $(OUT)/$(1)/moe_experts_$(3)_blob.o
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS_BM) $(if $(filter spike,$(1)),-DSPIKE_SIM,-DMX_ROCKET) \
+	  $(if $(filter-out 16,$(4)),-DATTN_PARAMS_DIM -iquote $(CURDIR)/$(LMX_PARAMS_$(4))) \
+	  -DMOE_IN_H='"moe_in_$(2).h"' -DMOE_EXPERTS_H='"moe_experts_$(3).h"' \
+	  -DMOE_EXPECT_H='"moe_mx_$(2)_$(3)_d$(4)_expect.h"' \
+	  $$< -o $$@ $(RUNTIME) $(OUT)/$(1)/moe_in_$(2)_blob.o $(OUT)/$(1)/moe_experts_$(3)_blob.o $(LIBS)
+endef
+$(foreach t,spike mx_rocket,\
+  $(foreach f,fp8 fp4,$(eval $(call BLOB_RULE,$(t),moe_experts_$(f))))\
+  $(foreach c,$(MOE_CFGS),$(eval $(call BLOB_RULE,$(t),moe_in_$(c)))\
+    $(foreach f,fp8 fp4,$(foreach d,$(MOE_DIMS_$(f)),$(eval $(call MOE_RULE,$(t),$(c),$(f),$(d)))))))
+.PHONY: moe-mx
+moe-mx: $(addprefix $(OUT)/spike/,$(call moe_elfs,$(MOE_CFGS))) $(addprefix $(OUT)/mx_rocket/,$(call moe_elfs,$(MOE_CFGS)))
+
+# FireSim diagnostics (T = 1): _trace prints "[trace] @<cycle>" after every matmul and phase (each printf costs ~33M
+# target cycles on FireSim's UART, so the timing is only for locating a hang). `make moe-mx-dbg`.
+MOE_DBG_FLAGS_trace := -DMOE_TRACE
+MOE_DBG_FLAGS_mrr8  := -DMOE_TRACE -DMOE_MRR=8   # 4x4: the E4M3 router on 2 row tiles instead of 1
+define MOE_DBG_RULE
+$(OUT)/$(1)/moe_mx_$(2)_$(3)_d$(4)_$(5): $(CURDIR)/src/moe_layer_mx.c $(CURDIR)/include/mx_native.h \
+    $(CURDIR)/data/moe_in_$(2).h $(CURDIR)/data/moe_experts_$(3).h $(CURDIR)/data/moe_mx_$(2)_$(3)_d$(4)_expect.h \
+    $(OUT)/$(1)/moe_in_$(2)_blob.o $(OUT)/$(1)/moe_experts_$(3)_blob.o
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS_BM) $(if $(filter spike,$(1)),-DSPIKE_SIM,-DMX_ROCKET) $(MOE_DBG_FLAGS_$(5)) \
+	  $(if $(filter-out 16,$(4)),-DATTN_PARAMS_DIM -iquote $(CURDIR)/$(LMX_PARAMS_$(4))) \
+	  -DMOE_IN_H='"moe_in_$(2).h"' -DMOE_EXPERTS_H='"moe_experts_$(3).h"' \
+	  -DMOE_EXPECT_H='"moe_mx_$(2)_$(3)_d$(4)_expect.h"' \
+	  $$< -o $$@ $(RUNTIME) $(OUT)/$(1)/moe_in_$(2)_blob.o $(OUT)/$(1)/moe_experts_$(3)_blob.o $(LIBS)
+endef
+moe_dbg_elfs = $(foreach f,fp8 fp4,$(foreach d,$(MOE_DIMS_$(f)),$(foreach v,trace,moe_mx_gptoss20b_t1_$(f)_d$(d)_$(v))))
+$(foreach t,spike mx_rocket,$(foreach f,fp8 fp4,$(foreach d,$(MOE_DIMS_$(f)),$(foreach v,trace,\
+  $(eval $(call MOE_DBG_RULE,$(t),gptoss20b_t1,$(f),$(d),$(v))))))\
+  $(eval $(call MOE_DBG_RULE,$(t),gptoss20b_t1,fp4,4,mrr8)))
+.PHONY: moe-mx-dbg
+moe-mx-dbg: $(addprefix $(OUT)/spike/,$(moe_dbg_elfs) moe_mx_gptoss20b_t1_fp4_d4_mrr8) \
+            $(addprefix $(OUT)/mx_rocket/,$(moe_dbg_elfs) moe_mx_gptoss20b_t1_fp4_d4_mrr8)
+
 # The stacked-model kernels are kept OUT of the default KERNELS list: the full one carries ~1 GB of
 # weights, so `make` should not build it incidentally, and both need data that only
 # `gen_llama_model.py` produces.
