@@ -82,6 +82,7 @@ examples/       a minimal PyTorch model to start from
 tests/          self-tests, one claim each
 scripts/        setup.sh and env.sh
 baremetal/      hand-written TinyLlama kernels for MxGemmini
+sim/            simq (RTL simulation queue) and the RTL regression jobs
 merlin/, microscaling-quant/    submodules: the MLIR compiler framework and mxq
 ```
 
