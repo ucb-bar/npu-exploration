@@ -21,8 +21,8 @@ on the recipe's product format and accumulator ladder, fed the operands the ELF 
 not fp32, so the verdict is bit-identity with no tolerance in it. A second run in mxq's
 MXQuant mode (*as shipped*) reports how far the published simulator sits from the
 silicon. The fp32 comparison stays as a labelled context line — it measures the cost of
-the format, not correctness. ``--models`` selects which models run; without spike there
-is no verdict.
+the format, not correctness. ``models`` (npu.py's steps) selects which models run; without
+spike there is no verdict.
 
 Every hardware step is a call into this repo's own modules (``compiler/operands.py``
 for quantization — MXQuant, never transcribed — ``compiler/lower.py`` for lowering,
@@ -244,7 +244,7 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
         if _m not in models_pkg.NAMES:
             raise ValueError(f"unknown model {_m!r}; choose from {', '.join(models_pkg.NAMES)}")
     if build_only and "spike" not in models:
-        raise ValueError("--build-only builds the ELF, which is the spike model: add spike to --models")
+        raise ValueError("build_only builds the ELF, which is the spike model: add spike to models")
     from .telemetry import Telemetry
 
     repo = repo or REPO
@@ -655,9 +655,14 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
         metrics = compare(hw, ref_fp32, mxq_out, tol_rel_fro=tol, shipped_reference=shipped, tier=tier)
     elif mxq_out is not None:
         metrics = mxquant_only(mxq_out, ref_fp32, shipped_reference=shipped, tier=tier)
+    elif "ppa" in models or "perf" in models:
+        # The cost step alone: nothing ran that produces bits, so there is nothing to grade; the record
+        # carries the cost and NO VERDICT.
+        metrics = {"tier": "cost only", "accuracy_vs_fp32_reference": None, "finite": None,
+                   "correctness_vs_mxquant": None, "pass": None}
     else:
-        raise RuntimeError("nothing to grade: neither spike ran nor the mxquant model was available "
-                           "(--models must include spike or mxquant)")
+        raise RuntimeError("nothing to grade or cost: neither spike ran nor the mxquant model was "
+                           "available (run the evaluate, quantize or cost step)")
     metrics["mxquant"] = mxq_info
     metrics["stages"] = stage_records
     if hw is not None:
@@ -713,11 +718,12 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
     pool.shutdown(wait=False)
 
     acc = metrics["accuracy_vs_fp32_reference"]
-    tel.log("grade", f"tier={metrics['tier']}  "
-                     f"finite {metrics['finite']['n_finite']}/{metrics['finite']['total']}  "
-                     f"cycles {metrics['total_cycles']}")
-    tel.log("fp32", f"rel_fro={acc['rel_fro']:.4%}  mae={acc['mae']:.4g}  "
-                    f"max_abs={acc['max_abs']:.4g}   (context only -- the cost of the format)")
+    if acc is not None:
+        tel.log("grade", f"tier={metrics['tier']}  "
+                         f"finite {metrics['finite']['n_finite']}/{metrics['finite']['total']}  "
+                         f"cycles {metrics['total_cycles']}")
+        tel.log("fp32", f"rel_fro={acc['rel_fro']:.4%}  mae={acc['mae']:.4g}  "
+                        f"max_abs={acc['max_abs']:.4g}   (context only -- the cost of the format)")
 
     # --- (4) record -------------------------------------------------------------------
     _mesh = spec.mesh_stages

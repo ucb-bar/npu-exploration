@@ -109,6 +109,8 @@ def main() -> int:
           ck.main(["--only", "compile", "--module", "tests/fixtures/modules.py:Biased", "--out", "/nonexistent/x"]) == 2)
     check("evaluate without compile -> exit 2", ck.main(["--kernel", "linear", "--skip", "compile"]) == 2)
     check("an unknown step -> exit 2", ck.main(["--kernel", "linear", "--skip", "spike"]) == 2)
+    check("cost alone runs (no quantize, no spike) -> exit 0",
+          ck.main(["--kernel", "linear", "--only", "cost"]) == 0)
     check("--skip and --only together -> exit 2",
           ck.main(["--kernel", "linear", "--skip", "cost", "--only", "compile"]) == 2)
     check("merlin is not loaded in an npu.py process",

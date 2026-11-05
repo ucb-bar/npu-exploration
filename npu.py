@@ -356,11 +356,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     m = res["metrics"]
     # VERDICT belongs to evaluate + quantize (spike == quantized model, bit for bit); evaluate alone is
-    # graded against fp32; quantize alone prints the quantized model's numbers and NO VERDICT.
-    if m.get("correctness_vs_mxquant") is not None or "evaluate" not in steps:
+    # graded against fp32; quantize alone prints the quantized model's numbers and NO VERDICT; cost
+    # alone prints only its PPA and PERF lines.
+    if m.get("correctness_vs_mxquant") is not None or ("quantize" in steps and "evaluate" not in steps):
         from models import mxquant
         print(mxquant.line(m))
-    else:
+    elif "evaluate" in steps:
         from models import reference
         print(reference.line(m, tol=run_recipe.fp32_tol))
     if m.get("ppa"):
