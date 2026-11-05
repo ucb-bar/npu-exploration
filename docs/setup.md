@@ -17,7 +17,7 @@ Without SSH keys, switch the submodules to HTTPS first:
 ```bash
 git config submodule.merlin.url https://github.com/ucb-bar/merlin.git
 git config submodule.microscaling-quant.url https://github.com/chloe-wong/microscaling-quant.git
-git submodule update --init merlin microscaling-quant
+git submodule update --init compiler/merlin compiler/mx-gemmini-mlir microscaling-quant
 ```
 
 Already have a chipyard tree? Skip the toolchain phases and point at it:

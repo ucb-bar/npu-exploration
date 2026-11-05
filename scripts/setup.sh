@@ -111,7 +111,7 @@ have_gemmini()    { [ -f "$LIBGEMMINI_DIR/gemmini.cc" ] && [ -f "$LIBGEMMINI_DIR
                     && [ -f "$LIBGEMMINI_DIR/gemmini_perf.cc" ] \
                     && [ -f "$GEMMINI_DIR/software/gemmini-rocc-tests/include/vpu_ref.h" ] \
                     && [ -d "$GEMMINI_DIR/software/gemmini-rocc-tests/bareMetalC" ]; }
-have_merlin()     { [ -e "$REPO/merlin/merlin/python" ]; }
+have_merlin()     { [ -e "$REPO/compiler/merlin/merlin/python" ]; }
 have_mxq()        { [ -f "$REPO/microscaling-quant/mxq/__init__.py" ]; }
 have_ppa()        { [ -f "${MX_PPA_ROOT:-$PPA_DIR/ppa}/compose_gemmini.py" ]; }
 have_libgemmini() {
@@ -245,8 +245,8 @@ phase_ppa() {
 
 phase_merlin() {
     if have_merlin; then return; fi
-    say merlin "git submodule update --init merlin"
-    git -C "$REPO" submodule update --init merlin || \
+    say merlin "git submodule update --init compiler/merlin"
+    git -C "$REPO" submodule update --init compiler/merlin || \
         die merlin "submodule init failed. Without SSH keys for ucb-bar/merlin, run: \
 git config submodule.merlin.url https://github.com/ucb-bar/merlin.git  -- then re-run"
 }
@@ -277,7 +277,7 @@ doctor() {
                                                                           "dtc"                   "spike shells out to it at runtime"
     row 1 "$(have_gemmini && echo 1)"                                     "gemmini sources + rocc-tests" "$GEMMINI_DIR"
     row 1 "$(have_libgemmini && echo 1)"                                  "libgemmini.so (fresh)" "$LIBGEMMINI_DIR"
-    row 1 "$(have_merlin && echo 1)"                                      "merlin submodule"      "$REPO/merlin"
+    row 1 "$(have_merlin && echo 1)"                                      "merlin submodule"      "$REPO/compiler/merlin"
     row 1 "$(have_mxq && echo 1)"                                         "mxq submodule"         "$REPO/microscaling-quant"
     row 1 "$(have_python && echo 1)"                                      ".venv (torch, numpy)"  "$REPO/.venv"
     row 0 "$(have_ppa && echo 1)"                                         "PPA workspace (optional)" "${MX_PPA_ROOT:-$PPA_DIR/ppa}"

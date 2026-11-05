@@ -77,7 +77,7 @@ def _wire_paths(repo: Path) -> list[str]:
     for p in (repo,
               repo / "app",
               repo / "compiler" / "targets" / "mx_gemmini_rocket",
-              repo / "merlin" / "merlin" / "python"):
+              repo / "compiler" / "merlin" / "merlin" / "python"):
         s = str(p)
         if p.exists() and s not in sys.path:
             sys.path.insert(0, s)
@@ -261,7 +261,7 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
     from compiler.operands import quantize_operand
 
     tel.log("setup", f"repo={repo}  "
-                     f"merlin={'yes' if (repo / 'merlin' / 'merlin').exists() else 'MISSING'}  "
+                     f"merlin={'yes' if (repo / "compiler" / "merlin" / "merlin").exists() else 'MISSING'}  "
                      f"wired={len(wired)} paths")
 
     # --- the machine ---------------------------------------------------------------
@@ -770,7 +770,7 @@ def run(spec, *, recipe=None, run_recipe=None, simulator: str = "spike",
         },
         provenance={
             "simulator": simulator, "oracle": mx.ORACLE.get(simulator),
-            "repo_head": _git_head(repo), "merlin_head": _git_head(repo / "merlin"),
+            "repo_head": _git_head(repo), "merlin_head": _git_head(repo / "compiler" / "merlin"),
             "mxq_head": models_pkg.mxq_commit(),
             "gcc": str(mx.runner.gcc_path()) if hw is not None else None,
             "spike": str(mx.runner.spike_path()) if hw is not None else None,

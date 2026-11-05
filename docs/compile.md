@@ -4,7 +4,7 @@ The compile step lowers the traced model to MxGemmini RoCC instructions and buil
 for a Rocket host.
 
 ```bash
-npu.py --hw baseline --model m.py:Block --skip evaluate                       # out/compile/Block/spike/
+npu.py --hw baseline --model m.py:Block --skip evaluate                       # compiler/out/Block/spike/
 npu.py --hw baseline --model m.py:Block --skip evaluate --target mx_rocket    # the RTL / FPGA build
 ```
 
@@ -29,7 +29,7 @@ nn.Module --trace--> KernelSpec --lower--> command buffer --emit--> main.c --gcc
 ```
 
 `compiler/lower.py` turns a KernelSpec and an operand format into one **command buffer**, following
-merlin's MLIR interface conventions (`merlin/` submodule). Two shapes come out:
+merlin's MLIR interface conventions (`compiler/merlin/` submodule). Two shapes come out:
 
 - a straight **chain** of matmuls fuses into one program whose intermediates stay in the scratchpad;
 - anything else (several live values, computed operands, host ops) becomes a **graph**, every edge

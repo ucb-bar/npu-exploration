@@ -42,7 +42,7 @@ Every step runs by default. Skip any with `--skip`, or pick a subset with `--onl
 | step | what it does | output | needs |
 |---|---|---|---|
 | `quantize` | runs the bit-exact quantized model of your hardware (mxq) | the bits the hardware must produce; error vs fp32 | python only |
-| `compile` | lowers the model to RoCC instructions, builds a bare-metal ELF | `out/compile/<model>/<target>/`: ELF, C, expected bits | RISC-V toolchain |
+| `compile` | lowers the model to RoCC instructions, builds a bare-metal ELF | `compiler/out/<model>/<target>/`: ELF, C, expected bits | RISC-V toolchain |
 | `evaluate` | runs the ELF on spike, compares bit for bit with `quantize` | `VERDICT PASS/FAIL`, modelled cycles | `compile`, spike |
 | `cost` | prices the hardware and the model's run on it | `PPA` (area, power), `PERF` (cycles, energy) | MxGemmini-workspace |
 
@@ -75,6 +75,9 @@ npu.py          the entry point
 config/         hardware/*.json and run/*.json, the two inputs that describe the machine
 kernels/        the model tracer (PyTorch -> stages) and built-in example models
 compiler/       lowering and the MxGemmini-on-Rocket backend (C emitters, spike runner)
+  merlin/              submodule: the MLIR compiler framework
+  mx-gemmini-mlir/     submodule: the MX Gemmini MLIR dialect and lowering
+  out/                 compile output, one directory per model and target (gitignored)
 models/         quantize (mxquant), evaluate (spike, reference), cost (ppa, perf)
 grade/          the pipeline that runs the steps, compares, and writes results/
 rtl_exact/      hardware-exact datapath models the quantized model is checked against
@@ -83,7 +86,7 @@ tests/          self-tests, one claim each
 scripts/        setup.sh and env.sh
 baremetal/      hand-written TinyLlama kernels for MxGemmini
 sim/            simq (RTL simulation queue) and the RTL regression jobs
-merlin/, microscaling-quant/    submodules: the MLIR compiler framework and mxq
+microscaling-quant/            submodule: mxq (quantization)
 ```
 
 ## Documentation

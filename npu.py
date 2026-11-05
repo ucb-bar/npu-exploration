@@ -21,7 +21,7 @@ Four steps, each skippable with --skip (or pick a subset with --only):
     .venv/bin/python npu.py --list
 
 Exit 0 on PASS (or when nothing is graded), 1 on FAIL or a failed build, 2 on a refused input.
-Results: results/<timestamp>_<model>/ when evaluate or quantize run; out/compile/<model>/<target>/ for the
+Results: results/<timestamp>_<model>/ when evaluate or quantize run; compiler/out/<model>/<target>/ for the
 deployable ELF when compile runs without evaluate (or with --target mx_rocket / --out).
 """
 from __future__ import annotations
@@ -298,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--target", choices=TARGETS, default="spike",
                     help="compile step build define: spike, or mx_rocket for the RTL/FPGA build")
     ap.add_argument("--out", type=Path, default=None,
-                    help="where the compile step writes the ELF (default out/compile/<model>/<target>)")
+                    help="where the compile step writes the ELF (default compiler/out/<model>/<target>)")
     gone = removed_flag(sys.argv[1:] if argv is None else argv)
     if gone:
         print(f"[error   ] {gone}", file=sys.stderr)
@@ -325,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
         # compile without evaluate (or an explicit RTL target / output dir): the deployable ELF directory.
         compiled = None
         if "compile" in steps and ("evaluate" not in steps or a.target != "spike" or a.out is not None):
-            compiled = a.out or REPO / "out" / "compile" / spec.name / a.target
+            compiled = a.out or REPO / "compiler" / "out" / spec.name / a.target
             compile(spec, recipe, run_recipe, target=a.target, out=compiled, tel=tel)
 
         # quantize / evaluate / cost: one pipeline run, the models in parallel with spike.
