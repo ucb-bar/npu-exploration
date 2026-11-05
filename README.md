@@ -88,6 +88,9 @@ merlin/, microscaling-quant/    submodules: the MLIR compiler framework and mxq
 
 ## Documentation
 
+Removed design records are cited in comments as `26dc11e:planning/<file>`; read one with
+`git show 26dc11e:planning/<file>`.
+
 | doc | covers |
 |---|---|
 | [setup.md](docs/setup.md) | install, environment, troubleshooting |

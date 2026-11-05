@@ -1,7 +1,7 @@
 # The DIM=32 ASYMMETRIC MX tests (32x32 mesh): different-format activation x weight, BF16 output. These live
 # in the bareMetalC ISA suite; simq resolves the names against build_mx_rocket/bareMetalC/<name>-baremetal.
 #
-#   tools/simq run CONFIG=MxDim32AllAsymGemminiRocketConfig BINARY=baremetal/mxgemmini/asym_dim32.jobs JOBS=8
+#   sim/simq run CONFIG=MxDim32AllAsymGemminiRocketConfig BINARY=baremetal/mxgemmini/asym_dim32.jobs JOBS=8
 #
 # IMPORTANT: run under CONFIG=MxDim32AllAsymGemminiRocketConfig (dim32 + ALL 12 PE modes, sym+asym), NOT the
 # DIM=16 configs. Build the ELFs first: ../../software/gemmini-rocc-tests/build_mx_rocket.sh bareMetalC

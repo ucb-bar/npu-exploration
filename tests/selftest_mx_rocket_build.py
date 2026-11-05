@@ -1,6 +1,6 @@
 """The emitted C is ONE program for both substrates: spike and the standalone RTL.
 
-Three claims, checked rather than asserted (``planning/merlin_glue_port_plan.md`` Step 4):
+Three claims, checked rather than asserted (``26dc11e:planning/merlin_glue_port_plan.md`` Step 4):
 
 1. **The generated source is byte-identical** for both targets. It contains no ``SPIKE_SIM`` /
    ``MX_ROCKET`` conditional at all — the reference tests need those only because they also support

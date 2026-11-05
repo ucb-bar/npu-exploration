@@ -20,7 +20,7 @@ conversion is lossless by construction:
 ``P * X``, and asserts it on every element it is given (``tests/selftest_block.py`` and
 ``selftest_quantizer.py`` drive it over real tiles).
 
-The reference's convention, for the record (measured, see ``planning/chain_seam_hw_notes.md``):
+The reference's convention, for the record (measured, see ``26dc11e:planning/chain_seam_hw_notes.md``):
 
 * scale exponent is ``floor(log2(max(amax, 2**-23)))`` with **no** ``- emax`` term, so a block's
   max lands in ``[1, 2)`` -- NOT the ``[256, 512)`` of ``microxcaling.mx.mx_ops._quantize_mx``.

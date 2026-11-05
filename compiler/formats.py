@@ -106,7 +106,7 @@ class MxFormat:
             raise MxFormatError(
                 f"{where}: format {self.name!r} is declared but NOT proven in this repo yet — its "
                 "operand packing, LUT handling and requant path are Step 5 of "
-                "planning/merlin_glue_port_plan.md. Refusing to emit an unchecked datapath.")
+                "26dc11e:planning/merlin_glue_port_plan.md. Refusing to emit an unchecked datapath.")
 
 
 def chain_refusal(fmt: "MxFormat") -> str | None:
@@ -170,7 +170,7 @@ def lut_words(entry_bits: int) -> int:
 FORMATS: dict[str, MxFormat] = {
     # ---- FP8 -------------------------------------------------------------------------------
     # The only format proven end to end here: it is what every kernel in kernels/registry.py runs
-    # on today, and what the baseline in planning/merlin_glue_port_plan.md §4.1 was measured with.
+    # on today, and what the baseline in 26dc11e:planning/merlin_glue_port_plan.md §4.1 was measured with.
     "fp8_e4m3": MxFormat(
         name="fp8_e4m3", spec="fp8:e4m3", mxq="MXFP8_E4M3", mlir="f8E4M3FN", bits=8,
         fmt_code=0, altfmt=0, lut=False, entry_bits=None,

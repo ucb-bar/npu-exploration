@@ -144,7 +144,7 @@ def _attention(*, m: int = 64, k: int = 64, h: int = 64, seed: int = 0, **_) -> 
 # `d_model = 2048` is kept FULL, so RMSNorm and every projection INPUT is exact; the slice is on the
 # output side (NF of 5632 FFN neurons, 1 of 32 heads). So gate/up are exact real llama values and
 # down is an honest partial sum over those neurons -- and the fp32 reference is truncated the same
-# way, so it grades what the device actually computes. See planning/llama_layer_hw_plan.md D1.
+# way, so it grades what the device actually computes. See 26dc11e:planning/llama_layer_hw_plan.md D1.
 
 def _capture(path=None):
     """Load the captured layer, or explain how to make one."""

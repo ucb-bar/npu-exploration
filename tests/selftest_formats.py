@@ -10,7 +10,7 @@ expected output (``C_out_bf16`` for the non-requant path). So for each format th
 That is a stronger statement than "it runs": it says our codegen computes what the reference test
 computes, on the reference's own data, bit for bit. It also needs no golden of our own, which is why
 it is the gate for the formats MXQuant's ``rtl_exact`` does not yet cover — ``rtl_exact`` was
-established on FP8 only (``planning/merlin_glue_port_plan.md`` §4.3), and pretending otherwise would
+established on FP8 only (``26dc11e:planning/merlin_glue_port_plan.md`` §4.3), and pretending otherwise would
 be claiming a correctness tier we have not earned.
 
     .venv/bin/python tests/selftest_formats.py            # every proven format

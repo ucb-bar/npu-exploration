@@ -9,7 +9,7 @@ length 1, so nothing special-cases it. Two lowerings sit behind that entry:
   the seam the backend emits (``mxgemm_emit._emit_seam``) — today a scale-byte
   transpose, which exists only because the requantizer writes ``[row][block]`` and
   the A-side scale memory reads ``[group][row]``. Step 3 of
-  ``planning/merlin_glue_port_plan.md`` removes even that, by having the hardware
+  ``26dc11e:planning/merlin_glue_port_plan.md`` removes even that, by having the hardware
   write the scales resident and transposed.
 * **per-stage** — one command buffer per matmul, intermediates carried through the
   host as float. Required by any graph that is not a straight chain (attention

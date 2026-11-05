@@ -54,7 +54,7 @@
 
 // WHICH CAPTURE THIS ELF CARRIES. The default is the full D = 2048 layer. A sliced-D header
 // (gen_llama_layer.py --d 256) is what makes an RTL run affordable: the host's fp32 glue is 99.9% of
-// the cycles (planning/llama_layer_hw_plan.md 8.3) and scales linearly in D, so D = 256 is ~8x less
+// the cycles (26dc11e:planning/llama_layer_hw_plan.md 8.3) and scales linearly in D, so D = 256 is ~8x less
 // simulation for a chain with every structural feature of the full one intact. Nothing below reads D
 // as a constant, so the only difference between the two ELFs is this line.
 #ifndef LLAMA_ATTN_HEADER
@@ -116,14 +116,14 @@ Correct if that header is set for another bitstream; -DLLAMA_BANK_ROWS=N to reta
 // more than a 128 KB scratchpad holds at all, so no placement fixes it. The D-deep contraction is
 // SPLIT into K-tiles that accumulate into one output region (ex_accumulate = 0 on the first, 1
 // after) -- which only became usable once the MX path stopped discarding rs1 (see
-// planning/llama_layer_hw_plan.md 10.3). At 16384 rows the largest tile is all of D and the loop
+// 26dc11e:planning/llama_layer_hw_plan.md 10.3). At 16384 rows the largest tile is all of D and the loop
 // runs once, so the big-config schedule is unchanged.
 //
 // THE SCALE WINDOW IS A SECOND BUDGET, and on a deep contraction it binds before the scratchpad
 // does. `ScaleFactorMem` holds 256 rows x 16 B per double-buffer half, and one matmul needs
 // (N/16) * (K/32) = N*K/512 of them. Past that the row address TRUNCATES and the upper K-groups
 // silently reuse lower rows: right sign, right magnitude, 5-60% wrong. That is Fault B
-// (planning/rtl_fault_b_kdepth.md), which is what made this kernel fail on hardware while passing
+// (26dc11e:planning/rtl_fault_b_kdepth.md), which is what made this kernel fail on hardware while passing
 // on spike. The RTL does not signal the overflow, so the kernel must not emit one.
 //
 // This REPLACES the `LLAMA_KTILE_MAX = 1024` workaround of 2026-09-20. That cap was expressed in

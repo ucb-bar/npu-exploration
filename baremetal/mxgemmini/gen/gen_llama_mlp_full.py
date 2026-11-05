@@ -13,7 +13,7 @@ TWO THINGS MAKE THIS A NEW SHAPE, not a bigger `llama_mlp.h`:
 
   1. `down_proj` contracts over K = 5632, deeper than the B-side scale window permits in ONE call:
      `SCALE_ROWS(5632, 64) = 704` against the 256 rows `ScaleFactorMem` holds
-     (`planning/rtl_fault_b_kdepth.md`). So it MUST be split into accumulating K-tiles -- the first
+     (`26dc11e:planning/rtl_fault_b_kdepth.md`). So it MUST be split into accumulating K-tiles -- the first
      kernel here forced into that at full scale. `mxl5` proved the split is bit-exact on RTL.
   2. `[M][F]` at F = 5632 is 22528 scratchpad rows of BF16 output against 16384 available, so the
      gate/up projections cannot land whole either and are chunked on F.

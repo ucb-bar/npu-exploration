@@ -2,7 +2,7 @@
 # DIM=8 port of asym_dim32.jobs. These live in the bareMetalC ISA suite; simq resolves the names against
 # build_mx_rocket/bareMetalC/<name>-baremetal.
 #
-#   tools/simq run CONFIG=MxDim8AllAsymGemminiRocketConfig BINARY=baremetal/mxgemmini/asym_dim8.jobs JOBS=8
+#   sim/simq run CONFIG=MxDim8AllAsymGemminiRocketConfig BINARY=baremetal/mxgemmini/asym_dim8.jobs JOBS=8
 #
 # IMPORTANT: run under CONFIG=MxDim8AllAsymGemminiRocketConfig (the 8x8 all-format asym mesh, all-bf16 acc).
 # Build the ELFs first: ../../software/gemmini-rocc-tests/build_mx_rocket.sh bareMetalC

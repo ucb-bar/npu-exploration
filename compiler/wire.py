@@ -2,7 +2,7 @@
 
 This module does **not** quantize. Quantization is MXQuant, reached through
 :mod:`compiler.operands`, and there is deliberately no second implementation of it in this repo —
-see ``planning/merlin_glue_port_plan.md`` D3. What lives here is the other half: turning the
+see ``26dc11e:planning/merlin_glue_port_plan.md`` D3. What lives here is the other half: turning the
 device's bytes back into numbers, which is unambiguous and has no convention to disagree about.
 
 It was ``app/mxquant.py``, which owned both halves and a third convention besides

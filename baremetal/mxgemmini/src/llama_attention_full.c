@@ -99,7 +99,7 @@ Correct if that header is set for another bitstream; -DLLAMA_BANK_ROWS=N to reta
 // (PROJ_N/16) * (D/32) rows against the 256 the hardware holds -- a second budget that binds
 // independently of the scratchpad. At D = 2048 that caps PROJ_N at 64, which is what the
 // scratchpad picks anyway; the term is here so a bigger scratchpad cannot silently choose 128 and
-// wrap the scale rows. See planning/rtl_fault_b_kdepth.md.
+// wrap the scale rows. See 26dc11e:planning/rtl_fault_b_kdepth.md.
 #ifndef LLAMA_SCALE_ROWS_MAX
 #define LLAMA_SCALE_ROWS_MAX 256
 #endif
