@@ -285,6 +285,11 @@ static void mvout_rows(void *dst, uint32_t sp, int rows) {
   for (int r = 0; r < rows; r += DIM) gemmini_extended_mvout((uint8_t *)dst + r * DIM, sp + r, DIM, DIM);
 }
 
+// 1: QK0's config waits for its act half (Q's scales, loaded GATED by the includer) instead of taking it in place,
+// so a pass needs no fence after its Q-scale load (src/dual_attn_inst.c: passes back to back on two Gemminis)
+#ifndef ATTN_QK0_WAIT_Q
+#define ATTN_QK0_WAIT_Q 0
+#endif
 // ---- matmuls, with the managed weight-scale halves. A matmul is (kind, block); kind 0 = QK, 1 = PV ----
 typedef struct { int kind, j; } mm_t;
 static mm_t sched[2 * NB];
@@ -308,7 +313,8 @@ static void issue_mm(void) {   // issue the next scheduled matmul
     gated_load(0);
     gemmini_config_st(N * sizeof(uint16_t));
   }
-  gemmini_mxquant_config_mvout_managed((uint64_t)scale_sink, M / (QT * DIM), N / (QT * DIM), K / DIM, m.kind ? 0 : 1, n & 1, 1, 1);
+  gemmini_mxquant_config_mvout_managed((uint64_t)scale_sink, M / (QT * DIM), N / (QT * DIM), K / DIM, m.kind ? 0 : 1, n & 1, 1,
+                                       !(ATTN_QK0_WAIT_Q && m.kind == 0 && m.j == 0));
   if (n + 1 < n_mm) gated_load(n + 1);   // waits for this config to free its half; lands under this matmul
   const uint32_t a = m.kind ? P_BUF(m.j) : SP_Q;
   const uint32_t b_arg = m.kind ? V_BLK(m.j) + ROWS8(BLEN(m.j), D) : KT_BLK(m.j) + ROWS8(D, BLEN(m.j));

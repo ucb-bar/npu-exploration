@@ -325,3 +325,89 @@ run-ladder: ladder-spike
 
 clean:
 	rm -rf $(OUT)
+
+# Dual-Gemmini SoCs (MxDualA8W4Dim8GemminiBoomConfig, MxDualA8W4E3M2Dim8GemminiRocketConfig): 16x16 on custom3 + 8x8 on
+# custom2. One ELF per (kernel, SoC, instance); dual/<params>/include/gemmini_params.h selects the instance (XCUSTOM_ACC,
+# DIM). Data + goldens: gen/gen_dual_a8w4.py --dim {16,8}.  `make dual`, run with dual_boom.jobs / dual_rocket.jobs.
+DUAL_INST := boom_d16:a8w4_dim16:16 boom_d8:a8w4_dim8:8 rocket_d16:a8w4_e3m2_dim16:16 rocket_d8:a8w4_e3m2_dim8:8
+define DUAL_RULE
+$(OUT)/mx_rocket/dual_$(1)_$(2): $(CURDIR)/src/dual_$(1).c $(CURDIR)/include/dual_mm.h $(CURDIR)/include/mx_host.h \
+    $(CURDIR)/data/dual_$(1)_d$(4).h $(CURDIR)/dual/$(3)/include/gemmini_params.h
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET -iquote $(CURDIR)/dual/$(3) -DDUAL_$(shell echo $(1) | tr a-z A-Z)_H='"dual_$(1)_d$(4).h"' \
+	  $$< -o $$@ $(RUNTIME) $(LIBS)
+endef
+$(foreach k,mlp attn,$(foreach i,$(DUAL_INST),$(eval $(call DUAL_RULE,$(k),$(word 1,$(subst :, ,$(i))),$(word 2,$(subst :, ,$(i))),$(word 3,$(subst :, ,$(i)))))))
+DUAL_ELFS := $(foreach k,mlp attn,$(foreach i,$(DUAL_INST),dual_$(k)_$(word 1,$(subst :, ,$(i)))))
+.PHONY: dual
+dual: $(addprefix $(OUT)/mx_rocket/,$(DUAL_ELFS))
+
+# A8W4 native DRAM-loop ISA test (rocc-tests bareMetalC/matmul_tiled_asym_e4m3s_fp4_dramloop.c) per dual instance:
+# _64 = 64x64x64, one loop; _llama = 32x256x512 as 2 N-chunks x 4 K-tiles (the mxn_matmul schedule).
+DUAL_DL_SRC := $(ROCC)/bareMetalC/matmul_tiled_asym_e4m3s_fp4_dramloop.c
+define DUAL_DL_RULE
+$(OUT)/mx_rocket/a8w4_dl_$(4)_$(1): $(DUAL_DL_SRC) $(CURDIR)/dual/$(2)/include/gemmini_params.h
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET -iquote $(CURDIR)/dual/$(2) $(5) $$< -o $$@ $(RUNTIME) $(LIBS)
+endef
+DL_64_16    := -DA8W4_HDR='"include/matmul_data_asym_e4m3s_fp4.h"'
+DL_64_8     := -DA8W4_HDR='"include/matmul_data_asym_e4m3s_fp4_dim8.h"'
+DL_llama_16 := -DA8W4_HDR='"include/matmul_data_asym_e4m3s_fp4_32x256x512.h"' -DA8W4_NC=128 -DA8W4_KT=128
+DL_llama_8  := -DA8W4_HDR='"include/matmul_data_asym_e4m3s_fp4_32x256x512_dim8.h"' -DA8W4_NC=128 -DA8W4_KT=128
+$(foreach i,$(DUAL_INST),$(foreach s,64 llama,$(eval $(call DUAL_DL_RULE,$(word 1,$(subst :, ,$(i))),$(word 2,$(subst :, ,$(i))),$(word 3,$(subst :, ,$(i))),$(s),$(DL_$(s)_$(word 3,$(subst :, ,$(i))))))))
+DUAL_DL_ELFS := $(foreach i,$(DUAL_INST),$(foreach s,64 llama,a8w4_dl_$(s)_$(word 1,$(subst :, ,$(i)))))
+.PHONY: dual-dl
+dual-dl: $(addprefix $(OUT)/mx_rocket/,$(DUAL_DL_ELFS))
+
+# A8W4 hybrid loop (DRAM operands, managed scales, BF16 C -> scratchpad): src/a8w4_hybrid.c on the 32x256x512 data.
+define DUAL_HY_RULE
+$(OUT)/mx_rocket/a8w4_hybrid_$(1): $(CURDIR)/src/a8w4_hybrid.c $(CURDIR)/include/dual_loops.h $(CURDIR)/dual/$(2)/include/gemmini_params.h
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET -iquote $(CURDIR)/dual/$(2) \
+	  -DA8W4_HDR='"include/matmul_data_asym_e4m3s_fp4_32x256x512$(if $(filter 8,$(3)),_dim8,).h"' $$< -o $$@ $(RUNTIME) $(LIBS)
+endef
+$(foreach i,$(DUAL_INST),$(eval $(call DUAL_HY_RULE,$(word 1,$(subst :, ,$(i))),$(word 2,$(subst :, ,$(i))),$(word 3,$(subst :, ,$(i))))))
+.PHONY: dual-hy
+dual-hy: $(foreach i,$(DUAL_INST),$(OUT)/mx_rocket/a8w4_hybrid_$(word 1,$(subst :, ,$(i))))
+
+# dual_mlp_llama: one llama-shaped MLP split across both Gemminis of a dual SoC. src/dual_mlp_inst.c is compiled once per
+# instance against that instance's params header (INST names its exports; rand is the one external symbol in
+# gemmini_testutils.h), then linked with the driver and the data blob (gen/gen_dual_mlp_llama.py).
+$(eval $(call BLOB_RULE,mx_rocket,dual_mlp_llama))
+DUAL_SOC := boom:a8w4_dim16:a8w4_dim8 rocket:a8w4_e3m2_dim16:a8w4_e3m2_dim8
+DUAL_INST_DEPS := $(CURDIR)/include/dual_loops.h $(CURDIR)/include/dual_mlp_api.h $(CURDIR)/data/dual_mlp_llama.h
+define DUAL_MLP_LLAMA_RULE
+$(OUT)/mx_rocket/obj/dml_$(1)_g16.o: $(CURDIR)/src/dual_mlp_inst.c $(DUAL_INST_DEPS) $(CURDIR)/dual/$(2)/include/gemmini_params.h
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS) -DMX_ROCKET -DBAREMETAL=1 -iquote $(CURDIR)/dual/$(2) -DINST=16 -Drand=rand_g16 -Drand_double=rand_double_g16 $(DML_FLAGS) -c $$< -o $$@
+$(OUT)/mx_rocket/obj/dml_$(1)_g8.o: $(CURDIR)/src/dual_mlp_inst.c $(DUAL_INST_DEPS) $(CURDIR)/dual/$(3)/include/gemmini_params.h
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS) -DMX_ROCKET -DBAREMETAL=1 -iquote $(CURDIR)/dual/$(3) -DINST=8 -Drand=rand_g8 -Drand_double=rand_double_g8 $(DML_FLAGS) -c $$< -o $$@
+$(OUT)/mx_rocket/dual_mlp_llama_$(1): $(CURDIR)/src/dual_mlp_llama.c $(OUT)/mx_rocket/obj/dml_$(1)_g16.o $(OUT)/mx_rocket/obj/dml_$(1)_g8.o $(OUT)/mx_rocket/dual_mlp_llama_blob.o
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET $$< $(OUT)/mx_rocket/obj/dml_$(1)_g16.o $(OUT)/mx_rocket/obj/dml_$(1)_g8.o \
+	  $(OUT)/mx_rocket/dual_mlp_llama_blob.o -o $$@ $(RUNTIME) $(LIBS)
+endef
+$(foreach s,$(DUAL_SOC),$(eval $(call DUAL_MLP_LLAMA_RULE,$(word 1,$(subst :, ,$(s))),$(word 2,$(subst :, ,$(s))),$(word 3,$(subst :, ,$(s))))))
+.PHONY: dual-mlp-llama
+dual-mlp-llama: $(OUT)/mx_rocket/dual_mlp_llama_boom $(OUT)/mx_rocket/dual_mlp_llama_rocket
+
+# dual_attn_llama: flash attention for one TinyLlama KV group split across both Gemminis (src/dual_attn_inst.c per
+# instance around src/attn_flash.c; data/attn_vpu_dual_kv0.h from gen_attn_vpu.py --layer, goldens from
+# gen/golden_dual_attn.py --dim 16 / 8).
+DUAL_ATTN_DEPS := $(CURDIR)/src/attn_flash.c $(CURDIR)/include/dual_attn_api.h $(CURDIR)/data/attn_dual_kv0_shape.h
+define DUAL_ATTN_LLAMA_RULE
+$(OUT)/mx_rocket/obj/dal_$(1)_g16.o: $(CURDIR)/src/dual_attn_inst.c $(DUAL_ATTN_DEPS) $(CURDIR)/dual/$(2)/include/gemmini_params.h
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS) -DMX_ROCKET -DBAREMETAL=1 -iquote $(CURDIR)/dual/$(2) -DINST=16 -Drand=rand_g16 -Drand_double=rand_double_g16 \
+	  -D__errno=__errno_g16 $(DAL_FLAGS) -c $$< -o $$@
+$(OUT)/mx_rocket/obj/dal_$(1)_g8.o: $(CURDIR)/src/dual_attn_inst.c $(DUAL_ATTN_DEPS) $(CURDIR)/dual/$(3)/include/gemmini_params.h
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS) -DMX_ROCKET -DBAREMETAL=1 -iquote $(CURDIR)/dual/$(3) -DINST=8 -Drand=rand_g8 -Drand_double=rand_double_g8 \
+	  -D__errno=__errno_g8 $(DAL_FLAGS) -c $$< -o $$@
+$(OUT)/mx_rocket/dual_attn_llama_$(1): $(CURDIR)/src/dual_attn_llama.c $(OUT)/mx_rocket/obj/dal_$(1)_g16.o $(OUT)/mx_rocket/obj/dal_$(1)_g8.o \
+    $(CURDIR)/data/attn_vpu_dual_kv0.h $(CURDIR)/data/attn_dual_kv0_d16_expect.h $(CURDIR)/data/attn_dual_kv0_d8_expect.h
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET $(DAL_FLAGS) $$< $(OUT)/mx_rocket/obj/dal_$(1)_g16.o $(OUT)/mx_rocket/obj/dal_$(1)_g8.o -o $$@ $(RUNTIME) $(LIBS)
+endef
+$(foreach s,$(DUAL_SOC),$(eval $(call DUAL_ATTN_LLAMA_RULE,$(word 1,$(subst :, ,$(s))),$(word 2,$(subst :, ,$(s))),$(word 3,$(subst :, ,$(s))))))
+.PHONY: dual-attn-llama
+dual-attn-llama: $(OUT)/mx_rocket/dual_attn_llama_boom $(OUT)/mx_rocket/dual_attn_llama_rocket

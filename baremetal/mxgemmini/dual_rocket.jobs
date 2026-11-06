@@ -1,0 +1,5 @@
+# MxDualA8W4E3M2Dim8GemminiRocketConfig: 16x16 (custom3) + 8x8 (custom2), Rocket
+dual_mlp_rocket_d16
+dual_mlp_rocket_d8
+dual_attn_rocket_d16
+dual_attn_rocket_d8

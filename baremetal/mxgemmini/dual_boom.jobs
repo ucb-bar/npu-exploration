@@ -1,0 +1,5 @@
+# MxDualA8W4Dim8GemminiBoomConfig: 16x16 (custom3) + 8x8 (custom2), Medium BOOM
+dual_mlp_boom_d16
+dual_mlp_boom_d8
+dual_attn_boom_d16
+dual_attn_boom_d8
