@@ -1,10 +1,14 @@
 [submodule "merlin"]
 	path = compiler/merlin
-	url = git@github.com:ucb-bar/merlin.git
+	url = https://github.com/copparihollmann/merlin.git
+	branch = mx-gemmini/handwritten-implementation
 [submodule "microscaling-quant"]
 	path = microscaling-quant
 	url = git@github.com:chloe-wong/microscaling-quant.git
 [submodule "mx-gemmini-mlir"]
 	path = compiler/mx-gemmini-mlir
 	url = git@github.com:ucb-bar/mx-gemmini-mlir.git
-	branch = handwritten-implementation
+	branch = mx-gemmini/handwritten-implementation
+[submodule "compiler/model2mlir"]
+	path = compiler/model2mlir
+	url = git@github.com:ucb-bar/model2MLIR.git
