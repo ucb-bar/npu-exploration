@@ -2,7 +2,7 @@
 
     from config.npu_config import load
     cfg = load("config/baseline.yaml")
-    cfg["hardware"]["mx"]["block"], cfg["quantize"]["default"], cfg["compile"]["target"]
+    cfg["capture"]["shape"], cfg["hardware"]["mx"]["block"], cfg["quantize"]["default"]
 
 Every section may be omitted and takes the defaults below. Unknown keys are refused, so a typo is
 an error rather than a silently ignored setting. Precision lists are written as runs,
@@ -16,6 +16,7 @@ from pathlib import Path
 import yaml
 
 DEFAULTS = {
+    "capture": {"shape": [64, 64], "seed": 0, "input": None},
     "hardware": {
         "mesh": {"rows": 16, "cols": 16},
         "mx": {"block": 32, "formats": ["fp8_e4m3"]},
@@ -24,7 +25,7 @@ DEFAULTS = {
         "clock_ns": 2.0,
     },
     "quantize": {"default": "fp8_e4m3", "types": {}, "layers": {}},
-    "compile": {"target": "spike", "vpu": ["silu", "mul", "rmsnorm", "softmax"]},
+    "compile": {"target": "spike", "vpu": ["add", "elementwise", "reduce", "softmax", "unary"]},
 }
 # sections whose keys are names chosen by the user, not fixed settings
 _FREE = {("quantize", "types"), ("quantize", "layers")}

@@ -1,14 +1,14 @@
 """capture: a PyTorch model -> its MLIR graph, weights and example input (model2MLIR).
 
     from capture import run
-    run("examples/mlp.py:MLP", Path("build/MLP/capture"), m=64, k=64)
+    run("examples/mlp.py:MLP", cfg["capture"], Path("build/MLP/capture"))
 
 Writes, into ``out``, only what later steps read:
 
     model.mlir                           the graph (linalg on tensors)
     weights.safetensors(.manifest.json)  fp32 weights, and which graph argument each one is
     inputs.npz, input_order.json         the example input, embedded in the ELF by compile
-    extra.npz                            non-weight tensors (buffers, e.g. RoPE tables), if any
+    extra.npz                            non-weight tensors (buffers, e.g. RoPE tables); may be empty
     layers.json                          {module name: class name} for modules that own weights
     golden.npy                           fp32 output of the model on that input (read by evaluate)
 
@@ -50,9 +50,9 @@ def load_model(ref: str, *, seed: int = 0):
     return module.eval()
 
 
-def run(ref: str, out: Path, *, m: int, k: int, seed: int = 0, input_npy: Path | None = None,
-        debug: bool = False) -> Path:
-    """Capture ``ref`` on a ``[m][k]`` input (``randn``, or ``input_npy``) into ``out``."""
+def run(ref: str, cap: dict, out: Path, *, debug: bool = False) -> Path:
+    """Capture ``ref`` into ``out``. ``cap`` is the config's ``capture`` section: the input is
+    ``randn(*shape)`` after the model is built from ``seed``, or the .npy at ``input``."""
     import numpy as np
     import torch
     if str(M2M) not in sys.path:
@@ -60,9 +60,9 @@ def run(ref: str, out: Path, *, m: int, k: int, seed: int = 0, input_npy: Path |
     from m2m.capture.bundle import write_bundle
     from m2m.capture.provenance import write_capture_receipt
 
-    module = load_model(ref, seed=seed)       # randn below continues this seed, as npu.py does
-    x =(torch.from_numpy(np.ascontiguousarray(np.load(input_npy), np.float32))
-         if input_npy is not None else torch.randn(m, k))
+    module = load_model(ref, seed=cap["seed"])   # randn below continues this seed, as npu.py does
+    x = (torch.from_numpy(np.ascontiguousarray(np.load(cap["input"]), np.float32))
+         if cap["input"] else torch.randn(*cap["shape"]))
 
     out = Path(out)
     shutil.rmtree(out, ignore_errors=True)
@@ -84,7 +84,4 @@ def run(ref: str, out: Path, *, m: int, k: int, seed: int = 0, input_npy: Path |
             shutil.rmtree(p)
         else:
             p.unlink()
-    extra = out / "extra.npz"
-    if extra.is_file() and not np.load(extra).files:
-        extra.unlink()
     return out

@@ -268,7 +268,46 @@ def _print_list() -> None:
     print("\ntargets (--target): " + ", ".join(TARGETS))
 
 
+BUILD_STEPS = ("capture", "quantize", "compile")
+
+
+def build_main(argv: list[str]) -> int:
+    """``--pytorch FILE.py:Name --config X.yaml``: capture -> quantize -> compile into
+    ``build/<Name>/<step>/``, one ELF at ``build/<Name>/compile/model.elf``."""
+    import capture
+    import compiler
+    import quantize
+    from config.npu_config import load
+
+    ap = argparse.ArgumentParser(prog="npu.py --pytorch",
+                                 description="compile a PyTorch model to one ELF (merlin + mx-gemmini-mlir)")
+    ap.add_argument("--pytorch", required=True, metavar="FILE.py:Name", help="a plain nn.Module, fp32")
+    ap.add_argument("--config", default=str(REPO / "config" / "baseline.yaml"),
+                    help="the experiment YAML: hardware + one section per step")
+    ap.add_argument("--debug", action="store_true", help="also write <step>/debug/ for every step")
+    ap.add_argument("--from", dest="start", choices=BUILD_STEPS, default="capture",
+                    help="rerun from this step, reusing the earlier steps' folders")
+    ap.add_argument("--build", type=Path, default=REPO / "build", help="build root (default build/)")
+    a = ap.parse_args(argv)
+    cfg = load(a.config)
+    root = a.build / a.pytorch.rpartition(":")[2]
+    todo = BUILD_STEPS[BUILD_STEPS.index(a.start):]
+    try:
+        if "capture" in todo:
+            print(f"[capture ] {a.pytorch} -> {capture.run(a.pytorch, cfg['capture'], root / 'capture', debug=a.debug)}")
+        if "quantize" in todo:
+            print(f"[quantize] -> {quantize.run(root / 'capture', cfg, root / 'quantize', debug=a.debug)}")
+        if "compile" in todo:
+            print(f"[compile ] -> {compiler.run(root / 'capture', root / 'quantize', cfg, root / 'compile', debug=a.debug)}")
+    except (ValueError, RuntimeError, FileNotFoundError) as exc:
+        print(f"[error   ] {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    if "--pytorch" in (sys.argv[1:] if argv is None else argv):
+        return build_main(sys.argv[1:] if argv is None else argv)
     from config.recipe import RecipeError, load_hardware, load_run, removed_flag
     from grade.telemetry import Telemetry
     from kernels.registry import build

@@ -24,3 +24,4 @@ baremetal/*/data/
 
 # local sim queue (restored from history, not tracked)
 tools
+build/

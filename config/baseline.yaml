@@ -1,6 +1,10 @@
 # One experiment: the machine (hardware) and how each step drives it.
 # Every step reads `hardware` and its own section. Omitted sections take config/npu_config.py DEFAULTS.
 
+capture:
+  shape: [64, 64]              # example input [M][K], randn from seed; or input: path/to/x.npy
+  seed: 0
+
 hardware:
   mesh: {rows: 16, cols: 16}
   mx: {block: 32, formats: [fp8_e4m3, fp4_e2m1]}   # formats the datapath decodes
@@ -17,4 +21,4 @@ quantize:
 
 compile:
   target: spike
-  vpu: [silu, mul, rmsnorm, softmax]
+  vpu: [add, elementwise, reduce, softmax, unary]   # op classes on the VPU; the rest on the host

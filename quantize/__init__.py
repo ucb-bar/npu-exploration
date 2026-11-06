@@ -9,7 +9,8 @@ Reads ``capture/weights.safetensors`` and ``capture/layers.json``, and the confi
     <param>.codes   uint8  [K][N]   B = W^T of y = x W^T; 4-bit formats pack two columns per
                                     byte, [K][N/2], even column in the low nibble
     <param>.scales  uint8  [K/32][N]  E8M0, one per 32 values down K
-    metadata        {<param>: format}
+    metadata        {<param>: format, "__default__": quantize.default}
+                    (the default is the format of matmuls without a weight, e.g. attention)
 
 That is the byte layout the compiler's checkpoint packer emits, so compile embeds these bytes in
 place of packing the fp32 weight itself. A weight's format is the first match of
@@ -49,7 +50,7 @@ def run(capture: Path, cfg: dict, out: Path, *, debug: bool = False) -> Path:
     if unknown:
         raise ValueError(f"quantize.layers {unknown} match no module; modules: {sorted(layers)}")
 
-    tensors, meta, errors = {}, {}, {}
+    tensors, meta, errors = {}, {"__default__": q["default"]}, {}
     for name, w in load_file(str(Path(capture) / "weights.safetensors")).items():
         module, _, leaf = name.rpartition(".")
         cls = layers.get(module)
