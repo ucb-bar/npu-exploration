@@ -1,0 +1,20 @@
+# One experiment: the machine (hardware) and how each step drives it.
+# Every step reads `hardware` and its own section. Omitted sections take config/npu_config.py DEFAULTS.
+
+hardware:
+  mesh: {rows: 16, cols: 16}
+  mx: {block: 32, formats: [fp8_e4m3, fp4_e2m1]}   # formats the datapath decodes
+  scratchpad: {banks: 4, rows: 4096}
+  precision:                                        # (expWidth, sigWidth) per mesh row
+    prod: "4,4 x16"
+    acc:  "4,5 x8 + 4,6 x2 + 4,7 x5 + 8,8"
+  clock_ns: 2.0
+
+quantize:
+  default: fp8_e4m3            # every matmul weight
+  types: {}                    # by module class, e.g. {Linear: fp8_e4m3}
+  layers: {}                   # by module name (globs allowed), e.g. {down: fp4_e2m1}
+
+compile:
+  target: spike
+  vpu: [silu, mul, rmsnorm, softmax]
