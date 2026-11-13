@@ -509,3 +509,33 @@ $(foreach t,$(LUTK_PAD_TAGS),$(foreach d,16 32,$(foreach v,lut3 fp4_3,$(foreach 
 .PHONY: lutk-pad
 lutk-pad: $(foreach t,$(LUTK_PAD_TAGS),$(foreach d,16 32,$(foreach v,lut3 fp4_3,$(foreach n,$(LUTK_PADS),\
   $(OUT)/mx_rocket/lutk_$(t)_d$(d)_$(v)_pad$(n)))))
+# mxk_pwr_<kernel>_d<dim>: compute-only power kernels (-DMK_POWER: no checks, prints, counters or CPU copies; MK_PWR_ITERS
+# repeats, one final fence) on a 64x256x128 slice for the MxPwr* / FireSimMxPwr* configs. _chk: the same schedule with
+# the golden check (codebooks from the data, -DMK_CB_DATA). Data: gen/gen_lutk_proj.py + gen_mxk_kblock.py --m 64 --k 256
+# --n 128 --tag pwr --mask-file pwr_masks.json; gen_mxk_micromix.py --m 64 --n 128 --tag pwr468 --groups 4:5,6:2,8:1
+# (pwr4: --groups 4:8) --dims 16,32.   make mxk-power
+MXK_PWR := fp8:k8:fp8 fp6:k6:fp8 w4a8:k8:fp4_0_mix lut:k8:lut0_mix lutmix:k8:lut1_mix lutmix6:k6:lut1_mix a4w4:mm:pwr4 \
+  micromix:mm:pwr468
+MK_PWR_ITERS ?= 8
+pwr_kdata = $(if $(filter k6,$(1)),mxk_kblock6_pwr,lutk_pwr)
+define MXK_PWR_RULE
+$(OUT)/mx_rocket/mxk_pwr_$(1)_d$(4)$(5): $(if $(filter mm,$(2)),$(CURDIR)/src/mxk_micromix.c $(CURDIR)/data/mxk_micromix_$(3).h \
+    $(OUT)/mx_rocket/mxk_micromix_$(3)_blob.o,$(CURDIR)/src/mxk_kblock.c $(CURDIR)/data/$(call pwr_kdata,$(2)).h \
+    $(OUT)/mx_rocket/$(call pwr_kdata,$(2))_blob.o) $(CURDIR)/include/mx_native.h $(CURDIR)/bf16/dim$(4)/include/gemmini_params.h
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET -iquote $(CURDIR)/bf16/dim$(4) $(if $(5),-DMK_CB_DATA,-DMK_POWER -DMK_PWR_ITERS=$(MK_PWR_ITERS)) \
+	  $(if $(filter mm,$(2)),-DMM_NOFENCE -DMM_DATA_H='"mxk_micromix_$(3).h"' $(CURDIR)/src/mxk_micromix.c \
+	  $(OUT)/mx_rocket/mxk_micromix_$(3)_blob.o,$(if $(filter k6,$(2)),-DMK_FP6) $(if $(filter %_mix,$(3)),-DLK_MIX) \
+	  -DLK_DATA_H='"$(call pwr_kdata,$(2)).h"' $(call lutk_flags,$(patsubst %_mix,%,$(3))) $(CURDIR)/src/mxk_kblock.c \
+	  $(OUT)/mx_rocket/$(call pwr_kdata,$(2))_blob.o) -o $$@ $(RUNTIME) $(LIBS)
+endef
+$(foreach b,lutk_pwr mxk_kblock6_pwr mxk_micromix_pwr468 mxk_micromix_pwr4,\
+  $(if $(filter $(b),$(foreach t,$(LUTK_TAGS) $(LUTK_PAD_TAGS) $(MXK_KB_TAGS),lutk_$(t) mxk_kblock6_$(t)) \
+    $(foreach t,$(MXK_MM_TAGS),mxk_micromix_$(t))),,$(eval $(call BLOB_RULE,mx_rocket,$(b)))))
+mxk_pwr_w = $(word $(2),$(subst :, ,$(1)))
+$(foreach p,$(MXK_PWR),$(foreach d,16 32,$(foreach s,_chk,\
+  $(eval $(call MXK_PWR_RULE,$(call mxk_pwr_w,$(p),1),$(call mxk_pwr_w,$(p),2),$(call mxk_pwr_w,$(p),3),$(d),)) \
+  $(eval $(call MXK_PWR_RULE,$(call mxk_pwr_w,$(p),1),$(call mxk_pwr_w,$(p),2),$(call mxk_pwr_w,$(p),3),$(d),$(s))))))
+.PHONY: mxk-power mxk-power-chk
+mxk-power: $(foreach p,$(MXK_PWR),$(foreach d,16 32,$(OUT)/mx_rocket/mxk_pwr_$(call mxk_pwr_w,$(p),1)_d$(d)))
+mxk-power-chk: $(foreach p,$(MXK_PWR),$(foreach d,16 32,$(OUT)/mx_rocket/mxk_pwr_$(call mxk_pwr_w,$(p),1)_d$(d)_chk))

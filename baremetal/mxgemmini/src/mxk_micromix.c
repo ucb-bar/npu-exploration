@@ -24,6 +24,15 @@
 #ifndef MM_ITERS
 #define MM_ITERS 2  // timed repeats; the last is reported
 #endif
+#ifdef MK_POWER   // compute only (power runs): groups back to back, one final fence; no checks, prints, counters, memset
+#ifdef MK_CTR
+#error "MK_POWER: build without MK_CTR"
+#endif
+#define printf(...) 0   // error paths stay silent
+#ifndef MK_PWR_ITERS
+#define MK_PWR_ITERS 8
+#endif
+#endif
 #define GRP 32
 #define M MM_M
 #define K MM_K
@@ -113,6 +122,14 @@ int main() {
   gs[ng++] = (mm_group_t) {8, MM_KB8, MM_NB8, OFF(A8), OFF(B8)};
 #endif
   const int NC = pick_nc();
+#ifdef MK_POWER
+  if (!NC || M % (2 * DIM)) return 1;
+  for (int it = 0; it < MK_PWR_ITERS; it++)
+    for (int c = 0; c < N / NC; c++)
+      for (int i = 0; i < ng; i++) issue_group(&gs[i], NC, c, i == 0, i == ng - 1);
+  gemmini_fence();
+  return 0;
+#else
   if (!NC || M % (2 * DIM)) { printf("mxk_micromix: no tiling for M=%d N=%d\n", M, N); return 1; }
   uint64_t cyc = 0;
   memset(C, 0, sizeof(C));   // once: a CPU write inside the timed loop leaves C dirty in the cache (mvout waits)
@@ -140,5 +157,6 @@ int main() {
          (unsigned long) ideal_fp8, (unsigned long) (ideal * 100 / cyc), (unsigned long) (ideal * 1000 / cyc % 10));
   printf(bad ? "mxk_micromix FAILED\n" : "mxk_micromix PASSED\n");
   return bad != 0;
+#endif
 }
 #endif

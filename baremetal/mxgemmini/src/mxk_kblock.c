@@ -29,6 +29,16 @@
 #undef LK_ITERS
 #define LK_ITERS MXK_CTR_ITERS
 #endif
+#ifdef MK_POWER   // compute only (power runs): config + LOOP_WS + one final fence; no checks, prints, counters, CPU copies
+#if !(LK_VAR < 0 || defined(LK_MIX)) || defined(MK_CTR)
+#error "MK_POWER: the all-plain baseline (LK_VAR=-1) or LK_MIX variants only, without MK_CTR"
+#endif
+#define MK_CB_DATA 1
+#define printf(...) 0   // error paths stay silent
+#ifndef MK_PWR_ITERS
+#define MK_PWR_ITERS 8
+#endif
+#endif
 
 #ifndef LK_VAR
 #define LK_VAR 0
@@ -314,7 +324,12 @@ static void issue_hi(int NC) {
 // stores its C columns). LUT codebooks are copied chunk-major, [chunk][LUT ordinal][NC/2], so each loop's sets are
 // contiguous whatever the chunk width (the loop-managed loader reads them as one block).
 #ifndef LK_LO_FP4
+#ifdef MK_CB_DATA   // mask-ordered codebooks straight from the data (one column chunk only), no CPU copy
+#define LK_CBC (LK_BLOB + CAT4(LK_OFF_BLUTC, LK_VAR, , ))
+#else
 static uint8_t lk_cbc[LK_NKB * (LK_N / 2) * LK_LUT_BYTES] __attribute__((aligned(64)));
+#define LK_CBC lk_cbc
+#endif
 #endif
 typedef struct { uint64_t a, b, b8, as, bs, mlo, mhi; uint32_t kt, ord; uint8_t acc, last; } lk_mix_t;
 static lk_mix_t lk_mix[LK_NKB];
@@ -331,6 +346,9 @@ static int plan_mix(const uint8_t *m, uint16_t *dst, int NC) {
   if (lcap < 1) { printf("mix: NC %d codebooks exceed a LUT half\n", NC); return 1; }
   int nl_all = 0;
   for (int kb = 0; kb < LK_NKB; kb++) nl_all += m[kb];
+#ifdef MK_CB_DATA
+  if (N != NC) return 1;
+#else
   const size_t cb = (size_t) (NC / 2) * LK_LUT_BYTES;   // one K-block's codebooks for one chunk
   for (int c = 0; c < N / NC; c++) {
     int ord = 0;
@@ -338,6 +356,7 @@ static int plan_mix(const uint8_t *m, uint16_t *dst, int NC) {
       if (m[kb]) memcpy(lk_cbc + ((size_t) c * nl_all + ord++) * cb,
                         LUT + ((size_t) kb * (N / 2) + (size_t) c * NC / 2) * LK_LUT_BYTES, cb);
   }
+#endif
   lk_nlut = nl_all;
 #endif
   int n = 0, ord = 0;
@@ -375,7 +394,7 @@ static void issue_mix(uint16_t *dst, int NC) {
 #ifdef LK_LO_FP4
       LK_LOOP_MX(LK_I, NC / (2 * DIM), e->kt, e->a, e->b + co / 2, cst, K, N / 2, N, e->as, e->bs + co, M, N, e->acc, h, h);
 #else
-      const uint64_t lut = (uint64_t) (lk_cbc + ((size_t) c * lk_nlut + e->ord) * (NC / 2) * LK_LUT_BYTES);
+      const uint64_t lut = (uint64_t) (LK_CBC + ((size_t) c * lk_nlut + e->ord) * (NC / 2) * LK_LUT_BYTES);
       ROCC_INSTRUCTION_RS1_RS2(XCUSTOM_ACC, 0, lut, k_LOOP_WS_CONFIG_LUTS)
       LK_LOOP_MXF(LK_I, NC / (2 * DIM), e->kt, e->a, e->b + co / 2, cst, K, N / 2, N, e->as, e->bs + co, M, N, e->acc, h, h, 0);
 #endif
@@ -444,6 +463,26 @@ static int check(const char *name, const uint16_t *got, const uint8_t *exp_bytes
   return bad;
 }
 
+#ifdef MK_POWER
+int main() {
+  gemmini_flush(0);
+#if LK_VAR < 0
+  static const uint8_t none[LK_NKB];
+  const int NC = nc_hi();
+  if (!NC) return 1;
+  hi_config();
+  for (int it = 0; it < MK_PWR_ITERS; it++)
+    for (int c = 0; c < N / NC; c++) phase_hi_chunk(none, 0, &C[0][0], NC, c, 0);
+#else
+  const int nl = nc_lo(), nh = nc_hi(), NC = nl < nh ? nl : nh;
+  if (!NC || plan_mix(lk_mask[LK_VAR], &C[0][0], NC)) return 1;
+  mix_config();
+  for (int it = 0; it < MK_PWR_ITERS; it++) issue_mix(&C[0][0], NC);
+#endif
+  gemmini_fence();
+  return 0;
+}
+#else
 int main() {
   gemmini_flush(0);
   const uint64_t ideal_fp8 = (uint64_t) M * K * N / (DIM * DIM);
@@ -591,4 +630,5 @@ int main() {
   printf(bad ? "mxk_kblock FAILED\n" : "mxk_kblock PASSED\n");
   return bad != 0;
 }
+#endif
 #endif

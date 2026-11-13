@@ -147,6 +147,8 @@ def main() -> int:
     parts = [("A", A_codes), ("AS", (As_e.T + 127).numpy().astype(np.uint8)), ("B8", B8_codes),
              ("BL", nib(BL_idx.numpy())), ("BLUT", lut_codes), ("B4", nib(B4_codes)),
              ("BS", (Bs_e + 127).numpy().astype(np.uint8))]
+    for vi, m in enumerate(masks.values()):   # codebooks of mask vi's LUT K-blocks in K order (LK_MIX layout, one chunk)
+        parts.append((f"BLUTC{vi}", lut_codes[[i for i in range(NKB) if m[i]]]))
     gold = {}
     for d in dims:
         allk = list(range(NKB))
