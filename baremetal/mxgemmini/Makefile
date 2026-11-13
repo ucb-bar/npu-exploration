@@ -411,3 +411,101 @@ endef
 $(foreach s,$(DUAL_SOC),$(eval $(call DUAL_ATTN_LLAMA_RULE,$(word 1,$(subst :, ,$(s))),$(word 2,$(subst :, ,$(s))),$(word 3,$(subst :, ,$(s))))))
 .PHONY: dual-attn-llama
 dual-attn-llama: $(OUT)/mx_rocket/dual_attn_llama_boom $(OUT)/mx_rocket/dual_attn_llama_rocket
+
+# lutk_proj: weights-only per-K-block LUT linear layer (MXQuant 32xN usage, kblock tables) on the BF16 BOOM configs
+# (MxE4M3LutBf16Dim{16,32}GemminiBoomConfig), RTL only. src/lutk_proj.c against data/lutk_<tag>.{h,bin}
+# (gen/gen_lutk_proj.py), one ELF per (tag, dim, variant): fp8 = all MXFP8; lut<i> / fp4_<i> = mask i of the data
+# (LUT or plain MXFP4 on its low-precision K-blocks, MXFP8 on the rest).  make lutk LUTK_TAGS="tiny"
+LUTK_TAGS ?= tiny gate down
+LUTK_VARS := fp8 lut0 lut1 lut2 lut3 fp4_0 fp4_1 fp4_2 fp4_3
+lutk_flags = $(if $(filter fp8,$(1)),-DLK_VAR=-1,$(if $(filter lut%,$(1)),-DLK_VAR=$(patsubst lut%,%,$(1)),-DLK_VAR=$(patsubst fp4_%,%,$(1)) -DLK_LO_FP4))
+define LUTK_RULE
+$(OUT)/mx_rocket/lutk_$(1)_d$(2)_$(3): $(CURDIR)/src/lutk_proj.c $(CURDIR)/include/mx_native.h $(CURDIR)/data/lutk_$(1).h \
+    $(CURDIR)/bf16/dim$(2)/include/gemmini_params.h $(OUT)/mx_rocket/lutk_$(1)_blob.o
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET -iquote $(CURDIR)/bf16/dim$(2) -DLK_DATA_H='"lutk_$(1).h"' $(call lutk_flags,$(3)) \
+	  $$< -o $$@ $(RUNTIME) $(OUT)/mx_rocket/lutk_$(1)_blob.o $(LIBS)
+endef
+$(foreach t,$(LUTK_TAGS),$(eval $(call BLOB_RULE,mx_rocket,lutk_$(t)))\
+  $(foreach d,16 32,$(foreach v,$(LUTK_VARS),$(eval $(call LUTK_RULE,$(t),$(d),$(v))))))
+.PHONY: lutk
+lutk: $(foreach t,$(LUTK_TAGS),$(foreach d,16 32,$(foreach v,$(LUTK_VARS),$(OUT)/mx_rocket/lutk_$(t)_d$(d)_$(v))))
+# mxk_kblock<6|8>: the per-K-block LUT layer (src/mxk_kblock.c, perf counters on: -DMK_CTR). 6 = MXFP6 E3M2 base
+# (-DMK_FP6, gen/gen_mxk_kblock.py data mxk_kblock6_<tag>): E3M2-direct A / plain K-blocks, E3M2-valued E4M3 codebooks
+# (lut<i>) or MXFP4 (fp4_<i>). 8 = MXFP8 base on lutk_<tag> data (lutk_proj.c's schedule, plus counters).
+# make mxk-kblock MXK_KB_TAGS="tiny l7p l7d" MXK_DIMS="16 32"
+MXK_KB_TAGS ?= tiny l7p l7d
+MXK_DIMS ?= 16 32
+define MXK_KB_RULE
+$(OUT)/mx_rocket/mxk_kblock$(1)_$(2)_d$(3)_$(4): $(CURDIR)/src/mxk_kblock.c $(CURDIR)/include/mx_native.h \
+    $(CURDIR)/include/mxk_counters.h $(CURDIR)/data/$(if $(filter 6,$(1)),mxk_kblock6,lutk)_$(2).h \
+    $(CURDIR)/bf16/dim$(3)/include/gemmini_params.h $(OUT)/mx_rocket/$(if $(filter 6,$(1)),mxk_kblock6,lutk)_$(2)_blob.o
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET -DMK_CTR $(if $(filter 6,$(1)),-DMK_FP6) -iquote $(CURDIR)/bf16/dim$(3) \
+	  -DLK_DATA_H='"$(if $(filter 6,$(1)),mxk_kblock6,lutk)_$(2).h"' $(call lutk_flags,$(4)) $$< -o $$@ $(RUNTIME) \
+	  $(OUT)/mx_rocket/$(if $(filter 6,$(1)),mxk_kblock6,lutk)_$(2)_blob.o $(LIBS)
+endef
+$(foreach t,$(MXK_KB_TAGS),$(eval $(call BLOB_RULE,mx_rocket,mxk_kblock6_$(t)))\
+  $(if $(filter $(t),$(LUTK_TAGS) $(LUTK_PAD_TAGS)),,$(eval $(call BLOB_RULE,mx_rocket,lutk_$(t))))\
+  $(foreach b,6 8,$(foreach d,$(MXK_DIMS),$(foreach v,$(LUTK_VARS),$(eval $(call MXK_KB_RULE,$(b),$(t),$(d),$(v)))))))
+.PHONY: mxk-kblock
+mxk-kblock: $(foreach t,$(MXK_KB_TAGS),$(foreach b,6 8,$(foreach d,$(MXK_DIMS),$(foreach v,$(LUTK_VARS),\
+  $(OUT)/mx_rocket/mxk_kblock$(b)_$(t)_d$(d)_$(v)))))
+# mxk_kblock<6|8> mixed-K variants (-DLK_MIX; 6 needs the KMIX FP6 RTL): <lut|fp4_><i>_mix = mask i as mixed-K loops over every column chunk, no fences
+MXK_MIX_VARS := lut0_mix lut1_mix lut2_mix lut3_mix fp4_0_mix fp4_1_mix fp4_2_mix fp4_3_mix
+define MXK_KBMIX_RULE
+$(OUT)/mx_rocket/mxk_kblock$(4)_$(1)_d$(2)_$(3): $(CURDIR)/src/mxk_kblock.c $(CURDIR)/include/mx_native.h \
+    $(CURDIR)/include/mxk_counters.h $(CURDIR)/data/$(if $(filter 6,$(4)),mxk_kblock6,lutk)_$(1).h \
+    $(CURDIR)/bf16/dim$(2)/include/gemmini_params.h $(OUT)/mx_rocket/$(if $(filter 6,$(4)),mxk_kblock6,lutk)_$(1)_blob.o
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET -DMK_CTR -DLK_MIX $(if $(filter 6,$(4)),-DMK_FP6) -iquote $(CURDIR)/bf16/dim$(2) \
+	  -DLK_DATA_H='"$(if $(filter 6,$(4)),mxk_kblock6,lutk)_$(1).h"' $(call lutk_flags,$(patsubst %_mix,%,$(3))) $$< -o $$@ \
+	  $(RUNTIME) $(OUT)/mx_rocket/$(if $(filter 6,$(4)),mxk_kblock6,lutk)_$(1)_blob.o $(LIBS)
+endef
+$(foreach b,6 8,$(foreach t,$(MXK_KB_TAGS),$(foreach d,$(MXK_DIMS),$(foreach v,$(MXK_MIX_VARS),$(eval $(call MXK_KBMIX_RULE,$(t),$(d),$(v),$(b)))))))
+.PHONY: mxk-kblock-mix
+mxk-kblock-mix: $(foreach b,6 8,$(foreach t,$(MXK_KB_TAGS),$(foreach d,$(MXK_DIMS),$(foreach v,$(MXK_MIX_VARS),\
+  $(OUT)/mx_rocket/mxk_kblock$(b)_$(t)_d$(d)_$(v)))))
+# mxk_micromix: MicroMix channel groups (FP4 x FP4 mode0, E3M2 x E3M2 direct, E4M3 x E4M3) in one shared accumulator
+# (src/mxk_micromix.c -DMK_CTR, gen/gen_mxk_micromix.py). <tag>468 / <tag>48: FP4+FP6+FP8 / FP4+FP8 menus; 4/6/8: one format.
+MXK_MM_TAGS ?= tiny468 tiny48 tiny4 tiny6 tiny8 l7p468 l7p48 l7p6 l7p8
+define MXK_MM_RULE
+$(OUT)/mx_rocket/mxk_micromix_$(1)_d$(2): $(CURDIR)/src/mxk_micromix.c $(CURDIR)/include/mx_native.h \
+    $(CURDIR)/include/mxk_counters.h $(CURDIR)/data/mxk_micromix_$(1).h $(CURDIR)/bf16/dim$(2)/include/gemmini_params.h \
+    $(OUT)/mx_rocket/mxk_micromix_$(1)_blob.o
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET -DMK_CTR -iquote $(CURDIR)/bf16/dim$(2) -DMM_DATA_H='"mxk_micromix_$(1).h"' \
+	  $$< -o $$@ $(RUNTIME) $(OUT)/mx_rocket/mxk_micromix_$(1)_blob.o $(LIBS)
+endef
+$(foreach t,$(MXK_MM_TAGS),$(eval $(call BLOB_RULE,mx_rocket,mxk_micromix_$(t)))\
+  $(foreach d,$(MXK_DIMS),$(eval $(call MXK_MM_RULE,$(t),$(d)))))
+.PHONY: mxk-micromix
+mxk-micromix: $(foreach t,$(MXK_MM_TAGS),$(foreach d,$(MXK_DIMS),$(OUT)/mx_rocket/mxk_micromix_$(t)_d$(d)))
+# fence-free variant: mxk_micromix_<tag>_d<dim>_nf (-DMM_NOFENCE)
+define MXK_MMNF_RULE
+$(OUT)/mx_rocket/mxk_micromix_$(1)_d$(2)_nf: $(CURDIR)/src/mxk_micromix.c $(CURDIR)/include/mx_native.h \
+    $(CURDIR)/include/mxk_counters.h $(CURDIR)/data/mxk_micromix_$(1).h $(CURDIR)/bf16/dim$(2)/include/gemmini_params.h \
+    $(OUT)/mx_rocket/mxk_micromix_$(1)_blob.o
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET -DMK_CTR -DMM_NOFENCE -iquote $(CURDIR)/bf16/dim$(2) -DMM_DATA_H='"mxk_micromix_$(1).h"' \
+	  $$< -o $$@ $(RUNTIME) $(OUT)/mx_rocket/mxk_micromix_$(1)_blob.o $(LIBS)
+endef
+$(foreach t,$(MXK_MM_TAGS),$(foreach d,$(MXK_DIMS),$(eval $(call MXK_MMNF_RULE,$(t),$(d)))))
+.PHONY: mxk-micromix-nf
+mxk-micromix-nf: $(foreach t,$(MXK_MM_TAGS),$(foreach d,$(MXK_DIMS),$(OUT)/mx_rocket/mxk_micromix_$(t)_d$(d)_nf))
+# padded-row test: lutk_<tag>_d<dim>_<lut3|fp4_3>_pad<n> = phase lo on M - n rows (-DLK_PADI=n); padded C rows must stay
+LUTK_PAD_TAGS ?= tiny64
+LUTK_PADS ?= 1 17
+define LUTK_PAD_RULE
+$(OUT)/mx_rocket/lutk_$(1)_d$(2)_$(3)_pad$(4): $(CURDIR)/src/lutk_proj.c $(CURDIR)/include/mx_native.h $(CURDIR)/data/lutk_$(1).h \
+    $(CURDIR)/bf16/dim$(2)/include/gemmini_params.h $(OUT)/mx_rocket/lutk_$(1)_blob.o
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET -iquote $(CURDIR)/bf16/dim$(2) -DLK_DATA_H='"lutk_$(1).h"' $(call lutk_flags,$(3)) \
+	  -DLK_PADI=$(4) $$< -o $$@ $(RUNTIME) $(OUT)/mx_rocket/lutk_$(1)_blob.o $(LIBS)
+endef
+$(foreach t,$(filter-out $(LUTK_TAGS),$(LUTK_PAD_TAGS)),$(eval $(call BLOB_RULE,mx_rocket,lutk_$(t))))
+$(foreach t,$(LUTK_PAD_TAGS),$(foreach d,16 32,$(foreach v,lut3 fp4_3,$(foreach n,$(LUTK_PADS),\
+  $(eval $(call LUTK_PAD_RULE,$(t),$(d),$(v),$(n)))))))
+.PHONY: lutk-pad
+lutk-pad: $(foreach t,$(LUTK_PAD_TAGS),$(foreach d,16 32,$(foreach v,lut3 fp4_3,$(foreach n,$(LUTK_PADS),\
+  $(OUT)/mx_rocket/lutk_$(t)_d$(d)_$(v)_pad$(n)))))
