@@ -10,7 +10,9 @@
 #include "include/gemmini_testutils.h"
 #include "mx_bench.h"
 
+#ifndef ATTN_PARAMS_DIM   // DIM != 16: -DATTN_PARAMS_DIM -iquote <params dir> -DLLAMA_BANK_ROWS=<rows>
 #define DIM 16
+#endif
 #ifndef LLAMA_BANK_ROWS
 #define LLAMA_BANK_ROWS 4096
 #endif

@@ -214,7 +214,7 @@ def main_layer(a) -> int:
     assert sq + Sk <= T and sq % 16 == 0 and Sk % 32 == 0 and d % 32 == 0
     q0 = T - sq
     Sq = sq * a.pack
-    sc = 1.0 / np.sqrt(d)
+    sc = 1.0 if a.scale_in_q else 1.0 / np.sqrt(d)
     kvi = {kv: i for i, kv in enumerate(kvs)}
     kt_c, kt_s, v_c, v_s, kd, vd = {}, {}, {}, {}, {}, {}
     for kv in kvs:
@@ -229,6 +229,8 @@ def main_layer(a) -> int:
     q_c, q_s, o_ref = [], [], []
     for kv, hs in passes:
         Q = np.ascontiguousarray(np.vstack([zs[h]["Q"][q0:q0 + sq] for h in hs]))
+        if a.scale_in_q:
+            Q = (Q / np.sqrt(d)).astype(np.float32)
         qc, qs, qP = G.quantize(Q, axis="row", f=FMT)
         q_c.append(qc); q_s.append(qs)
         o_ref.append(softmax((deq(qP, qs, "row") @ kd[kv].T) * sc) @ vd[kv])
@@ -256,6 +258,7 @@ def main_layer(a) -> int:
 #define ATTN_HEADS  {a.pack}
 #define ATTN_NPASS  {P}
 #define ATTN_NKV    {NKV}
+#define ATTN_SCALE_IN_Q {int(a.scale_in_q)}   // 1: Q already carries 1/sqrt(d); no scaling in the kernel
 
 static const uint8_t LPASS_KV[ATTN_NPASS] = {{ {", ".join(str(kvi[kv]) for kv, _ in passes)} }};
 static const uint8_t LPASS_HEAD0[ATTN_NPASS] = {{ {", ".join(str(hs[0]) for _, hs in passes)} }};

@@ -92,6 +92,10 @@ int main() { printf("skipped: needs the VPU config (MX_ROCKET) or Spike\n"); ret
 #define VL (DIM / 2)
 #define SQ ATTN_SQ
 #define SK ATTN_SK
+// row pitch (keys) of K^T and its scales: the full cache when this pass takes only a key range of it (dual_attn_inst.c)
+#ifndef ATTN_KT_PITCH
+#define ATTN_KT_PITCH SK
+#endif
 #define D  ATTN_D
 // key blocks: a shorter first block (the pipeline fills sooner: QK0 / softmax0 / SR0 before the first PV) and a
 // shorter last block (less softmax / SR / PV after the last QK); the middle blocks are BK. Buffers are sized for BK.
@@ -297,7 +301,7 @@ static int n_mm, mm_next;
 static void gated_load(int n) {   // B-scale slice of the n-th matmul into weight half n % 2
   const mm_t m = sched[n];
   // braced: the gemmini_* macros expand to { ... } blocks
-  if (m.kind == 0) { gemmini_mx_load_scales_2d_gated((uint64_t)&ATTN_KTS[0][BOFF(m.j)], BLEN(m.j), D / 32, SK, (n & 1) << 12, 1); }
+  if (m.kind == 0) { gemmini_mx_load_scales_2d_gated((uint64_t)&ATTN_KTS[0][BOFF(m.j)], BLEN(m.j), D / 32, ATTN_KT_PITCH, (n & 1) << 12, 1); }
   else             { gemmini_mx_load_scales_2d_gated((uint64_t)&ATTN_VS[BOFF(m.j) / 32][0], D, BLEN(m.j) / 32, D, (n & 1) << 12, 1); }
 }
 static void issue_mm(void) {   // issue the next scheduled matmul
@@ -383,7 +387,16 @@ static void store_o(void) {
   if (ATTN_SERIAL || ATTN_STATS_OUT) mvout_rows(st_hw, ST, ST_ROWS * SQ);   // m x2, mt, a x2, 1/l, lt (, a2): for diff_report
 #endif
 }
+// ATTN_PARTIAL: a key-range pass (split-K flash): no 1/l -- the includer's ATTN_STORE_PARTIAL() takes the unnormalized O
+// (SP_O), the running max (ST_M((NB - 1) & 1)) and the row sums (ST_L) for a merge with the other key ranges' partials
+#ifndef ATTN_PARTIAL
+#define ATTN_PARTIAL 0
+#endif
 static void finalize(void) {
+#if ATTN_PARTIAL
+  ATTN_STORE_PARTIAL();
+  return;
+#endif
   gemmini_vpu_unary(VPU_RCP, ST_L, ST_L, SQ);
   gemmini_vpu_bcast(VPU_MUL, SP_O, SP_O, ST_L, SQ * D / VL, D / VL);
   store_o();
@@ -437,7 +450,7 @@ static void load_q(void) {
   mvin_tiles((const uint8_t *)MASK_BF16, DIM, ROWS16(SQ, ATTN_CH), DIM, SP_MASK);   // BF16 rows, 16 B each
 #endif
 }
-static void load_k(int j) { if (j < NB) mvin_tiles(&ATTN_KT[0][BOFF(j) / QT], SK / QT, D, BLEN(j) / QT, KT_BLK(j)); }
+static void load_k(int j) { if (j < NB) mvin_tiles(&ATTN_KT[0][BOFF(j) / QT], ATTN_KT_PITCH / QT, D, BLEN(j) / QT, KT_BLK(j)); }
 static void load_v(int j) { if (j < NB) mvin_tiles(&ATTN_V[BOFF(j)][0], D / QT, BLEN(j), D / QT, V_BLK(j)); }
 static void loads(void) {   // everything up front (resident K/V)
   load_q();

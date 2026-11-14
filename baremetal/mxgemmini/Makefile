@@ -412,6 +412,36 @@ $(foreach s,$(DUAL_SOC),$(eval $(call DUAL_ATTN_LLAMA_RULE,$(word 1,$(subst :, ,
 .PHONY: dual-attn-llama
 dual-attn-llama: $(OUT)/mx_rocket/dual_attn_llama_boom $(OUT)/mx_rocket/dual_attn_llama_rocket
 
+# dual_fa_l8b_split: the same driver in key-split mode on a Llama-3.1-8B-shaped KV group (d 128, 4 heads; data
+# attn_vpu_dual_l8b.h): keys [0, DFA_SKA) on the 16x16, [DFA_SKA, 2048) on the 8x8, merged on the 16x16's VPU.
+# Tuned (the 91 % single-Gemmini attn_flash_llama7b_fused settings):
+#   make dual-fa-split DFA_TAG=_tuned DFA_EXP=_b32_96 DFA_FLAGS="-DATTN_EXPSUB=1 -DATTN_ST_BANK2=1 -DATTN_V3=0 -DBK_FIRST=32 -DBK_LAST=96"
+# Goldens: gen/golden_dual_attn_split.py ../data/attn_vpu_dual_l8b.h --ska $(DFA_SKA).
+DFA_SKA   ?= 1664
+DFA_TAG   ?=
+DFA_EXP   ?=
+DFA_SKN8  ?= $(shell echo $$((2048 - $(DFA_SKA))))
+DFA_MAINFLAGS ?=
+DFA_TUNED := -DATTN_EXPSUB=1 -DATTN_ST_BANK2=1 -DATTN_V3=0 -DBK_FIRST=32 -DBK_LAST=96
+DFA_COMMON := -DDA_KSPLIT=1 -DDA_SHAPE='"attn_dual_l8b_shape.h"' -DATTN_EXPSUM=1 $(DFA_FLAGS)
+DFA_MAIN  = $(DFA_MAINFLAGS) -DDA_KSPLIT=1 -DDA_DATA='"attn_vpu_dual_l8b.h"' -DDA_EXPECT='"attn_dual_l8b_split$(DFA_SKA)$(DFA_EXP)_expect.h"'
+define DUAL_FA_SPLIT_RULE
+$(OUT)/mx_rocket/obj/dfa_$(1)$(DFA_TAG)_g16.o: $(CURDIR)/src/dual_attn_inst.c $(DUAL_ATTN_DEPS) $(CURDIR)/data/attn_dual_l8b_shape.h $(CURDIR)/dual/$(2)/include/gemmini_params.h
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS) -DMX_ROCKET -DBAREMETAL=1 -iquote $(CURDIR)/dual/$(2) -DINST=16 -Drand=rand_g16 -Drand_double=rand_double_g16 \
+	  -D__errno=__errno_g16 $(DFA_COMMON) -DDA_K0=0 -DDA_SKN=$(DFA_SKA) -c $$< -o $$@
+$(OUT)/mx_rocket/obj/dfa_$(1)$(DFA_TAG)_g8.o: $(CURDIR)/src/dual_attn_inst.c $(DUAL_ATTN_DEPS) $(CURDIR)/data/attn_dual_l8b_shape.h $(CURDIR)/dual/$(3)/include/gemmini_params.h
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS) -DMX_ROCKET -DBAREMETAL=1 -iquote $(CURDIR)/dual/$(3) -DINST=8 -Drand=rand_g8 -Drand_double=rand_double_g8 \
+	  -D__errno=__errno_g8 $(DFA_COMMON) -DDA_K0=$(DFA_SKA) -DDA_SKN=$(DFA_SKN8) -c $$< -o $$@
+$(OUT)/mx_rocket/dual_fa_l8b_split$(DFA_TAG)_$(1): $(CURDIR)/src/dual_attn_llama.c $(OUT)/mx_rocket/obj/dfa_$(1)$(DFA_TAG)_g16.o $(OUT)/mx_rocket/obj/dfa_$(1)$(DFA_TAG)_g8.o \
+    $(CURDIR)/data/attn_vpu_dual_l8b.h $(CURDIR)/data/attn_dual_l8b_split$(DFA_SKA)$(DFA_EXP)_expect.h
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET $(DFA_MAIN) $$< $(OUT)/mx_rocket/obj/dfa_$(1)$(DFA_TAG)_g16.o $(OUT)/mx_rocket/obj/dfa_$(1)$(DFA_TAG)_g8.o -o $$@ $(RUNTIME) $(LIBS)
+endef
+$(foreach s,$(DUAL_SOC),$(eval $(call DUAL_FA_SPLIT_RULE,$(word 1,$(subst :, ,$(s))),$(word 2,$(subst :, ,$(s))),$(word 3,$(subst :, ,$(s))))))
+.PHONY: dual-fa-split
+dual-fa-split: $(OUT)/mx_rocket/dual_fa_l8b_split$(DFA_TAG)_boom $(OUT)/mx_rocket/dual_fa_l8b_split$(DFA_TAG)_rocket
+
 # lutk_proj: weights-only per-K-block LUT linear layer (MXQuant 32xN usage, kblock tables) on the BF16 BOOM configs
 # (MxE4M3LutBf16Dim{16,32}GemminiBoomConfig), RTL only. src/lutk_proj.c against data/lutk_<tag>.{h,bin}
 # (gen/gen_lutk_proj.py), one ELF per (tag, dim, variant): fp8 = all MXFP8; lut<i> / fp4_<i> = mask i of the data
