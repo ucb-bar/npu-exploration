@@ -83,3 +83,32 @@ Build exactly like the random data: `make lutk LUTK_TAGS="tl10_down_g1 ..."`.
 | all | 176/176 | 2.2e-2 / 1.65e-2 | 7.1e-2 |
 
 The BF16 accumulation over K = 5632 differs from the study's fp32 GEMM by about 2%. That is larger than the LUT's effect at the b7 budget (0.45%). The perplexity numbers assume fp32 accumulation, so for a long-K layer the chip's BF16 accumulator, not the LUT, sets the error floor.
+
+## LUT on vs off on the DIM16 FireSim bitstream
+Bitstream: `FireSimMxPwrDeferDim16GemminiBoomBw2Config` (16x16, 128 weight codebooks, deferred config_ex). The kernels
+build against `bf16/dim16/include/gemmini_params.h` (`LUT_W_CODEBOOKS 128`), which matches it.
+
+1. Data, G = 1 only (`mxk_kblock.c` hard-codes `LK_G 1`), DIM16 goldens only:
+   ```bash
+   for t in o:self_attn.o_proj gate:mlp.gate_proj up:mlp.up_proj down:mlp.down_proj; do
+     CUDA_VISIBLE_DEVICES= $PY gen/gen_lutk_tinyllama.py --layer model.layers.10.${t#*:} \
+         --m 64 --n 256 --g 1 --tag tl10_${t%%:*}_g1 --dims 16
+   done
+   ```
+2. ELFs: `make mxk-tinyllama` (defaults: `TL_TAGS="tl10_o_g1 tl10_gate_g1 tl10_up_g1 tl10_down_g1" TL_DIMS=16`).
+   Output `out/baremetal/mx_rocket/mxk_tl_<tag>_d16_<var>`:
+   - `fp8`: LUT off, every K-block MXFP8 (mode 8).
+   - `lut0_mix` / `lut1_mix` / `lut2_mix` / `lut3_mix`: LUT on for the b5 / b6 / b7 / all masks, mixed-K schedule (one
+     accumulation in K order, no fences). A mask with no LUT K-block (`up` at b7) exits with "mix: needs ... a
+     low-precision K-block": skip it.
+3. FireSim: one bare-metal workload per ELF (copy `sims/firesim/deploy/workloads/bare-base.json`, set
+   `common_bootbinary` to the ELF, keep `uartlog` in the outputs); `config_runtime.yaml`: `default_hw_config` = the
+   hwdb entry `corigine_firesim_mx_gemmini_pwr_defer_dim16_boom_bw2_ddr3_8g_no_nic`
+   (`sims/firesim/deploy/built-hwdb-entries/`), `terminate_on_completion: yes`.
+4. Read the uartlog:
+   - `mxk_kblock PASSED` = bit-exact against the on-chip golden (CML for `_mix`, FP8_D16 for `fp8`).
+   - `PERF cycles=... ideal=... util=...` (last timed iteration), plus `PERF_HW` (mesh busy split) and
+     `PERF_LD_HW` / `PERF_LITTLE` (load path). LUT speedup = fp8 cycles / lut<i>_mix cycles.
+   - `C_DUMP r<row> 0x....` lines: C as BF16. Against the study:
+     `python gen/compare_lutk_tinyllama.py --tag tl10_down_g1 --var b6 --dim 16 --golden CML --rtl uartlog`
+     (`--var` b5 / b6 / b7 / all = lut0 / lut1 / lut2 / lut3).

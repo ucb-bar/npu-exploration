@@ -627,6 +627,13 @@ int main() {
          (unsigned long) (ideal * 100 / mm), (unsigned long) (ideal * 1000 / mm % 10),
          (unsigned long) (ideal * 100 / tot), (unsigned long) (ideal * 1000 / tot % 10));
 #endif
+#ifdef LK_DUMP_C   // C as BF16 hex words, row-major, for gen/compare_lutk_tinyllama.py --rtl <log>
+  for (int r = 0; r < M; r++) {
+    printf("C_DUMP r%02d", r);
+    for (int c = 0; c < N; c++) printf(" 0x%04x", C[r][c]);
+    printf("\n");
+  }
+#endif
   printf(bad ? "mxk_kblock FAILED\n" : "mxk_kblock PASSED\n");
   return bad != 0;
 }

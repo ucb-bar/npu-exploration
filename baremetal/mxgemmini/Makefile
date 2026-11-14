@@ -496,6 +496,25 @@ $(foreach b,6 8,$(foreach t,$(MXK_KB_TAGS),$(foreach d,$(MXK_DIMS),$(foreach v,$
 .PHONY: mxk-kblock-mix
 mxk-kblock-mix: $(foreach b,6 8,$(foreach t,$(MXK_KB_TAGS),$(foreach d,$(MXK_DIMS),$(foreach v,$(MXK_MIX_VARS),\
   $(OUT)/mx_rocket/mxk_kblock$(b)_$(t)_d$(d)_$(v)))))
+# mxk_tl: TinyLlama per-K-block LUT linears (gen/gen_lutk_tinyllama.py data, gen/LUTK_TINYLLAMA.md) on mxk_kblock.c
+# with counters and a C dump (-DLK_DUMP_C). fp8 = LUT off (all MXFP8); lut<i>_mix = LUT on, mask i, mixed-K.
+# make mxk-tinyllama TL_TAGS="tl10_o_g1 tl10_gate_g1 tl10_up_g1 tl10_down_g1" TL_DIMS=16
+TL_TAGS ?= tl10_o_g1 tl10_gate_g1 tl10_up_g1 tl10_down_g1
+TL_DIMS ?= 16
+TL_VARS ?= fp8 lut0_mix lut1_mix lut2_mix lut3_mix
+define MXK_TL_RULE
+$(OUT)/mx_rocket/mxk_tl_$(1)_d$(2)_$(3): $(CURDIR)/src/mxk_kblock.c $(CURDIR)/include/mx_native.h \
+    $(CURDIR)/include/mxk_counters.h $(CURDIR)/data/lutk_$(1).h $(CURDIR)/bf16/dim$(2)/include/gemmini_params.h \
+    $(OUT)/mx_rocket/lutk_$(1)_blob.o
+	@mkdir -p $$(dir $$@)
+	$(CC) $(CFLAGS_BM) -DMX_ROCKET -DMK_CTR -DLK_DUMP_C $(if $(filter %_mix,$(3)),-DLK_MIX) -iquote $(CURDIR)/bf16/dim$(2) \
+	  -DLK_DATA_H='"lutk_$(1).h"' $(call lutk_flags,$(patsubst %_mix,%,$(3))) $$< -o $$@ $(RUNTIME) \
+	  $(OUT)/mx_rocket/lutk_$(1)_blob.o $(LIBS)
+endef
+$(foreach t,$(filter-out $(LUTK_TAGS) $(LUTK_PAD_TAGS) $(MXK_KB_TAGS),$(TL_TAGS)),$(eval $(call BLOB_RULE,mx_rocket,lutk_$(t))))
+$(foreach t,$(TL_TAGS),$(foreach d,$(TL_DIMS),$(foreach v,$(TL_VARS),$(eval $(call MXK_TL_RULE,$(t),$(d),$(v))))))
+.PHONY: mxk-tinyllama
+mxk-tinyllama: $(foreach t,$(TL_TAGS),$(foreach d,$(TL_DIMS),$(foreach v,$(TL_VARS),$(OUT)/mx_rocket/mxk_tl_$(t)_d$(d)_$(v))))
 # mxk_micromix: MicroMix channel groups (FP4 x FP4 mode0, E3M2 x E3M2 direct, E4M3 x E4M3) in one shared accumulator
 # (src/mxk_micromix.c -DMK_CTR, gen/gen_mxk_micromix.py). <tag>468 / <tag>48: FP4+FP6+FP8 / FP4+FP8 menus; 4/6/8: one format.
 MXK_MM_TAGS ?= tiny468 tiny48 tiny4 tiny6 tiny8 l7p468 l7p48 l7p6 l7p8
