@@ -21,7 +21,7 @@
 #ifndef DIM
 #error "mx_native.h needs DIM defined by the caller"
 #endif
-#define MXN_HALF_ROWS ((BANK_NUM * BANK_ROWS) / 2)
+#include "mx_native_state.h"
 
 // Tile choice: the largest N-chunk NC (<= 512) whose C fits one acc half (E4M3-single: M*NC/64 rows) --
 // larger NC means less A re-read -- then the largest K-tile Kt (<= 512) whose A (M*Kt/16) + B (Kt*NC/16)
@@ -38,7 +38,7 @@ static int mxn_pick_kt(int M, int K, int NC) {
   return 0;
 }
 
-static unsigned mxn_loops;   // loops issued so far: the parity picks the scratchpad half
+/* TU-local loop state is shared with direct MicroMX via mx_native_state.h. */
 
 // blk_nc/blk_kt != 0: B is PRE-BLOCKED for that tiling -- block (c, t) = B[t*Kt:+Kt][c*NC:+NC] stored
 // contiguously (row pitch NC), blocks c-major -- so each loop streams one contiguous run from DRAM instead

@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "measurement_date_utc": "2026-11-16",
+  "hardware": "Supplied DIM16 BF16 MicroMX image on sohumpc",
+  "precision_mix_order": [
+    "FP4",
+    "FP6",
+    "FP8"
+  ],
+  "mix50_percentages": [
+    50,
+    25,
+    25
+  ],
+  "mix625_percentages": [
+    62.5,
+    25,
+    12.5
+  ],
+  "scope": "One real pretrained transformer layer; no full autoregressive inference or perplexity measurement",
+  "baseline": "Previous mixed-format MicroMX implementations on the same image, not pure FP8",
+  "decode_context": {
+    "batch": 1,
+    "layer": 5,
+    "prefix_tokens": 2048,
+    "sequential_teacher_captured_tokens": 8,
+    "warmup_trials_excluded": 1
+  },
+  "timed_results": [
+    {
+      "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+      "regime": "prefill",
+      "mix": "mix50",
+      "source": "fpga",
+      "measured_trials": 5,
+      "tokens_per_trial": 64,
+      "baseline_median_cycles": 15276856,
+      "candidate_median_cycles": 13911801,
+      "speedup_vs_previous_micromx": 1.098122090734334,
+      "numeric_pass": true,
+      "evidence": {
+        "qualification_file": "hardware-prefill-reuse-tinyllama-mix50-056.json",
+        "qualification_sha256": "09059830d0f8d7f402881ca07a4fa4ff509c139d7fc0aad4a247db877a114530",
+        "run_manifest_sha256": "a4d71ada8d4e5a386a7478c0c36ed59751ac9d738294f27e3ca98cf4a77e5bfd",
+        "handoff_sha256": "6cb3ffdf3349e69093307b4fe99c1e608885b9639ba82e8d84c76e9db4fb1ea1",
+        "elf_sha256": "ac0c86db0c1a6a7df26e42ef5a98c0318d76638d612e81ba611107bc2c24385a",
+        "image_sha256": "7b45e4471880bea58c55e614606167e1d998808afc478a0151474168c965fecb",
+        "archive_sha256": "ded943ff57a07ebfdc40fcf39d805b01f7f305cf3c20214635e55ce33ff8a0c2",
+        "uart_sha256": "836845365b5401926534bea9910bedf4144a96aade133bb4430641e39d2a21c8"
+      }
+    },
+    {
+      "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+      "regime": "decode",
+      "mix": "mix50",
+      "source": "fpga",
+      "measured_trials": 5,
+      "tokens_per_trial": 8,
+      "baseline_median_cycles": 325172604,
+      "candidate_median_cycles": 266498572,
+      "speedup_vs_previous_micromx": 1.2201664029929586,
+      "numeric_pass": true,
+      "evidence": {
+        "qualification_file": "hardware-tiny-gqa-composed-mix50-064.json",
+        "qualification_sha256": "80a71de67f3cd82bff0925314141756774de68eb1e8dcf357b72658a23691a81",
+        "run_manifest_sha256": "2c04f6749e2295d378d801c9503f93f875fdc81d242e92e96276af87c16696d6",
+        "handoff_sha256": "8ffc2ad58eac8f0ae46739f551492763fa8e717a4efc4a65af96577c8a6d9b39",
+        "elf_sha256": "902f227863cd53a30b9d55d30bf18d26587c3ebb9be8b48ba3cd399167715b91",
+        "image_sha256": "7b45e4471880bea58c55e614606167e1d998808afc478a0151474168c965fecb",
+        "archive_sha256": "2958359c675a1dd40f050b06a1a9ef955e77c017e8929dfed18e3f7d9e14b8c9",
+        "uart_sha256": "eddfcd106dc78c42d13c83a970694ba1792052ff92d0d0305e536fdde98195d1"
+      },
+      "cache_inclusive_baseline_median_cycles": 354014937,
+      "cache_inclusive_candidate_median_cycles": 295319117,
+      "cache_inclusive_speedup": 1.198753878842188,
+      "reference_stage_checks": 768,
+      "same_mix_stage_checks": 768,
+      "update_checks": 144,
+      "independent_bit_mismatches": 0
+    },
+    {
+      "model": "Qwen/Qwen2.5-7B",
+      "regime": "decode",
+      "mix": "mix50",
+      "source": "fpga",
+      "measured_trials": 5,
+      "tokens_per_trial": 8,
+      "baseline_median_cycles": 600749338,
+      "candidate_median_cycles": 507472838,
+      "speedup_vs_previous_micromx": 1.1838058966221952,
+      "numeric_pass": true,
+      "evidence": {
+        "qualification_file": "hardware-qwen-gqa-composed-mix50-065.json",
+        "qualification_sha256": "9bc4c1b8d1a90af3a826ea04d8068a94ac5bed28bf996af8c11a5e86623cbde8",
+        "run_manifest_sha256": "5dac1bef131939138efa0836e6d17a8655a81be2b862422e8aecffe35841ae43",
+        "handoff_sha256": "cab391ff68bf7c2ac2d7129cdcfeda915e5b02d3f05f38959dc5a5c4400866a1",
+        "elf_sha256": "aedb03a29c206bdecbdc5546e3845fdfaab310f3f5ff999432932637b6a7dba1",
+        "image_sha256": "7b45e4471880bea58c55e614606167e1d998808afc478a0151474168c965fecb",
+        "archive_sha256": "33b4623b025f8156d35e2c4146fbc6c981bb44541db0183102ba9bf0a0e95c7b",
+        "uart_sha256": "38c4304bf458ca2b00debd8313c87697449e80c03bdc386a01974501dbdb59ed"
+      },
+      "cache_inclusive_baseline_median_cycles": 658396757,
+      "cache_inclusive_candidate_median_cycles": 565117218,
+      "cache_inclusive_speedup": 1.165062284476351,
+      "reference_stage_checks": 768,
+      "same_mix_stage_checks": 768,
+      "update_checks": 144,
+      "independent_bit_mismatches": 0
+    },
+    {
+      "model": "NousResearch/Llama-2-7b-hf",
+      "regime": "decode",
+      "mix": "mix50",
+      "source": "fpga",
+      "measured_trials": 5,
+      "tokens_per_trial": 8,
+      "baseline_median_cycles": 1159595493,
+      "candidate_median_cycles": 1000579632,
+      "speedup_vs_previous_micromx": 1.1589237437125843,
+      "numeric_pass": true,
+      "evidence": {
+        "qualification_file": "hardware-llama-composed-mix50-settle-072-v2.json",
+        "qualification_sha256": "fc3646b73bab7aa16c963bc7db2ccf4791ee8dfa3883c5eb50761f714a299f96",
+        "run_manifest_sha256": "442a9ba1816b216f39e7ae1729a23851b8615d4b86c4bfe2974ccbe07bc60922",
+        "handoff_sha256": "94eb177f6bde663238dd311bada335dde2c72080147db5f7d535a09a957923fd",
+        "elf_sha256": "c91dd79b8ccfa633dffb4ad937d2ea6bc6f68529671d6ff93dbe0d9cab3e43d7",
+        "image_sha256": "7b45e4471880bea58c55e614606167e1d998808afc478a0151474168c965fecb",
+        "archive_sha256": "8daea0f1df950a80a24da13be1cf372714aaed60be558562c5b37dc71cd810cc",
+        "uart_sha256": "434b8f3f4549e4766beffd6bd7129ba8c184b075e9d2c2962d465c1b786d7f74"
+      },
+      "cache_inclusive_baseline_median_cycles": 1421683170,
+      "cache_inclusive_candidate_median_cycles": 1215471831,
+      "cache_inclusive_speedup": 1.1696553829884684,
+      "reference_stage_checks": 768,
+      "same_mix_stage_checks": 768,
+      "update_checks": 144,
+      "independent_bit_mismatches": 0
+    }
+  ],
+  "functional_only_result": {
+    "model": "Qwen/Qwen2.5-7B",
+    "regime": "decode",
+    "mix": "mix625",
+    "physical_issue_rows": {
+      "fp4": 32,
+      "fp6": 16,
+      "fp8": 16
+    },
+    "storage_and_scale_rows": 32,
+    "physical_functional_pass": true,
+    "timing_usable": false,
+    "speedup_claim": false,
+    "performance_profile_selected": false,
+    "checks": {
+      "regions": 16,
+      "reference_checks": 128,
+      "same_mix_stage_checks": 128,
+      "update_checks": 24,
+      "guard_records": 16,
+      "all_guard_failures": 0,
+      "independent_bit_mismatches": 0
+    },
+    "evidence": {
+      "qualification_file": "hardware-qwen-band-mix625-functional-080.json",
+      "qualification_sha256": "43993ad302c8c214d45d9ab60eed7ebafc063ba9d87ef045d70e7623260c1cb4",
+      "run_manifest_sha256": "c10726c7a8c8ac294e0991363f8a202980cf5a49c9eaa17543c3b1892cca4093",
+      "handoff_sha256": "f7eb1df608c397309db7432378bb411a114a18b329caed36fb90bc9dd668499b",
+      "elf_sha256": "5b2d22fe0329ce1c8f9f357daa1afa4b939973a6289a80a4c195bb00f4aa98ad",
+      "image_sha256": "7b45e4471880bea58c55e614606167e1d998808afc478a0151474168c965fecb",
+      "archive_sha256": "3eca920a00ecc8c6e5920372b2f7b445e43a183bf2791c800b7a613ad032f1f6",
+      "uart_sha256": "72a5fdc8f75837b25484c8196b96ea7fe877f80517e9bab329d85fdf8738cf02"
+    }
+  },
+  "fp8_reference_changed": false,
+  "timing_evidence_is_for_original_measured_elfs": "Native source cleanup does not requalify a newly compiled firmware for FPGA timing",
+  "large_assets_and_raw_runs": "Stored separately; the hashes above identify the preserved qualification records and archives"
+}

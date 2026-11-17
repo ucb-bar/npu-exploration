@@ -588,3 +588,6 @@ $(foreach p,$(MXK_PWR),$(foreach d,16 32,$(foreach s,_chk,\
 .PHONY: mxk-power mxk-power-chk
 mxk-power: $(foreach p,$(MXK_PWR),$(foreach d,16 32,$(OUT)/mx_rocket/mxk_pwr_$(call mxk_pwr_w,$(p),1)_d$(d)))
 mxk-power-chk: $(foreach p,$(MXK_PWR),$(foreach d,16 32,$(OUT)/mx_rocket/mxk_pwr_$(call mxk_pwr_w,$(p),1)_d$(d)_chk))
+
+# Explicit mixed-precision library/regression targets (no default target change).
+include micromix.mk

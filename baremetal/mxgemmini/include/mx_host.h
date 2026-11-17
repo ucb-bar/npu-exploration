@@ -1,37 +1,13 @@
-// mx_host.h -- the fp32 host side of an MX layer, for baremetal C on the Rocket core.
-//
-// The mesh does matmuls. Everything else in a llama layer -- RMSNorm, SiLU, the elementwise
-// product, softmax, RoPE, the residual -- has no hardware here (the target contract declares one
-// compute unit, `mx_systolic_mesh`, `ops: [matmul]`, and there is no reduction hardware), so it
-// runs on the scalar core in fp32. This header is that side: the glue, plus the MX quantizer that
-// hands its result back to the mesh.
-//
-// The quantizer follows MXQuant's END-TO-END convention, which is what the FP8 datapath was
-// migrated to (26dc11e:planning/chain_seam_hw_notes.md section 8, and gemmini.cc's FP8
-// post-pass):
-//
-//     X    = 2^floor(log2(max(amax, FLT_EPSILON)))     per 32-element block, no `- log2_pmax` term
-//     code = e4m3(v / X)                               round to nearest, TIES TO EVEN,
-//                                                      saturating at +-448, subnormals allowed
-//
-// so a block's max lands in [1, 2) rather than [256, 512). Rounding is done by binary search over
-// the E4M3 code space, which is monotone in magnitude for a sign-magnitude format, so "nearest" is
-// exact by construction rather than a rounding-mode argument, and it costs 7 comparisons per
-// element.
-//
-// TIES TO EVEN, not away from zero -- corrected 2026-09-14. This header's job is to produce the
-// same operand bytes as the goldens, and those come from MXQuant's own `quantize_mx_block32`,
-// which rounds half to even; the datapath model rounds the same way (`fp_quantize_rne`,
-// fp8_matmul_model.py:631). The original "ties away from zero" was latent for a year because an
-// exact tie needs `v / X` to land precisely midway between two E4M3 magnitudes, and the captured
-// D = 2048 llama tensors contain none. The D = 256 slice of the SAME capture contains 95 in V
-// alone, every one encoding one code too high and cascading into every downstream mesh stage.
-// Regression: `tests/selftest_quantizer.py`, and the ties in llama_attention_small.
-//
-// These routines are NOT mirrored bit-for-bit in the Python golden -- the generated header carries
-// the golden's own codes so a test can report how far its fp32 differs, and the expectation is
-// zero, because E4M3 keeps 3 mantissa bits and absorbs a last-ulp difference between newlib and
-// numpy. See 26dc11e:planning/llama_layer_hw_plan.md section 4.
+/* Scalar FP32 helpers for transformer layers: RMSNorm, SiLU, softmax, RoPE,
+ * residuals, and MX quantization. These implement the CPU path; prefill can
+ * instead use the package's separate VPU kernels.
+ *
+ * The FP8 quantizer uses 32-element blocks and the scale
+ * 2^floor(log2(max(amax, FLT_EPSILON))), without a format-maximum correction.
+ * It rounds to nearest with ties to even, supports subnormals, and saturates
+ * the software E4M3FN codec at +/-448. The target image's supported encoding
+ * domain is a separate constraint, described in docs/micromix.md.
+ * Independent full-layer references verify the exported model captures. */
 
 #ifndef INCLUDE_MX_HOST_H
 #define INCLUDE_MX_HOST_H

@@ -104,3 +104,5 @@ Removed design records are cited in comments as `26dc11e:planning/<file>`; read 
 | [evaluate.md](docs/evaluate.md) | step 3: spike, the verdict, what each run records |
 | [cost.md](docs/cost.md) | step 4: area, power, energy and cycle models |
 | [testing.md](docs/testing.md) | the self-tests and the claim each one holds |
+| [MicroMX kernels](baremetal/mxgemmini/docs/micromix.md) | projection APIs, layer captures and native tests |
+| [MicroMX results](baremetal/mxgemmini/docs/MICROMIX_RESULTS.md) | measured hardware results and current limits |

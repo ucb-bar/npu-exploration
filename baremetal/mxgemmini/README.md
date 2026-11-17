@@ -9,6 +9,11 @@
 > FP8 / FP6-LUT / FP4 on 4×4 … 32×32 meshes, every stage bit-exact against `rtl_exact`:
 > [`README_LLAMA_MX.md`](README_LLAMA_MX.md).
 
+> **Direct MicroMX projections and reusable layer helpers:** opt-in direct FP4/FP6/FP8
+> packing, guarded prepared activations, model geometry and explicit measured mixed
+> profiles are documented in [`docs/micromix.md`](docs/micromix.md). Existing defaults
+> and the FP8 examples below are unchanged.
+
 Seven kernels, each one ELF, each carrying real captured TinyLlama weights and activations. The mesh
 does the matmuls in MX fp8 (e4m3 + E8M0); everything else — RMSNorm, RoPE, softmax, SwiGLU, the
 residual — runs in fp32 on the Rocket scalar core, because the target contract declares one compute
