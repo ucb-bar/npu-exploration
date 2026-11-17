@@ -126,8 +126,9 @@ preconditions, explicit overrides and the distinction from attention modes.
 
 ## Build and check
 
-Initialize `software/gemmini-rocc-tests` and its nested `riscv-tests`, `env`
-and `rocc-software` submodules. Set `RISCV` to a RISC-V bare-metal toolchain
+Initialize `software/gemmini-rocc-tests`, its `riscv-tests` submodule and
+`riscv-tests/env`. The MicroMX targets do not use `rocc-software`. Set `RISCV`
+to a RISC-V bare-metal toolchain
 prefix. Spike also requires `dtc` on `PATH`. The matching libgemmini must support direct E3M2 accumulation and
 full-BF16 small products.
 
